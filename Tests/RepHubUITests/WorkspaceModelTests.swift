@@ -6,6 +6,63 @@ import VersionControlCore
 
 @MainActor
 final class WorkspaceModelTests: XCTestCase {
+    func testRepeatedTabsRestoreBothSelectionsWithoutReadingProviderAgain() async throws {
+        let provider = WorkspaceFixtureProvider()
+        let model = WorkspaceModel(service: RepositoryService(providers: [provider]))
+        model.open(try makeDirectory())
+        try await waitUntil { !model.isLoading && model.patch != nil }
+        model.selectChange(FileChange(path: "Sources/New.swift", kind: .modified))
+        try await waitUntil { !model.isLoading && model.selectedPath == "Sources/New.swift" }
+        model.setHistoryVisible(true)
+        try await waitUntil { !model.isLoading && model.selectedRevisionID != nil }
+        model.selectRevisionFile(FileChange(path: "README.md", kind: .modified))
+        try await waitUntil { !model.isLoading && model.patch?.text == "revision:a1b2c3d4:README.md" }
+        let before = await provider.log.diffRequests().count
+        let filesBefore = await provider.log.changedFileRequests().count
+
+        for _ in 0..<10 {
+            model.setHistoryVisible(false)
+            XCTAssertEqual(model.patch?.text, "working:Sources/New.swift")
+            XCTAssertFalse(model.isLoading)
+            model.setHistoryVisible(true)
+            XCTAssertEqual(model.patch?.text, "revision:a1b2c3d4:README.md")
+            XCTAssertFalse(model.isLoading)
+        }
+        let after = await provider.log.diffRequests().count
+        let filesAfter = await provider.log.changedFileRequests().count
+        XCTAssertEqual(before, after, "已查看的TAB往返不应再次运行版本控制差异读取")
+        XCTAssertEqual(filesBefore, filesAfter)
+        model.refresh()
+        try await waitUntil { !model.isLoading }
+        let refreshed = await provider.log.diffRequests().count
+        XCTAssertGreaterThan(refreshed, after, "显式刷新必须使阅读缓存失效")
+    }
+
+    func testUnchangedFilePreviewSurvivesTabsAndRefreshReadsNewContent() async throws {
+        let directory = try makeDirectory()
+        let file = directory.appendingPathComponent("Unchanged.txt")
+        try "initial content".write(to: file, atomically: true, encoding: .utf8)
+        let provider = WorkspaceFixtureProvider()
+        let model = WorkspaceModel(service: RepositoryService(providers: [provider]))
+        model.open(directory)
+        try await waitUntil { !model.isLoading && model.snapshot != nil }
+        model.selectWorkspaceFile(path: "Unchanged.txt")
+        try await waitUntil { !model.isLoading && model.filePreview?.text == "initial content" }
+        XCTAssertNil(model.patch)
+        model.setHistoryVisible(true)
+        try await waitUntil { !model.isLoading && model.selectedRevisionID != nil }
+        XCTAssertNil(model.filePreview)
+        model.setHistoryVisible(false)
+        XCTAssertEqual(model.filePreview?.text, "initial content")
+        XCTAssertEqual(model.selectedPath, "Unchanged.txt")
+        try "updated content".write(to: file, atomically: true, encoding: .utf8)
+        model.refresh()
+        try await waitUntil { !model.isLoading && model.filePreview?.text == "updated content" }
+        XCTAssertNil(model.selectedRevisionID)
+        let requests = await provider.log.diffRequests()
+        XCTAssertFalse(requests.contains { $0.path == "Unchanged.txt" }, "本地普通文件预览不调用VCS差异工具")
+    }
+
     func testOpenAutomaticallySelectsReadableSourceFileAndLoadsWorkingDiff() async throws {
         let provider = WorkspaceFixtureProvider()
         let model = WorkspaceModel(service: RepositoryService(providers: [provider]))

@@ -8,6 +8,9 @@ import VersionControlCore
 @MainActor
 @Observable
 public final class WorkspaceModel {
+    public let treeState = WorkspaceTreeState()
+    public let fileBrowser = WorkspaceFileBrowser()
+    public private(set) var filePreview: WorkspaceFilePreview?
     public private(set) var workspace: Workspace?
     public private(set) var snapshots: [String: BindingSnapshot] = [:]
     public private(set) var selectedBindingID: String?
@@ -48,6 +51,18 @@ public final class WorkspaceModel {
     private var operationTask: Task<Void, Never>?
     private var requestToken = 0
     private var operationToken = 0
+    private var workingSelection: ReadingSelection?
+    private var historySelection: ReadingSelection?
+
+    private struct ReadingSelection {
+        let bindingID: String
+        let reference: String?
+        let revisionID: String?
+        let path: String?
+        let files: [FileChange]
+        let patch: RepositoryPatch?
+        let preview: WorkspaceFilePreview?
+    }
 
     public init(service: RepositoryService) {
         self.service = service
@@ -87,6 +102,8 @@ public final class WorkspaceModel {
 
     public func open(_ url: URL) {
         guard !isInteractionLocked else { return }
+        invalidateReadingCache()
+        fileBrowser.setRoot(nil)
         start { [service] token in
             let workspace = try await service.open(directory: url)
             guard self.accepts(token) else { return }
@@ -99,6 +116,7 @@ public final class WorkspaceModel {
             self.selectedBindingID = workspace.bindings.first?.id
             self.historyReference = nil
             self.clearFileHistoryState()
+            self.fileBrowser.setRoot(workspace.bindings.first?.root)
             if let binding = workspace.bindings.first {
                 try await self.load(binding: binding, reference: nil, token: token)
             }
@@ -112,6 +130,9 @@ public final class WorkspaceModel {
         let reference = historyReference
         let filePath = historyFilePath
         let fileReference = historyFileReference
+        let workingPath = selectedRevisionID == nil ? selectedPath : nil
+        invalidateReadingCache()
+        fileBrowser.refresh()
         selectedRevisionID = nil
         revisionFiles = []
         selectedPath = nil
@@ -123,7 +144,10 @@ public final class WorkspaceModel {
                                                  preferredRevisionID: revisionID, token: token)
                 return
             }
-            try await self.load(binding: binding, reference: reference, token: token, readsWorkingPatch: revisionID == nil)
+            try await self.load(binding: binding, reference: reference, token: token, readsWorkingPatch: revisionID == nil && workingPath == nil)
+            if revisionID == nil, let workingPath, self.accepts(token) {
+                try await self.loadWorkingFile(path: workingPath, binding: binding, token: token)
+            }
             if let revisionID, self.accepts(token),
                let revision = self.snapshot?.revisions.first(where: { $0.id == revisionID }) ?? self.snapshot?.revisions.first {
                 self.selectedRevisionID = revision.id
@@ -136,19 +160,23 @@ public final class WorkspaceModel {
     public func setHistoryVisible(_ visible: Bool) {
         guard !isInteractionLocked else { return }
         guard isHistoryVisible != visible else { return }
+        saveReadingSelection()
+        cancelReading()
         isHistoryVisible = visible
 
         if visible {
-            selectRevision(historyRevisions.first)
+            if !restoreReadingSelection(historySelection) { selectRevision(historyRevisions.first) }
         } else {
             clearFileHistoryState()
-            selectChange(preferredFile(in: snapshot?.changes ?? []))
+            if !restoreReadingSelection(workingSelection) { selectChange(preferredFile(in: snapshot?.changes ?? [])) }
         }
     }
 
     public func selectBinding(_ binding: RepositoryBinding) {
         guard !isInteractionLocked else { return }
         guard selectedBindingID != binding.id else { return }
+        invalidateReadingCache()
+        fileBrowser.setRoot(binding.root)
         selectedBindingID = binding.id
         historyReference = nil
         clearFileHistoryState()
@@ -164,6 +192,8 @@ public final class WorkspaceModel {
 
     public func selectChange(_ change: FileChange?) {
         guard !isInteractionLocked else { return }
+        saveReadingSelection()
+        filePreview = nil
         selectedPath = change?.path
         selectedRevisionID = nil
         revisionFiles = []
@@ -171,9 +201,31 @@ public final class WorkspaceModel {
         loadPatch()
     }
 
+    /// 全部文件树复用变更差异，未修改文件显示有界的只读内容。
+    public func selectWorkspaceFile(path: String) {
+        guard !isInteractionLocked, let binding = selectedBinding,
+              let path = validatedRelativePath(path) else { return }
+        if let change = snapshot?.changes.first(where: { $0.path == path }) {
+            selectChange(change)
+            return
+        }
+        saveReadingSelection()
+        selectedPath = path
+        selectedRevisionID = nil
+        revisionFiles = []
+        patch = nil
+        filePreview = nil
+        start { [weak self] token in
+            guard let self else { return }
+            try await self.loadWorkingFile(path: path, binding: binding, token: token)
+        }
+    }
+
     /// 显示某一文件的历史。调用方可传入已删除的历史路径；只有路径本身越界时会被拒绝。
     public func showFileHistory(path: String, reference: String? = nil) {
         guard !isInteractionLocked, let binding = selectedBinding else { return }
+        saveReadingSelection()
+        filePreview = nil
         guard let path = validatedRelativePath(path) else {
             clearFileHistoryState()
             selectedRevisionID = nil
@@ -243,11 +295,15 @@ public final class WorkspaceModel {
         selectedRevisionID = nil
         revisionFiles = []
         patch = nil
-        if isHistoryVisible { selectRevision(snapshot?.revisions.first) }
+        if isHistoryVisible, !restoreReadingSelection(historySelection) { selectRevision(snapshot?.revisions.first) }
     }
 
     public func selectRevision(_ revision: Revision?) {
         guard !isInteractionLocked else { return }
+        saveReadingSelection()
+        if historyFilePath == nil, let revision, historySelection?.revisionID == revision.id,
+           restoreReadingSelection(historySelection) { return }
+        filePreview = nil
         selectedRevisionID = revision?.id
         selectedPath = nil
         revisionFiles = []
@@ -275,6 +331,8 @@ public final class WorkspaceModel {
         guard !isInteractionLocked else { return }
         guard let binding = selectedBinding else { return }
         historyReference = reference
+        historySelection = nil
+        filePreview = nil
         clearFileHistoryState()
         selectedRevisionID = nil
         selectedPath = nil
@@ -292,6 +350,7 @@ public final class WorkspaceModel {
     /// 历史文件只缩小当前修订的差异范围，不改变已选修订或工作区状态列表。
     public func selectRevisionFile(_ change: FileChange?) {
         guard !isInteractionLocked else { return }
+        filePreview = nil
         selectedPath = change?.path
         patch = nil
         guard let binding = selectedBinding,
@@ -329,6 +388,8 @@ public final class WorkspaceModel {
         guard !isInteractionLocked,
               workspace != nil,
               supports(kind, for: binding) else { return }
+
+        invalidateReadingCache()
 
         operationToken += 1
         let token = operationToken
@@ -402,6 +463,7 @@ public final class WorkspaceModel {
         guard operationToken == token else { return }
         workspace = response.workspace
         snapshots = Dictionary(uniqueKeysWithValues: response.snapshots.map { ($0.binding.id, $0) })
+        fileBrowser.refresh()
         await restoreSelectionAfterOperation(
             service: service,
             preferredBindingID: preferredBindingID,
@@ -448,6 +510,7 @@ public final class WorkspaceModel {
         guard let workspace else { return }
         let binding = workspace.bindings.first { $0.id == preferredBindingID } ?? workspace.bindings.first
         selectedBindingID = binding?.id
+        fileBrowser.setRoot(binding?.root)
         historyReference = reference
         historyFilePath = filePath
         historyFileReference = fileReference
@@ -492,6 +555,15 @@ public final class WorkspaceModel {
                       let revision = snapshots[binding.id]?.revisions.first(where: { $0.id == revisionID }) {
                 try await loadRevisionAfterOperation(revision, binding: binding, service: service, token: token)
             } else {
+                if let path, !snapshots[binding.id, default: BindingSnapshot(binding: binding)].changes.contains(where: { $0.path == path }),
+                   FileManager.default.fileExists(atPath: binding.root.appendingPathComponent(path).path) {
+                    let preview = try await fileBrowser.preview(path: path)
+                    guard operationToken == token, selectedBindingID == binding.id else { return }
+                    selectedRevisionID = nil
+                    selectedPath = path
+                    filePreview = preview
+                    return
+                }
                 let candidate = path.flatMap { requested in
                     snapshots[binding.id]?.changes.first(where: { $0.path == requested })
                 } ?? preferredFile(in: snapshots[binding.id]?.changes ?? [])
@@ -556,6 +628,58 @@ public final class WorkspaceModel {
         let patch = try await service.diff(in: binding, path: file?.path, revision: revision.id)
         guard accepts(token), selectedBindingID == binding.id, selectedRevisionID == revision.id, selectedPath == file?.path else { return }
         self.patch = patch
+    }
+
+    private func loadWorkingFile(path: String, binding: RepositoryBinding, token: Int) async throws {
+        selectedRevisionID = nil
+        selectedPath = path
+        revisionFiles = []
+        if snapshot?.changes.contains(where: { $0.path == path }) == true {
+            let value = try await service.diff(in: binding, path: path, revision: nil)
+            guard accepts(token), selectedBindingID == binding.id, selectedRevisionID == nil, selectedPath == path else { return }
+            filePreview = nil
+            patch = value
+        } else {
+            let value = try await fileBrowser.preview(path: path)
+            guard accepts(token), selectedBindingID == binding.id, selectedRevisionID == nil, selectedPath == path else { return }
+            patch = nil
+            filePreview = value
+        }
+    }
+
+    /// TAB 往返只恢复阅读状态；显式刷新、更新和切源才使缓存失效。
+    private func saveReadingSelection() {
+        guard !isLoading, errorMessage == nil, historyFilePath == nil, let bindingID = selectedBindingID else { return }
+        let selection = ReadingSelection(bindingID: bindingID, reference: historyReference,
+                                         revisionID: selectedRevisionID, path: selectedPath,
+                                         files: revisionFiles, patch: patch, preview: filePreview)
+        if selectedRevisionID != nil { historySelection = selection }
+        else { workingSelection = selection }
+    }
+
+    private func restoreReadingSelection(_ selection: ReadingSelection?) -> Bool {
+        guard let selection, selection.bindingID == selectedBindingID,
+              selection.revisionID == nil || selection.reference == historyReference else { return false }
+        cancelReading()
+        selectedRevisionID = selection.revisionID
+        selectedPath = selection.path
+        revisionFiles = selection.files
+        patch = selection.patch
+        filePreview = selection.preview
+        errorMessage = nil
+        return true
+    }
+
+    private func invalidateReadingCache() {
+        workingSelection = nil
+        historySelection = nil
+        filePreview = nil
+    }
+
+    private func cancelReading() {
+        workTask?.cancel()
+        requestToken += 1
+        isLoading = false
     }
 
     private func reloadFileHistory(

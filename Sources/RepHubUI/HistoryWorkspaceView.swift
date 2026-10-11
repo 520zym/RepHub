@@ -26,6 +26,7 @@ struct HistoryWorkspaceView: View {
                         search: $branchSearch,
                         palette: palette,
                         isCompact: !showAsMainView,
+                        treeState: model.treeState,
                         selectReference: model.selectHistoryReference
                     )
                 } trailing: {
@@ -136,13 +137,18 @@ private struct HistoryBranchSidebar: View {
     @Binding var search: String
     let palette: AppPalette
     let isCompact: Bool
+    @Bindable var treeState: WorkspaceTreeState
     let selectReference: (String?) -> Void
+    @State private var localTree: [PathTreeNode<BranchReference>] = []
+    @State private var remoteTree: [PathTreeNode<BranchReference>] = []
+    @State private var tagTree: [PathTreeNode<BranchReference>] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text("分支").font(.system(size: 13, weight: .semibold))
                 Spacer()
+                TreeExpansionControls(directoryIDs: directoryIDs, collapsed: $treeState.branchCollapsed, palette: palette)
             }
             .padding(.horizontal, 14).frame(height: 39)
             WorkbenchSearchField("搜索分支或标签…", text: $search, palette: palette)
@@ -150,9 +156,9 @@ private struct HistoryBranchSidebar: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
                     referenceButton(title: "所有分支", icon: "point.3.connected.trianglepath.dotted", reference: nil)
-                    referenceSection("本地", kind: .local, icon: "arrow.triangle.branch")
-                    referenceSection("远端", kind: .remote, icon: "network")
-                    referenceSection("标签", kind: .tag, icon: "tag")
+                    referenceSection("本地", roots: localTree, icon: "arrow.triangle.branch")
+                    referenceSection("远端", roots: remoteTree, icon: "network")
+                    referenceSection("标签", roots: tagTree, icon: "tag")
                 }
                 .padding(10)
             }
@@ -161,24 +167,46 @@ private struct HistoryBranchSidebar: View {
         .frame(minWidth: isCompact ? 180 : 210, idealWidth: isCompact ? 190 : 220, maxWidth: isCompact ? 200 : 230, maxHeight: .infinity, alignment: .topLeading)
         .background(palette.sidebar)
         .accessibilityElement(children: .contain)
+        .task(id: branchSignature) { rebuildTrees() }
     }
 
     @ViewBuilder
-    private func referenceSection(_ title: String, kind: BranchReference.Kind, icon: String) -> some View {
-        let references = filteredReferences.filter { $0.kind == kind }
-        if !references.isEmpty {
+    private func referenceSection(_ title: String, roots: [PathTreeNode<BranchReference>], icon: String) -> some View {
+        if containsMatch(roots) {
             VStack(alignment: .leading, spacing: 3) {
                 Label(title, systemImage: icon).font(.caption.weight(.semibold)).foregroundStyle(palette.secondaryText)
-                ForEach(references) { reference in
-                    referenceButton(title: reference.name, icon: symbol(for: reference), reference: reference.name)
-                }
+                BranchTreeRows(roots: roots, search: search, selectedReference: selectedReference, collapsed: $treeState.branchCollapsed, palette: palette, selectReference: selectReference)
             }
         }
     }
 
-    private var filteredReferences: [BranchReference] {
+    private var directoryIDs: [String] {
+        localTree.flatMap(\.directoryIDs) + remoteTree.flatMap(\.directoryIDs) + tagTree.flatMap(\.directoryIDs)
+    }
+
+    private var branchSignature: String {
+        (snapshot?.branches ?? []).map { "\($0.kind.rawValue):\($0.name):\($0.revisionID)" }.joined(separator: "\u{1F}")
+    }
+
+    private func rebuildTrees() {
+        let branches = snapshot?.branches ?? []
+        localTree = makeTree(branches, kind: .local)
+        remoteTree = makeTree(branches, kind: .remote)
+        tagTree = makeTree(branches, kind: .tag)
+    }
+
+    private func makeTree(_ branches: [BranchReference], kind: BranchReference.Kind) -> [PathTreeNode<BranchReference>] {
+        PathTree.make(branches.filter { $0.kind == kind }.map {
+            PathTreeElement(id: $0.id, path: $0.name, payload: $0)
+        }, namespace: "branch/\(kind.rawValue)")
+    }
+
+    private func containsMatch(_ roots: [PathTreeNode<BranchReference>]) -> Bool {
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return (snapshot?.branches ?? []).filter { query.isEmpty || $0.name.lowercased().contains(query) }
+        guard !query.isEmpty else { return !roots.isEmpty }
+        return roots.contains { node in
+            (node.payload?.name.localizedCaseInsensitiveContains(query) == true) || containsMatch(node.children)
+        }
     }
 
     private func referenceButton(title: String, icon: String, reference: String?) -> some View {
@@ -193,8 +221,102 @@ private struct HistoryBranchSidebar: View {
         .help(reference == nil ? "显示已加载的全部提交" : "仅按该引用重新读取历史，不会切换工作副本")
     }
 
-    private func symbol(for reference: BranchReference) -> String {
-        switch reference.kind { case .local: "arrow.triangle.branch"; case .remote: "network"; case .tag: "tag" }
+}
+
+private struct BranchTreeRows: View {
+    let roots: [PathTreeNode<BranchReference>]
+    let search: String
+    let selectedReference: String?
+    @Binding var collapsed: Set<String>
+    let palette: AppPalette
+    let selectReference: (String?) -> Void
+
+    var body: some View {
+        ForEach(roots) { node in
+            BranchTreeNodeView(
+                node: node,
+                depth: 0,
+                search: search,
+                selectedReference: selectedReference,
+                collapsed: $collapsed,
+                palette: palette,
+                selectReference: selectReference
+            )
+        }
+    }
+}
+
+private struct BranchTreeNodeView: View {
+    let node: PathTreeNode<BranchReference>
+    let depth: Int
+    let search: String
+    let selectedReference: String?
+    @Binding var collapsed: Set<String>
+    let palette: AppPalette
+    let selectReference: (String?) -> Void
+
+    var body: some View {
+        if isVisible(node) {
+            Button {
+                if node.isDirectory {
+                    toggle(node.id)
+                } else if let reference = node.payload {
+                    selectReference(reference.name)
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: node.isDirectory ? (isExpanded(node) ? "chevron.down" : "chevron.right") : "arrow.triangle.branch")
+                        .font(.system(size: 9, weight: .semibold))
+                        .frame(width: 11)
+                    if node.isDirectory {
+                        Image(systemName: "folder").foregroundStyle(palette.accent).frame(width: 14)
+                    }
+                    Text(node.title).lineLimit(1).truncationMode(.middle)
+                    Spacer(minLength: 0)
+                    if let reference = node.payload, reference.isCurrent {
+                        Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)).foregroundStyle(palette.accent)
+                    }
+                }
+                .font(.system(size: 12))
+                .padding(.leading, 8 + CGFloat(depth) * 12).padding(.trailing, 7)
+                .frame(maxWidth: .infinity, minHeight: 27, alignment: .leading)
+                .background(isSelected(node) ? palette.selection : .clear, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .help(node.payload?.name ?? node.title)
+            .accessibilityLabel(node.payload?.name ?? node.id)
+            if node.isDirectory, isExpanded(node) {
+                ForEach(node.children) { child in
+                    BranchTreeNodeView(
+                        node: child,
+                        depth: depth + 1,
+                        search: search,
+                        selectedReference: selectedReference,
+                        collapsed: $collapsed,
+                        palette: palette,
+                        selectReference: selectReference
+                    )
+                }
+            }
+        }
+    }
+
+    private func isSelected(_ node: PathTreeNode<BranchReference>) -> Bool {
+        node.payload?.name == selectedReference
+    }
+
+    private func isVisible(_ node: PathTreeNode<BranchReference>) -> Bool {
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !query.isEmpty else { return true }
+        return node.payload?.name.localizedCaseInsensitiveContains(query) == true || node.children.contains(where: isVisible)
+    }
+
+    private func isExpanded(_ node: PathTreeNode<BranchReference>) -> Bool {
+        !collapsed.contains(node.id) || !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func toggle(_ id: String) {
+        if collapsed.contains(id) { collapsed.remove(id) } else { collapsed.insert(id) }
     }
 }
 
@@ -415,6 +537,7 @@ private struct HistoryRevisionInspector: View {
     let isCompact: Bool
     @State private var issueDetailsExpanded = false
     @State private var messageDetailsExpanded = false
+    @State private var revisionTree: [PathTreeNode<FileChange>] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: isCompact ? 7 : 12) {
@@ -453,8 +576,13 @@ private struct HistoryRevisionInspector: View {
                         .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
                         .disabled(true).help("AI 审查当前不可用")
                 }
-                Text(model.historyFilePath == nil ? "变更的文件  \(model.revisionFiles.count)" : "历史文件")
-                    .font(.subheadline.weight(.semibold)).padding(.top, 8)
+                HStack {
+                    Text(model.historyFilePath == nil ? "变更的文件  \(model.revisionFiles.count)" : "历史文件")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    TreeExpansionControls(directoryIDs: revisionTree.flatMap(\.directoryIDs), collapsed: revisionCollapsed, palette: palette)
+                }
+                .padding(.top, 8)
                 revisionFiles
             } else {
                 ContentUnavailableView("选择一个提交", systemImage: "arrowshape.turn.up.right")
@@ -465,6 +593,7 @@ private struct HistoryRevisionInspector: View {
         .padding(isCompact ? 10 : 14).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(palette.sidebar.opacity(0.45))
         .background(palette.surface)
+        .task(id: revisionTreeSignature) { rebuildRevisionTree() }
     }
 
     private var selectedRevision: Revision? {
@@ -506,45 +635,158 @@ private struct HistoryRevisionInspector: View {
     }
 
     private var revisionFiles: some View {
-        List(selection: Binding(get: { model.selectedPath }, set: { path in
-            model.selectRevisionFile(model.revisionFiles.first(where: { $0.path == path }))
-        })) {
-            ForEach(model.revisionFiles) { change in
-                HStack(spacing: 7) {
-                    if model.historyFilePath == nil {
-                        Text(change.kind.symbol).font(.caption2.weight(.bold)).foregroundStyle(changeColor(change.kind))
-                            .padding(.horizontal, 4).padding(.vertical, 2)
-                            .background(changeColor(change.kind).opacity(0.14), in: Capsule())
-                            .frame(width: 20)
-                    } else {
-                        Image(systemName: "doc.text")
-                            .font(.caption)
-                            .foregroundStyle(palette.secondaryText)
-                            .frame(width: 20)
-                    }
-                    Text(change.name).lineLimit(1)
-                    Spacer(minLength: 0)
-                }
-                .tag(Optional(change.path)).help(change.path)
-                .contextMenu {
-                    Button("查看文件历史", systemImage: "clock.arrow.circlepath") {
-                        let entry = model.historyFileEntries.first {
-                            $0.revision.id == model.selectedRevisionID && $0.path == change.path
-                        }
-                        model.showFileHistory(path: change.path, reference: entry?.pegRevision ?? model.selectedRevisionID)
-                    }
-                }
-                .listRowSeparator(.hidden)
-                .listRowBackground(Color.clear)
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 2) {
+                RevisionFileTreeRows(
+                    roots: revisionTree,
+                    collapsed: revisionCollapsed,
+                    selectedPath: model.selectedPath,
+                    isFileHistory: model.historyFilePath != nil,
+                    palette: palette,
+                    select: model.selectRevisionFile,
+                    showHistory: showHistory
+                )
             }
+            .padding(.vertical, 3)
         }
-        .listStyle(.plain)
-        .scrollContentBackground(.hidden)
         .frame(maxHeight: .infinity)
     }
 
+    private var revisionTreeSignature: String {
+        "\(model.selectedRevisionID ?? "")|\(model.historyFilePath ?? "")|" + model.revisionFiles.map { "\($0.path):\($0.kind.rawValue)" }.joined(separator: "\u{1F}")
+    }
+
+    private var revisionCollapsed: Binding<Set<String>> {
+        Binding(get: { model.treeState.revisionCollapsed }, set: { model.treeState.revisionCollapsed = $0 })
+    }
+
+    private func rebuildRevisionTree() {
+        revisionTree = PathTree.make(model.revisionFiles.map {
+            PathTreeElement(id: $0.path, path: $0.path, payload: $0)
+        }, namespace: "revision")
+    }
+
+    private func showHistory(_ change: FileChange) {
+        let entry = model.historyFileEntries.first {
+            $0.revision.id == model.selectedRevisionID && $0.path == change.path
+        }
+        model.showFileHistory(path: change.path, reference: entry?.pegRevision ?? model.selectedRevisionID)
+    }
+
+}
+
+private struct RevisionFileTreeRows: View {
+    let roots: [PathTreeNode<FileChange>]
+    @Binding var collapsed: Set<String>
+    let selectedPath: String?
+    let isFileHistory: Bool
+    let palette: AppPalette
+    let select: (FileChange?) -> Void
+    let showHistory: (FileChange) -> Void
+
+    var body: some View {
+        ForEach(roots) { node in
+            RevisionFileTreeNodeView(
+                node: node,
+                depth: 0,
+                collapsed: $collapsed,
+                selectedPath: selectedPath,
+                isFileHistory: isFileHistory,
+                palette: palette,
+                select: select,
+                showHistory: showHistory
+            )
+        }
+    }
+}
+
+private struct RevisionFileTreeNodeView: View {
+    let node: PathTreeNode<FileChange>
+    let depth: Int
+    @Binding var collapsed: Set<String>
+    let selectedPath: String?
+    let isFileHistory: Bool
+    let palette: AppPalette
+    let select: (FileChange?) -> Void
+    let showHistory: (FileChange) -> Void
+
+    var body: some View {
+        Button {
+            if node.isDirectory { toggle(node.id) }
+            else { select(node.payload) }
+        } label: {
+            HStack(spacing: 7) {
+                if node.isDirectory {
+                    Image(systemName: isExpanded(node) ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold)).frame(width: 9)
+                    Image(systemName: "folder").foregroundStyle(palette.accent).frame(width: 15)
+                } else {
+                    Color.clear.frame(width: 9, height: 1)
+                    statusMark(for: node.payload).frame(width: 15)
+                }
+                Text(node.title).lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 0)
+            }
+            .font(.system(size: 12))
+            .padding(.leading, 8 + CGFloat(depth) * 13).padding(.trailing, 8)
+            .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+            .background(isSelected(node) ? palette.selection : .clear, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .help(node.payload?.path ?? node.title)
+        .accessibilityLabel(node.payload?.path ?? node.id)
+        .contextMenu {
+            if let change = node.payload {
+                Button("查看文件历史", systemImage: "clock.arrow.circlepath") { showHistory(change) }
+            }
+        }
+        if node.isDirectory, isExpanded(node) {
+            ForEach(node.children) { child in
+                RevisionFileTreeNodeView(
+                    node: child,
+                    depth: depth + 1,
+                    collapsed: $collapsed,
+                    selectedPath: selectedPath,
+                    isFileHistory: isFileHistory,
+                    palette: palette,
+                    select: select,
+                    showHistory: showHistory
+                )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func statusMark(for change: FileChange?) -> some View {
+        if isFileHistory {
+            Image(systemName: "doc.text").font(.caption).foregroundStyle(palette.secondaryText)
+        } else if let change {
+            Text(change.kind.symbol)
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(changeColor(change.kind))
+                .padding(.horizontal, 4).padding(.vertical, 2)
+                .background(changeColor(change.kind).opacity(0.14), in: Capsule())
+        }
+    }
+
+    private func isSelected(_ node: PathTreeNode<FileChange>) -> Bool {
+        node.payload?.path == selectedPath
+    }
+
+    private func isExpanded(_ node: PathTreeNode<FileChange>) -> Bool {
+        !collapsed.contains(node.id)
+    }
+
+    private func toggle(_ id: String) {
+        if collapsed.contains(id) { collapsed.remove(id) } else { collapsed.insert(id) }
+    }
+
     private func changeColor(_ kind: FileChangeKind) -> Color {
-        switch kind { case .added, .copied: palette.added; case .deleted: palette.removed; default: palette.accent }
+        switch kind {
+        case .added, .copied: palette.added
+        case .deleted, .conflicted: palette.removed
+        default: palette.accent
+        }
     }
 }
 
