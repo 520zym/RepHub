@@ -86,9 +86,20 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryProvide
         let tlsMode = try await probeRemoteTLSMode(address)
         try Task.checkCancellation()
 
-        await progress(RepositoryOperationProgress("检出 SVN 工作副本…"))
+        await progress(RepositoryOperationProgress("检出 SVN 工作副本…", detail: "等待 SVN 返回已处理的文件…"))
         let command = ["--non-interactive", "--no-auth-cache", "checkout", "--ignore-externals", svnRemoteTarget(address), destination.path]
-        let result = try await runRemoteWrite(command, remoteURL: address, tlsMode: tlsMode, timeout: 600)
+        let reporter = SVNTransferProgressReporter(root: destination, operationName: "正在检出 SVN…", progress: progress)
+        let output: CommandOutputHandler = { lines in
+            await reporter.receive(lines: lines.compactMap { $0.stream == .stdout ? $0.text : nil })
+        }
+        let result: CommandResult
+        do {
+            result = try await runRemoteWrite(command, remoteURL: address, tlsMode: tlsMode, timeout: 600, onOutput: output)
+            await reporter.finish()
+        } catch {
+            await reporter.finish()
+            throw error
+        }
         _ = try requireSuccess(result, tool: "svn")
         try Task.checkCancellation()
         await progress(RepositoryOperationProgress("SVN 检出完成。"))
@@ -367,10 +378,27 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryProvide
         let tlsMode = try await probeUpdateTLSMode(in: binding)
         try Task.checkCancellation()
 
-        await progress(RepositoryOperationProgress("更新 SVN 工作副本…"))
+        await progress(RepositoryOperationProgress("更新 SVN 工作副本…", detail: "等待 SVN 返回已处理的文件…"))
         // `svn update` 本身不支持 --xml；CommandRunner 固定英文 locale，下面只读取其稳定的状态列。
         let command = ["--non-interactive", "--no-auth-cache", "update", "--ignore-externals", "--accept", "postpone"]
-        let updateResult = try await runUpdate(command, directory: binding.root, remoteURL: binding.remoteURL, tlsMode: tlsMode)
+        let reporter = SVNTransferProgressReporter(root: binding.root, operationName: "正在更新 SVN…", progress: progress)
+        let output: CommandOutputHandler = { lines in
+            await reporter.receive(lines: lines.compactMap { $0.stream == .stdout ? $0.text : nil })
+        }
+        let updateResult: CommandResult
+        do {
+            updateResult = try await runUpdate(
+                command,
+                directory: binding.root,
+                remoteURL: binding.remoteURL,
+                tlsMode: tlsMode,
+                onOutput: output
+            )
+            await reporter.finish()
+        } catch {
+            await reporter.finish()
+            throw error
+        }
         _ = try requireSuccess(updateResult, tool: "svn")
         try Task.checkCancellation()
 
@@ -454,29 +482,31 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryProvide
     }
 
     private func runRemoteWrite(
-        _ command: [String], remoteURL: String, tlsMode: SVNAutomaticTLSFallback.Mode, timeout: TimeInterval
+        _ command: [String], remoteURL: String, tlsMode: SVNAutomaticTLSFallback.Mode, timeout: TimeInterval,
+        onOutput: CommandOutputHandler? = nil
     ) async throws -> CommandResult {
         let directory = FileManager.default.temporaryDirectory
         switch tlsMode {
         case .modern:
-            return try await runRemoteCommand(command, directory: directory, remoteURL: remoteURL, configuration: nil, timeout: timeout)
+            return try await runRemoteCommand(command, directory: directory, remoteURL: remoteURL, configuration: nil, timeout: timeout, onOutput: onOutput)
         case .legacyCompatible:
             try await SVNOpenSSLRuntime.shared.requireOpenSSL3(using: runner)
             return try await SVNTLSConfiguration.withLegacyCompatibleConfiguration { configuration in
-                try await runRemoteCommand(command, directory: directory, remoteURL: remoteURL, configuration: configuration, timeout: timeout)
+                try await runRemoteCommand(command, directory: directory, remoteURL: remoteURL, configuration: configuration, timeout: timeout, onOutput: onOutput)
             }
         }
     }
 
     private func runRemoteCommand(
-        _ arguments: [String], directory: URL, remoteURL: String?, configuration: URL?, timeout: TimeInterval = 20
+        _ arguments: [String], directory: URL, remoteURL: String?, configuration: URL?, timeout: TimeInterval = 20,
+        onOutput: CommandOutputHandler? = nil
     ) async throws -> CommandResult {
         guard let remoteURL, let credential = await credentials.credential(for: remoteURL) else {
             // 获取写操作的时限不能被测试注入的只读执行器悄然缩回默认 20 秒。
-            if timeout != 20 {
+            if timeout != 20 || onOutput != nil {
                 return try await runner.run(
                     executable: "svn", arguments: arguments, directory: directory,
-                    timeout: timeout, opensslConfiguration: configuration
+                    timeout: timeout, opensslConfiguration: configuration, onOutput: onOutput
                 )
             }
             return try await commandExecutor(arguments, directory, configuration)
@@ -490,7 +520,8 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryProvide
             directory: directory,
             timeout: timeout,
             opensslConfiguration: configuration,
-            standardInput: Data((credential.password + "\n").utf8)
+            standardInput: Data((credential.password + "\n").utf8),
+            onOutput: onOutput
         )
     }
 
@@ -579,17 +610,18 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryProvide
     }
 
     private func runUpdate(
-        _ arguments: [String], directory: URL, remoteURL: String?, tlsMode: SVNAutomaticTLSFallback.Mode
+        _ arguments: [String], directory: URL, remoteURL: String?, tlsMode: SVNAutomaticTLSFallback.Mode,
+        onOutput: CommandOutputHandler? = nil
     ) async throws -> CommandResult {
         switch tlsMode {
         case .modern:
-            return try await runRemoteCommand(arguments, directory: directory, remoteURL: remoteURL, configuration: nil, timeout: 120)
+            return try await runRemoteCommand(arguments, directory: directory, remoteURL: remoteURL, configuration: nil, timeout: 120, onOutput: onOutput)
         case .legacyCompatible:
             try await SVNOpenSSLRuntime.shared.requireOpenSSL3(using: runner)
             return try await SVNTLSConfiguration.withLegacyCompatibleConfiguration { configuration in
                 try await runRemoteCommand(
                     arguments, directory: directory, remoteURL: remoteURL,
-                    configuration: configuration, timeout: 120
+                    configuration: configuration, timeout: 120, onOutput: onOutput
                 )
             }
         }

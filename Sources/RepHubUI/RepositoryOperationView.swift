@@ -156,24 +156,21 @@ struct RepositoryOperationView: View {
 
     private var progressContent: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 10) {
-                ProgressView().controlSize(.small)
-                Text(model.operationProgressMessage.isEmpty ? "正在执行操作…" : model.operationProgressMessage)
-                    .font(.system(size: 13, weight: .medium))
-            }
+            RepositoryTransferProgressView(
+                progress: model.operationTransferProgress,
+                palette: palette,
+                source: model.operationBinding?.root.path,
+                destination: nil,
+                isCancelling: model.isOperationCancelling,
+                cancelTitle: "取消操作",
+                cancel: model.cancelOperation
+            )
             Text(model.isOperationCancelling
-                 ? "取消不会回滚已经完成的远端或工作区步骤。正在读取真实状态，请勿关闭窗口或重复操作。"
-                 : "正在执行所选操作；完成后会重新读取工作区状态。")
-                .font(.system(size: 12)).foregroundStyle(palette.secondaryText)
-                .fixedSize(horizontal: false, vertical: true)
-            HStack {
-                Spacer()
-                Button(model.isOperationCancelling ? "正在取消…" : "取消操作", action: model.cancelOperation)
-                    .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary))
-                    .disabled(model.isOperationCancelling)
-            }
+                 ? "取消不会回滚已经完成的远端或工作区步骤；正在读取真实状态。"
+                 : "当前阶段完成后会重新读取工作区状态。")
+                .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
         }
-        .padding(22).frame(minHeight: 190, alignment: .topLeading)
+        .padding(22).frame(minHeight: 290, alignment: .topLeading)
     }
 
     private func resultContent(_ result: RepositoryOperationResult) -> some View {
@@ -185,63 +182,79 @@ struct RepositoryOperationView: View {
                     .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if result.outcome == .cancelled {
-                Text("取消不会回滚已完成的步骤；下方状态为取消后重新读取的工作区结果。")
-                    .font(.system(size: 12)).foregroundStyle(palette.secondaryText)
-            }
-            if !model.operationRefreshIssues.isEmpty {
-                VStack(alignment: .leading, spacing: 5) {
-                    Label("操作已结束，但重新读取部分来源时出现问题", systemImage: "exclamationmark.triangle")
-                        .font(.system(size: 12, weight: .medium))
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 5) {
-                            ForEach(model.operationRefreshIssues, id: \.self) { issue in
-                                Text(issue)
-                                    .font(.system(size: 11))
+            ScrollView {
+                VStack(alignment: .leading, spacing: 15) {
+                    if result.outcome == .cancelled {
+                        Text("取消不会回滚已完成的步骤；下方状态为取消后重新读取的工作区结果。")
+                            .font(.system(size: 12)).foregroundStyle(palette.secondaryText)
+                    }
+                    if !model.operationRefreshIssues.isEmpty {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Label("操作已结束，但重新读取部分来源时出现问题", systemImage: "exclamationmark.triangle")
+                                .font(.system(size: 12, weight: .medium))
+                            ScrollView {
+                                LazyVStack(alignment: .leading, spacing: 5) {
+                                    ForEach(model.operationRefreshIssues, id: \.self) { issue in
+                                        Text(issue)
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(palette.secondaryText)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                }
+                            }
+                            .frame(maxHeight: 96)
+                        }
+                        .padding(11)
+                        .background(palette.removed.opacity(0.10), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+                    if !result.changedFiles.isEmpty {
+                        VStack(alignment: .leading, spacing: 7) {
+                            Text("涉及文件 \(result.changedFiles.count)").font(.system(size: 12, weight: .medium))
+                            ScrollView {
+                                LazyVStack(alignment: .leading, spacing: 3) {
+                                    ForEach(result.changedFiles) { file in
+                                        HStack(spacing: 8) {
+                                            Text(file.kind.symbol).font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                                .foregroundStyle(file.kind == .deleted || file.kind == .conflicted ? palette.removed : palette.accent)
+                                            Text(file.path).lineLimit(1).truncationMode(.middle)
+                                        }
+                                        .font(.system(size: 12)).frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+                                }
+                            }.frame(maxHeight: 120)
+                        }
+                        .padding(12).background(palette.sidebar.opacity(0.65), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+                    if !model.operationTransferProgress.records.isEmpty {
+                        RepositoryTransferProgressView(
+                            progress: model.operationTransferProgress,
+                            palette: palette,
+                            source: model.operationBinding?.root.path,
+                            destination: nil,
+                            isCancelling: false,
+                            cancelTitle: "",
+                            cancel: nil
+                        )
+                    }
+                    if !result.details.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        DisclosureGroup("查看详情") {
+                            ScrollView(.vertical) {
+                                Text(result.details)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .textSelection(.enabled)
                                     .foregroundStyle(palette.secondaryText)
                                     .fixedSize(horizontal: false, vertical: true)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.trailing, 4)
                             }
+                            .frame(maxHeight: 180)
+                            .padding(.top, 8)
                         }
+                        .font(.system(size: 12, weight: .medium))
                     }
-                    .frame(maxHeight: 96)
                 }
-                .padding(11)
-                .background(palette.removed.opacity(0.10), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
-            if !result.changedFiles.isEmpty {
-                VStack(alignment: .leading, spacing: 7) {
-                    Text("涉及文件 \(result.changedFiles.count)").font(.system(size: 12, weight: .medium))
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 3) {
-                            ForEach(result.changedFiles) { file in
-                                HStack(spacing: 8) {
-                                    Text(file.kind.symbol).font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                        .foregroundStyle(file.kind == .deleted || file.kind == .conflicted ? palette.removed : palette.accent)
-                                    Text(file.path).lineLimit(1).truncationMode(.middle)
-                                }
-                                .font(.system(size: 12)).frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                        }
-                    }.frame(maxHeight: 120)
-                }
-                .padding(12).background(palette.sidebar.opacity(0.65), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            }
-            if !result.details.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                DisclosureGroup("查看详情") {
-                    ScrollView(.vertical) {
-                        Text(result.details)
-                            .font(.system(size: 11, design: .monospaced))
-                            .textSelection(.enabled)
-                            .foregroundStyle(palette.secondaryText)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.trailing, 4)
-                    }
-                    .frame(maxHeight: 180)
-                    .padding(.top, 8)
-                }
-                .font(.system(size: 12, weight: .medium))
-            }
+            .frame(maxHeight: 410, alignment: .topLeading)
             HStack { Spacer(); Button("完成", action: dismiss).buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary)) }
         }
         .padding(22).frame(minHeight: 190, alignment: .topLeading)

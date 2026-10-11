@@ -76,61 +76,85 @@ struct RepositoryAcquisitionView: View {
         .padding(22).frame(minHeight: 205, alignment: .topLeading)
     }
 
-    private var remoteContent: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 15) {
-                if model.isLoadingOptions {
-                    HStack(spacing: 8) { ProgressView().controlSize(.small); Text("正在准备版本控制方式…") }
-                        .font(.system(size: 12)).foregroundStyle(palette.secondaryText)
-                } else if !model.options.isEmpty {
-                    WorkbenchSegmentedPicker(
-                        title: "远程仓库类型",
-                        selection: providerBinding,
-                        options: model.options.map { .init($0.providerID, $0.title) },
-                        palette: palette
-                    )
-                    .disabled(model.isAcquiring)
-                }
-
-                field("远程地址") {
-                    TextField(model.supportsBrowsing ? "https://server/svn/repository" : "https://server/owner/repository.git", text: $model.remoteURL)
-                        .textFieldStyle(.plain).textSelection(.enabled)
-                        .onChange(of: model.remoteURL) { _, _ in model.remoteLocationChanged() }
+    @ViewBuilder private var remoteContent: some View {
+        if model.isAcquiring {
+            acquisitionProgressContent
+        } else {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 15) {
+                    if model.isLoadingOptions {
+                        HStack(spacing: 8) { ProgressView().controlSize(.small); Text("正在准备版本控制方式…") }
+                            .font(.system(size: 12)).foregroundStyle(palette.secondaryText)
+                    } else if !model.options.isEmpty {
+                        WorkbenchSegmentedPicker(
+                            title: "远程仓库类型",
+                            selection: providerBinding,
+                            options: model.options.map { .init($0.providerID, $0.title) },
+                            palette: palette
+                        )
                         .disabled(model.isAcquiring)
-                }
-
-                if model.supportsCredentials {
-                    DisclosureGroup("需要认证") {
-                        VStack(spacing: 9) {
-                            inlineField("用户名", text: $model.username)
-                                .onChange(of: model.username) { _, _ in model.remoteLocationChanged() }
-                            HStack(spacing: 10) {
-                                Text("密码").font(.system(size: 12)).foregroundStyle(palette.secondaryText).frame(width: 44, alignment: .leading)
-                                SecureField("仅本次会话使用", text: $model.password)
-                                    .textFieldStyle(.plain)
-                                    .onChange(of: model.password) { _, _ in model.remoteLocationChanged() }
-                            }
-                            .padding(.horizontal, 10).frame(height: 30)
-                            .background(palette.secondaryText.opacity(0.05), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-                        }
-                        .padding(.top, 8)
                     }
-                    .font(.system(size: 12, weight: .medium))
-                    .tint(palette.accent)
-                    .disabled(model.isAcquiring)
-                } else {
-                    Text("Git 使用系统凭据、钥匙串或 SSH 代理；不会在 RepHub 中保存密码。")
-                        .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
-                }
 
-                if model.supportsBrowsing { remoteBrowser.disabled(model.isAcquiring) } else { gitHint }
-                destinationForm.disabled(model.isAcquiring)
-                feedback
-                actionBar
+                    field("远程地址") {
+                        TextField(model.supportsBrowsing ? "https://server/svn/repository" : "https://server/owner/repository.git", text: $model.remoteURL)
+                            .textFieldStyle(.plain).textSelection(.enabled)
+                            .onChange(of: model.remoteURL) { _, _ in model.remoteLocationChanged() }
+                            .disabled(model.isAcquiring)
+                    }
+
+                    if model.supportsCredentials {
+                        DisclosureGroup("需要认证") {
+                            VStack(spacing: 9) {
+                                inlineField("用户名", text: $model.username)
+                                    .onChange(of: model.username) { _, _ in model.remoteLocationChanged() }
+                                HStack(spacing: 10) {
+                                    Text("密码").font(.system(size: 12)).foregroundStyle(palette.secondaryText).frame(width: 44, alignment: .leading)
+                                    SecureField("仅本次会话使用", text: $model.password)
+                                        .textFieldStyle(.plain)
+                                        .onChange(of: model.password) { _, _ in model.remoteLocationChanged() }
+                                }
+                                .padding(.horizontal, 10).frame(height: 30)
+                                .background(palette.secondaryText.opacity(0.05), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                            }
+                            .padding(.top, 8)
+                        }
+                        .font(.system(size: 12, weight: .medium))
+                        .tint(palette.accent)
+                        .disabled(model.isAcquiring)
+                    } else {
+                        Text("Git 使用系统凭据、钥匙串或 SSH 代理；不会在 RepHub 中保存密码。")
+                            .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
+                    }
+
+                    if model.supportsBrowsing { remoteBrowser.disabled(model.isAcquiring) } else { gitHint }
+                    destinationForm
+                    feedback
+                    actionBar
+                }
+                .padding(22)
             }
-            .padding(22)
+            .frame(height: model.supportsBrowsing ? 590 : 410)
         }
-        .frame(height: model.supportsBrowsing ? 590 : 410)
+    }
+
+    private var acquisitionProgressContent: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(model.selectedOption?.actionTitle ?? "正在获取")
+                .font(.system(size: 13, weight: .semibold))
+            RepositoryTransferProgressView(
+                progress: model.transferProgress,
+                palette: palette,
+                source: selectedSourceSummary,
+                destination: model.destinationURL?.path,
+                isCancelling: model.isCancelling,
+                cancelTitle: "取消获取",
+                cancel: model.cancel
+            )
+            Text("取消会停止当前传输；已产生的暂存内容会保留，便于检查。")
+                .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
+        }
+        .padding(22)
+        .frame(height: 480, alignment: .topLeading)
     }
 
     private var remoteBrowser: some View {
@@ -203,7 +227,7 @@ struct RepositoryAcquisitionView: View {
     }
 
     @ViewBuilder private var feedback: some View {
-        if model.isBusy {
+        if model.isBrowsing {
             HStack(spacing: 9) {
                 ProgressView().controlSize(.small)
                 Text(model.progressMessage.isEmpty ? "正在处理…" : model.progressMessage)
@@ -214,9 +238,31 @@ struct RepositoryAcquisitionView: View {
         }
         if let result = model.result, !isSuccessful(result.outcome) {
             resultMessage(result.summary, details: result.details, partial: result.partialDirectory)
+            if !model.transferProgress.records.isEmpty {
+                RepositoryTransferProgressView(
+                    progress: model.transferProgress,
+                    palette: palette,
+                    source: selectedSourceSummary,
+                    destination: model.destinationURL?.path,
+                    isCancelling: false,
+                    cancelTitle: "",
+                    cancel: nil
+                )
+            }
         }
         if let errorMessage = model.errorMessage {
             resultMessage("操作未完成", details: errorMessage, partial: nil)
+            if !model.transferProgress.records.isEmpty {
+                RepositoryTransferProgressView(
+                    progress: model.transferProgress,
+                    palette: palette,
+                    source: selectedSourceSummary,
+                    destination: model.destinationURL?.path,
+                    isCancelling: false,
+                    cancelTitle: "",
+                    cancel: nil
+                )
+            }
         }
     }
 
@@ -261,6 +307,11 @@ struct RepositoryAcquisitionView: View {
             get: { model.selectedProviderID ?? model.options.first!.providerID },
             set: { model.selectProvider($0) }
         )
+    }
+
+    private var selectedSourceSummary: String? {
+        let selected = model.selectedRemoteURL ?? model.remoteURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        return selected.isEmpty ? nil : selected.removingPercentEncoding ?? selected
     }
 
     private func field<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {

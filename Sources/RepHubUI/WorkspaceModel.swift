@@ -43,6 +43,7 @@ public final class WorkspaceModel {
     public private(set) var operationKind: RepositoryOperationKind?
     public private(set) var operationBinding: RepositoryBinding?
     public private(set) var operationProgressMessage = ""
+    public let operationTransferProgress = TransferProgressState()
     public private(set) var operationResult: RepositoryOperationResult?
     public private(set) var isOperationCancelling = false
     public var showsRepositoryAcquisition = false
@@ -412,6 +413,7 @@ public final class WorkspaceModel {
         operationBinding = binding
         operationResult = nil
         operationProgressMessage = "正在准备\(kind.title)…"
+        operationTransferProgress.begin(operationProgressMessage)
         isOperationCancelling = false
         // 读取任务不得在写操作进行时以迟到结果覆盖服务层的操作后快照。
         workTask?.cancel()
@@ -432,6 +434,7 @@ public final class WorkspaceModel {
                     await MainActor.run {
                         guard let self, self.operationToken == token else { return }
                         self.operationProgressMessage = progress.message
+                        self.operationTransferProgress.consume(progress)
                     }
                 }
                 // 取消后的调用任务带有取消标记。差异恢复必须切到独立任务，
@@ -454,11 +457,13 @@ public final class WorkspaceModel {
                 guard let self, self.operationToken == token else { return }
                 self.operationResult = RepositoryOperationResult(kind: kind, bindingID: binding.id, outcome: .cancelled, summary: "已取消，未确认是否产生远端或工作区变更。")
                 self.operationProgressMessage = self.operationResult?.summary ?? "已取消"
+                self.operationTransferProgress.finish(self.operationProgressMessage)
                 self.isOperationCancelling = false
             } catch {
                 guard let self, self.operationToken == token else { return }
                 self.operationResult = RepositoryOperationResult(kind: kind, bindingID: binding.id, outcome: .failed, summary: "操作未完成", details: error.localizedDescription)
                 self.operationProgressMessage = self.operationResult?.summary ?? "操作未完成"
+                self.operationTransferProgress.finish(self.operationProgressMessage)
                 self.isOperationCancelling = false
             }
         }
@@ -492,6 +497,7 @@ public final class WorkspaceModel {
         guard operationToken == token else { return }
         operationResult = response.result
         operationProgressMessage = response.result.summary
+        operationTransferProgress.finish(response.result.summary)
         isOperationCancelling = false
     }
 
@@ -504,6 +510,7 @@ public final class WorkspaceModel {
         guard isOperationInProgress, !isOperationCancelling else { return }
         isOperationCancelling = true
         operationProgressMessage = "正在取消并核对工作区状态…"
+        operationTransferProgress.consume(RepositoryOperationProgress(operationProgressMessage))
         operationTask?.cancel()
     }
 
@@ -512,6 +519,7 @@ public final class WorkspaceModel {
         operationKind = nil
         operationBinding = nil
         operationProgressMessage = ""
+        operationTransferProgress.clear()
         operationResult = nil
         isOperationCancelling = false
     }

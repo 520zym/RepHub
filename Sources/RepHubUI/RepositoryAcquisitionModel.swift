@@ -24,6 +24,7 @@ public final class RepositoryAcquisitionModel {
     public private(set) var isAcquiring = false
     public private(set) var isCancelling = false
     public private(set) var progressMessage = ""
+    public let transferProgress = TransferProgressState()
     public private(set) var result: RepositoryAcquisitionResult?
     public private(set) var errorMessage: String?
 
@@ -159,6 +160,7 @@ public final class RepositoryAcquisitionModel {
         isAcquiring = true
         isCancelling = false
         progressMessage = "正在准备\(option.actionTitle)…"
+        transferProgress.begin(progressMessage)
         result = nil
         errorMessage = nil
         acquisitionTask = Task { [weak self, service] in
@@ -172,6 +174,7 @@ public final class RepositoryAcquisitionModel {
                     await MainActor.run {
                         guard let self, self.requestID == token else { return }
                         self.progressMessage = progress.message
+                        self.transferProgress.consume(progress)
                     }
                 }
                 guard let self, self.requestID == token else { return }
@@ -179,6 +182,7 @@ public final class RepositoryAcquisitionModel {
                 self.isCancelling = false
                 self.result = result
                 self.progressMessage = result.summary
+                self.transferProgress.finish(result.summary)
                 if case .succeeded = result.outcome {
                     self.clearCredentials()
                     onSuccess(result.destination)
@@ -188,11 +192,13 @@ public final class RepositoryAcquisitionModel {
                 self.isAcquiring = false
                 self.isCancelling = false
                 self.errorMessage = "已取消，正在保留已产生的临时目录供检查。"
+                self.transferProgress.finish("获取已取消")
             } catch {
                 guard let self, self.requestID == token else { return }
                 self.isAcquiring = false
                 self.isCancelling = false
                 self.errorMessage = error.localizedDescription
+                self.transferProgress.finish("获取未完成")
             }
         }
     }
@@ -201,6 +207,7 @@ public final class RepositoryAcquisitionModel {
         guard isBusy, !isCancelling else { return }
         isCancelling = true
         progressMessage = isAcquiring ? "正在取消并保留已下载内容…" : "正在取消目录读取…"
+        if isAcquiring { transferProgress.consume(RepositoryOperationProgress(progressMessage)) }
         if isBrowsing && !isAcquiring {
             // 目录读取是纯读操作；立即使迟到响应失效，避免已取消的旧树重新出现。
             requestID += 1
@@ -224,6 +231,7 @@ public final class RepositoryAcquisitionModel {
         result = nil
         errorMessage = nil
         progressMessage = ""
+        transferProgress.clear()
     }
 
     private func browse(url: String, providerID: ProviderID, makesSelection: Bool) {

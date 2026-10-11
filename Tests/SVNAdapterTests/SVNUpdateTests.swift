@@ -38,7 +38,9 @@ final class SVNUpdateTests: XCTestCase {
             "updated by fixture writer\n"
         )
         let progress = await recorder.messages
-        XCTAssertEqual(progress, ["检查 SVN 工作副本…", "探测 SVN 连接…", "更新 SVN 工作副本…", "核对 SVN 工作副本状态…"])
+        XCTAssertTrue(progress.contains("正在更新 SVN…"))
+        XCTAssertEqual(progress.filter { $0 != "正在更新 SVN…" },
+                       ["检查 SVN 工作副本…", "探测 SVN 连接…", "更新 SVN 工作副本…", "核对 SVN 工作副本状态…"])
     }
 
     func testUpdateReportsConflictWithoutCleanupOrRetry() async throws {

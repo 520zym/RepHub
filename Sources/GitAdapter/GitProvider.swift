@@ -37,12 +37,14 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPr
         try validateCloneDestination(destination)
 
         await progress(RepositoryOperationProgress("正在连接 Git 远端…"))
+        let transferProgress = GitTransferProgressReporter(progress)
         let result = try await git(
             // 先只下载对象，禁止在尚未检查属性前写出工作区文件。
-            ["clone", "--no-checkout", "--no-recurse-submodules", "--", remote, destination.path],
+            ["clone", "--progress", "--no-checkout", "--no-recurse-submodules", "--", remote, destination.path],
             in: destination.deletingLastPathComponent(),
             timeout: 600,
-            restrictRemoteProtocols: true
+            restrictRemoteProtocols: true,
+            onOutput: { lines in await transferProgress.accept(lines) }
         )
         _ = try requireSuccess(result, tool: "git")
 
@@ -56,10 +58,14 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPr
             throw VersionControlError.unsupported("该 Git 仓库配置了工作区过滤器，RepHub 不会执行其外部过滤程序。")
         }
         if try await hasHead(destination) {
+            await progress(RepositoryOperationProgress("正在写入 Git 工作区文件…"))
             let checkout = try await git(
-                ["reset", "--hard", "--recurse-submodules=no", "HEAD"],
+                // `checkout --progress HEAD` 不切换当前分支，但可让 Git 报告真实的 Updating files 阶段。
+                // `core.hooksPath=/dev/null`、过滤器和子模块检查仍由 `git` 辅助方法与前置校验保证。
+                ["checkout", "--force", "--progress", "--recurse-submodules=no", "HEAD"],
                 in: destination,
-                timeout: 600
+                timeout: 600,
+                onOutput: { lines in await transferProgress.accept(lines) }
             )
             _ = try requireSuccess(checkout, tool: "git")
         }
@@ -345,7 +351,7 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPr
         try Task.checkCancellation()
 
         await progress(RepositoryOperationProgress("正在从 \(upstream.remote) 获取远端引用…"))
-        try await fetch(remote: upstream.remote, in: binding.root)
+        try await fetch(remote: upstream.remote, in: binding.root, progress: progress)
         try Task.checkCancellation()
 
         return RepositoryOperationResult(
@@ -375,7 +381,7 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPr
         try Task.checkCancellation()
 
         await progress(RepositoryOperationProgress("正在从 \(upstream.remote) 获取远端引用…"))
-        try await fetch(remote: upstream.remote, in: binding.root)
+        try await fetch(remote: upstream.remote, in: binding.root, progress: progress)
         try Task.checkCancellation()
 
         // fetch 不应改动工作文件，但其他客户端可能并发修改，因此在真正写入前再次确认。
@@ -557,11 +563,17 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPr
         }
     }
 
-    private func fetch(remote: String, in directory: URL) async throws {
+    private func fetch(
+        remote: String,
+        in directory: URL,
+        progress: @escaping RepositoryOperationProgressHandler
+    ) async throws {
+        let transferProgress = GitTransferProgressReporter(progress)
         let result = try await git(
-            ["fetch", "--no-write-fetch-head", "--no-tags", "--no-recurse-submodules", "--", remote],
+            ["fetch", "--progress", "--no-write-fetch-head", "--no-tags", "--no-recurse-submodules", "--", remote],
             in: directory,
-            timeout: 90
+            timeout: 90,
+            onOutput: { lines in await transferProgress.accept(lines) }
         )
         _ = try requireSuccess(result, tool: "git")
     }
@@ -837,7 +849,8 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPr
         _ command: [String],
         in directory: URL,
         timeout: TimeInterval = 20,
-        restrictRemoteProtocols: Bool = false
+        restrictRemoteProtocols: Bool = false,
+        onOutput: CommandOutputHandler? = nil
     ) async throws -> CommandResult {
         let safeguards = ["--no-optional-locks", "-c", "core.pager=cat", "-c", "pager.branch=false", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "submodule.recurse=false", "-c", "fetch.recurseSubmodules=false"]
         let protocolRestrictions = ["-c", "protocol.allow=never", "-c", "protocol.file.allow=always", "-c", "protocol.http.allow=always", "-c", "protocol.https.allow=always", "-c", "protocol.ssh.allow=always"]
@@ -848,7 +861,8 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPr
             arguments: safeguards + (restrictRemoteProtocols ? protocolRestrictions : [])
                 + command,
             directory: directory,
-            timeout: timeout
+            timeout: timeout,
+            onOutput: onOutput
         )
     }
 
@@ -877,6 +891,94 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPr
     }
 
     private func isEmptyRepository(_ directory: URL) async throws -> Bool { !(try await hasHead(directory)) }
+}
+
+/// Git 传输并不逐个下载工作区文件：clone/fetch 先接收 pack 对象，再在本地检出。
+/// 因此只展示 Git 能可靠报告的对象阶段和进度，避免把对象编号伪装成文件名。
+private actor GitTransferProgressReporter {
+    private let progress: RepositoryOperationProgressHandler
+    private var lastUpdate: GitTransferProgressUpdate?
+
+    init(_ progress: @escaping RepositoryOperationProgressHandler) {
+        self.progress = progress
+    }
+
+    func accept(_ lines: [CommandOutputLine]) async {
+        for line in lines {
+            guard let update = GitTransferProgressParser.parse(line.text), update != lastUpdate else { continue }
+            let stageChanged = update.stage != lastUpdate?.stage
+            lastUpdate = update
+            let records = stageChanged
+                ? [RepositoryProgressRecord(kind: .information, message: update.message)]
+                : []
+            await progress(RepositoryOperationProgress(
+                update.message,
+                fractionCompleted: update.fraction,
+                detail: update.detail,
+                records: records
+            ))
+        }
+    }
+}
+
+struct GitTransferProgressUpdate: Equatable {
+    let stage: String
+    let message: String
+    let fraction: Double?
+    let detail: String?
+}
+
+/// 只解析 Git 自身稳定的传输进度文本，避免把远端任意输出当成进度或成功提示。
+enum GitTransferProgressParser {
+    /// 只识别 Git 自身稳定的传输行。远端任意输出不会被当成成功或进度信息展示。
+    static func parse(_ rawLine: String) -> GitTransferProgressUpdate? {
+        let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        let expression = #"^(?:remote:\s*)?(Enumerating objects|Counting objects|Compressing objects|Receiving objects|Resolving deltas|Updating files):\s*([0-9]{1,3})%\s*(?:\(([^)]*)\))?(?:,\s*(.*))?$"#
+        guard let regex = try? NSRegularExpression(pattern: expression),
+              let match = regex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
+              let percentageText = capture(2, from: match, in: line),
+              let percentage = Int(percentageText), (0...100).contains(percentage) else {
+            // `remote: Enumerating objects: 12, done.` 这种行没有可比较的比例，但可明确说明正在建立传输清单。
+            if line.range(of: #"^remote:\s*Enumerating objects:\s*[0-9]+"#, options: .regularExpression) != nil {
+                return GitTransferProgressUpdate(stage: "enumerating", message: "正在枚举 Git 对象…", fraction: nil, detail: nil)
+            }
+            return nil
+        }
+
+        guard let stageName = capture(1, from: match, in: line) else { return nil }
+        let stage: String
+        let message: String
+        switch stageName {
+        case "Enumerating objects": stage = "enumerating"; message = "正在枚举 Git 对象…"
+        case "Counting objects": stage = "counting"; message = "正在统计 Git 对象…"
+        case "Compressing objects": stage = "compressing"; message = "正在压缩 Git 对象…"
+        case "Receiving objects": stage = "receiving"; message = "正在接收 Git 对象…"
+        case "Resolving deltas": stage = "resolving"; message = "正在解析 Git 差异…"
+        case "Updating files": stage = "updating"; message = "正在更新工作区文件…"
+        default: return nil
+        }
+
+        let count = capture(3, from: match, in: line)?.trimmingCharacters(in: .whitespaces)
+        let suffix = capture(4, from: match, in: line)?.trimmingCharacters(in: .whitespaces)
+        let reliableCount = count.flatMap { $0.range(of: #"^[0-9]+/[0-9]+$"#, options: .regularExpression) == nil ? nil : $0 }
+        // 只保留 Git 客户端生成的速率形态；远端可打印任意文本，不能把它送进界面。
+        let reliableRate = suffix.flatMap {
+            $0.range(of: #"^[0-9.]+\s+(?:KiB|MiB|GiB)\s+\|\s+[0-9.]+\s+(?:KiB|MiB|GiB)/s$"#, options: .regularExpression) == nil ? nil : $0
+        }
+        let detailParts = [reliableCount, reliableRate].compactMap { $0 }.filter { !$0.isEmpty }
+        return GitTransferProgressUpdate(
+            stage: stage,
+            message: message,
+            fraction: Double(percentage) / 100,
+            detail: detailParts.isEmpty ? nil : detailParts.joined(separator: " · ")
+        )
+    }
+
+    private static func capture(_ index: Int, from match: NSTextCheckingResult, in text: String) -> String? {
+        let range = match.range(at: index)
+        guard range.location != NSNotFound, let stringRange = Range(range, in: text) else { return nil }
+        return String(text[stringRange])
+    }
 }
 
 private extension GitProvider {

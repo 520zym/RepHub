@@ -37,17 +37,36 @@ final class SVNAcquisitionTests: XCTestCase {
         let destination = fixture.root.appendingPathComponent("checkout-target", isDirectory: true)
         let progress = ProgressMessages()
         try await provider.acquire(RemoteRepositoryLocation(url: entry.url), to: destination) { event in
-            await progress.append(event.message)
+            await progress.append(event)
         }
         XCTAssertTrue(FileManager.default.fileExists(atPath: destination.appendingPathComponent("说明 文件.txt").path))
         let messages = await progress.values()
         XCTAssertTrue(messages.contains { $0.contains("检查") })
         XCTAssertTrue(messages.contains { $0.contains("完成") })
+        let records = await progress.records()
+        XCTAssertTrue(records.contains { $0.path == "说明 文件.txt" && $0.message == "已写入" })
 
         let candidate = try await provider.detect(at: destination)
         let detected = try XCTUnwrap(candidate)
         XCTAssertEqual(detected.providerID, .svn)
         XCTAssertEqual(detected.root.standardizedFileURL, destination.standardizedFileURL)
+
+        try Data("updated fixture\n".utf8).write(to: selected.appendingPathComponent("说明 文件.txt"))
+        _ = try requireSuccess(
+            try await fixture.run(
+                executable: "svn",
+                arguments: ["commit", "-m", "update progress fixture"],
+                directory: fixture.svnWriter
+            ),
+            tool: "svn"
+        )
+        let updateProgress = ProgressMessages()
+        let update = try await provider.perform(.update, in: detected) { event in
+            await updateProgress.append(event)
+        }
+        XCTAssertEqual(update.outcome, .succeeded)
+        let updateRecords = await updateProgress.records()
+        XCTAssertTrue(updateRecords.contains { $0.path == "说明 文件.txt" && $0.message == "已更新" })
     }
 
     func testRejectsExistingCheckoutDestinationBeforeWriting() async throws {
@@ -133,8 +152,13 @@ final class SVNAcquisitionTests: XCTestCase {
 
 private actor ProgressMessages {
     private var messages: [String] = []
-    func append(_ message: String) { messages.append(message) }
+    private var emittedRecords: [RepositoryProgressRecord] = []
+    func append(_ event: RepositoryOperationProgress) {
+        messages.append(event.message)
+        emittedRecords += event.records
+    }
     func values() -> [String] { messages }
+    func records() -> [RepositoryProgressRecord] { emittedRecords }
 }
 
 private func availableLoopbackPort() throws -> UInt16 {

@@ -66,7 +66,9 @@ public actor RepositoryService {
         do {
             try files.createDirectory(at: staging, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
             await progress(RepositoryOperationProgress("正在连接远端仓库…"))
-            try await provider.acquire(location, to: payload, progress: progress)
+            try await provider.acquire(location, to: payload) { update in
+                await progress(Self.sanitizedProgress(update, password: location.credentials?.password))
+            }
             try Task.checkCancellation()
             let attributes = try files.attributesOfItem(atPath: payload.path)
             guard attributes[.type] as? FileAttributeType == .typeDirectory else {
@@ -127,6 +129,19 @@ public actor RepositoryService {
             message = message.replacingOccurrences(of: password, with: "***")
         }
         return message
+    }
+
+    private nonisolated static func sanitizedProgress(_ update: RepositoryOperationProgress,
+                                                       password: String? = nil) -> RepositoryOperationProgress {
+        func sanitize(_ text: String) -> String {
+            let redacted = RepositoryDisplaySanitizer.redact(text)
+            guard let password, !password.isEmpty else { return redacted }
+            return redacted.replacingOccurrences(of: password, with: "***")
+        }
+        return RepositoryOperationProgress(sanitize(update.message), fractionCompleted: update.fractionCompleted,
+            detail: update.detail.map(sanitize), records: update.records.map {
+                RepositoryProgressRecord(kind: $0.kind, message: sanitize($0.message), path: $0.path.map(sanitize))
+            })
     }
 
     public func open(directory: URL) async throws -> Workspace {
@@ -243,7 +258,9 @@ public actor RepositoryService {
                 throw VersionControlError.invalidRepository("仓库位置、分支或远端已经改变，请刷新后重新选择更新目标。")
             }
             try Task.checkCancellation()
-            let performed = try await provider.perform(operation, in: current, progress: progress)
+            let performed = try await provider.perform(operation, in: current) { update in
+                await progress(Self.sanitizedProgress(update))
+            }
             result = RepositoryOperationResult(
                 kind: operation, bindingID: bindingID, outcome: performed.outcome,
                 summary: RepositoryDisplaySanitizer.redact(performed.summary),

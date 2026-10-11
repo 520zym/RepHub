@@ -92,6 +92,24 @@ struct RepositoryAcquisitionTests {
         }
     }
 
+    @Test("实时阶段、详情和文件记录统一脱敏，同时保留进度数值")
+    func redactsStreamingProgress() async throws {
+        let root = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = RepositoryService(providers: [AcquisitionFixtureProvider()])
+        let received = AcquisitionProgressCollector()
+        let result = try await service.acquire(providerID: .git,
+            location: .init(url: location.url, credentials: .init(username: "fixture", password: "fixture-secret")),
+            destinationParent: root, directoryName: "safe-progress") { await received.append($0) }
+        #expect(result.outcome == .succeeded)
+        let update = try #require(await received.updates.first { !$0.records.isEmpty })
+        #expect(update.fractionCompleted == 0.5)
+        let visible = [update.message, update.detail ?? "", update.records[0].message, update.records[0].path ?? ""].joined()
+        #expect(!visible.contains("fixture-secret"))
+        #expect(!visible.contains("url-secret"))
+        #expect(!visible.contains("private-token"))
+    }
+
     private func fixture() throws -> URL {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("RepHub-AcquisitionTests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
@@ -119,6 +137,9 @@ private actor AcquisitionFixtureProvider: RepositoryAcquisitionProvider, Reposit
                  progress: @escaping RepositoryOperationProgressHandler) async throws {
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false)
         try Data("fixture".utf8).write(to: destination.appendingPathComponent("README"))
+        await progress(RepositoryOperationProgress("fixture-secret", fractionCompleted: 0.5,
+            detail: "https://user:url-secret@example.invalid/repo?token=private-token",
+            records: [.init(kind: .file, message: "fixture-secret", path: "fixture-secret/README")]))
         calls += 1
         waiters.forEach { $0.resume() }; waiters = []
         if waits { try await Task.sleep(for: .seconds(30)) }
@@ -135,4 +156,9 @@ private actor AcquisitionFixtureProvider: RepositoryAcquisitionProvider, Reposit
                  progress: @escaping RepositoryOperationProgressHandler) async throws -> RepositoryOperationResult {
         .init(kind: operation, bindingID: binding.id, outcome: .succeeded, summary: "完成")
     }
+}
+
+private actor AcquisitionProgressCollector {
+    var updates: [RepositoryOperationProgress] = []
+    func append(_ update: RepositoryOperationProgress) { updates.append(update) }
 }

@@ -13,6 +13,21 @@ public struct CommandResult: Sendable {
     }
 }
 
+/// 一行由外部工具输出的文本。进度工具常以回车覆盖同一行，因此 `\r` 也会作为分隔符。
+public struct CommandOutputLine: Sendable, Equatable {
+    public enum Stream: Sendable, Equatable { case stdout, stderr }
+    public let stream: Stream
+    public let text: String
+
+    public init(stream: Stream, text: String) {
+        self.stream = stream
+        self.text = text
+    }
+}
+
+/// 命令运行时的增量文本输出。只用于用户可见的进度，不应用它判断命令是否成功。
+public typealias CommandOutputHandler = @Sendable ([CommandOutputLine]) async -> Void
+
 @discardableResult public func requireSuccess(_ result: CommandResult, tool: String) throws -> CommandResult {
     guard result.exitCode == 0 else {
         let detail = result.error.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -50,24 +65,71 @@ public struct CommandRunner: Sendable {
         directory: URL? = nil,
         timeout: TimeInterval = 20,
         opensslConfiguration: URL? = nil,
-        standardInput: Data? = nil
+        standardInput: Data? = nil,
+        onOutput: CommandOutputHandler? = nil
     ) async throws -> CommandResult {
         guard let executablePath = ToolLocator.find(executable) else { throw VersionControlError.toolUnavailable(executable) }
         let control = ProcessControl()
-        return try await withTaskCancellationHandler {
-            try Task.checkCancellation()
-            return try await Task.detached(priority: .userInitiated) {
-                try control.execute(
+        let relay: CommandOutputRelay?
+        let outputTask: Task<Void, Never>?
+        if let onOutput {
+            var continuation: AsyncStream<[CommandOutputLine]>.Continuation?
+            let stream = AsyncStream<[CommandOutputLine]> { continuation = $0 }
+            let createdRelay = CommandOutputRelay(continuation: continuation!)
+            relay = createdRelay
+            outputTask = Task {
+                for await lines in stream where !lines.isEmpty {
+                    await onOutput(lines)
+                }
+            }
+        } else {
+            relay = nil
+            outputTask = nil
+        }
+
+        do {
+            let result = try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                return try await Task.detached(priority: .userInitiated) {
+                    defer { relay?.finish() }
+                    return try control.execute(
                     executable: executablePath,
                     arguments: arguments,
                     directory: directory,
                     timeout: timeout,
                     opensslConfiguration: opensslConfiguration,
                     standardInput: standardInput,
-                    isolatedHome: isolatedHome
-                )
-            }.value
-        } onCancel: { control.cancel() }
+                    isolatedHome: isolatedHome,
+                    outputSink: relay?.yield
+                    )
+                }.value
+            } onCancel: { control.cancel() }
+            if let outputTask { await outputTask.value }
+            return result
+        } catch {
+            relay?.finish()
+            if let outputTask { await outputTask.value }
+            throw error
+        }
+    }
+}
+
+/// 将同步的子进程读取循环与异步 UI 回调解耦。执行线程只把小批输出放入
+/// `AsyncStream`，不会被 UI 的状态更新或动画阻塞。
+private final class CommandOutputRelay: @unchecked Sendable {
+    private let continuation: AsyncStream<[CommandOutputLine]>.Continuation
+
+    init(continuation: AsyncStream<[CommandOutputLine]>.Continuation) {
+        self.continuation = continuation
+    }
+
+    func yield(_ lines: [CommandOutputLine]) {
+        guard !lines.isEmpty else { return }
+        continuation.yield(lines)
+    }
+
+    func finish() {
+        continuation.finish()
     }
 }
 
@@ -91,7 +153,8 @@ private final class ProcessControl: @unchecked Sendable {
         timeout: TimeInterval,
         opensslConfiguration: URL?,
         standardInput: Data?,
-        isolatedHome: URL?
+        isolatedHome: URL?,
+        outputSink: (@Sendable ([CommandOutputLine]) -> Void)?
     ) throws -> CommandResult {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("rephub-command-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -103,6 +166,10 @@ private final class ProcessControl: @unchecked Sendable {
         }
         let out = try FileHandle(forWritingTo: outURL), err = try FileHandle(forWritingTo: errURL)
         defer { try? out.close(); try? err.close() }
+        // 没有用户可见的回调时，不创建额外文件句柄或解析行；普通 status/diff 命令保持原开销。
+        let outputReader = outputSink == nil ? nil : try StreamingOutputReader(url: outURL, stream: .stdout)
+        let errorReader = outputSink == nil ? nil : try StreamingOutputReader(url: errURL, stream: .stderr)
+        defer { outputReader?.close(); errorReader?.close() }
         let task = Process()
         task.executableURL = URL(fileURLWithPath: executable)
         task.arguments = arguments; task.currentDirectoryURL = directory
@@ -139,12 +206,55 @@ private final class ProcessControl: @unchecked Sendable {
         // 子进程已继承读端；关闭父进程副本，避免它影响 EOF 语义。
         try? inputPipe?.readHandle.close()
         lock.unlock()
+        // 启动后的任何退出路径（包括末尾读取失败）都不能留下已结束进程的引用。
+        defer {
+            lock.lock()
+            process = nil
+            lock.unlock()
+        }
         let deadline = ProcessInfo.processInfo.systemUptime + max(timeout, 0.05)
         var failure: (any Error)?
+        var pendingOutput: [CommandOutputLine] = []
+        var lastOutputDelivery = ProcessInfo.processInfo.systemUptime
+
+        func outputExceedsLimit() -> Bool {
+            fileSize(outURL) + fileSize(errURL) > outputLimit
+        }
+
+        /// 返回当前快照下两个读取器是否都已读到末尾。运行中每轮最多读 256 KiB；
+        /// 进程退出后会循环调用到末尾，避免遗漏最后一批输出。
+        func readOutput(forceDelivery: Bool = false, respectCancellation: Bool = true) throws -> Bool {
+            guard let outputReader, let errorReader else { return true }
+            if respectCancellation, isCancelled { throw CancellationError() }
+            if outputExceedsLimit() { throw VersionControlError.outputTooLarge }
+            let output = try outputReader.readAvailable(maximumBytes: 128 * 1024)
+            let error = try errorReader.readAvailable(maximumBytes: 128 * 1024)
+            pendingOutput.append(contentsOf: output.lines)
+            pendingOutput.append(contentsOf: error.lines)
+            if outputExceedsLimit() { throw VersionControlError.outputTooLarge }
+            let now = ProcessInfo.processInfo.systemUptime
+            guard !pendingOutput.isEmpty,
+                  forceDelivery || now - lastOutputDelivery >= 0.1 else {
+                return !output.mayHaveMore && !error.mayHaveMore
+            }
+            outputSink?(pendingOutput)
+            pendingOutput.removeAll(keepingCapacity: true)
+            lastOutputDelivery = now
+            return !output.mayHaveMore && !error.mayHaveMore
+        }
+
         while task.isRunning {
-            if isCancelled { failure = CancellationError() }
-            else if ProcessInfo.processInfo.systemUptime >= deadline { failure = VersionControlError.timedOut(URL(fileURLWithPath: executable).lastPathComponent) }
-            else if fileSize(outURL) + fileSize(errURL) > outputLimit { failure = VersionControlError.outputTooLarge }
+            do {
+                _ = try readOutput()
+            } catch {
+                // 即使读取临时输出失败，也要先终止并等待已启动的子进程，不能遗留后台传输。
+                failure = error
+            }
+            if failure == nil {
+                if isCancelled { failure = CancellationError() }
+                else if ProcessInfo.processInfo.systemUptime >= deadline { failure = VersionControlError.timedOut(URL(fileURLWithPath: executable).lastPathComponent) }
+                else if outputExceedsLimit() { failure = VersionControlError.outputTooLarge }
+            }
             if failure != nil {
                 if task.isRunning { task.terminate() }
                 let grace = ProcessInfo.processInfo.systemUptime + 0.25
@@ -155,7 +265,21 @@ private final class ProcessControl: @unchecked Sendable {
             Thread.sleep(forTimeInterval: 0.02)
         }
         task.waitUntilExit()
-        lock.lock(); process = nil; lock.unlock()
+        // 即便因取消而结束，也先读取已经写入的末尾，随后再把取消结果交给上层。
+        do {
+            var outputDrained = false
+            while !outputDrained {
+                outputDrained = try readOutput(forceDelivery: true, respectCancellation: false)
+            }
+            if let outputReader, let errorReader {
+                pendingOutput.append(contentsOf: outputReader.finish())
+                pendingOutput.append(contentsOf: errorReader.finish())
+                if !pendingOutput.isEmpty { outputSink?(pendingOutput) }
+            }
+        } catch {
+            // 例如取消后的临时文件读取异常不能覆盖已确定的取消/超时原因。
+            if failure == nil { failure = error }
+        }
         if let failure { throw failure }
         if isCancelled { throw CancellationError() }
         guard fileSize(outURL) + fileSize(errURL) <= outputLimit else { throw VersionControlError.outputTooLarge }
@@ -164,6 +288,115 @@ private final class ProcessControl: @unchecked Sendable {
 
     private func fileSize(_ url: URL) -> UInt64 {
         ((try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? NSNumber)?.uint64Value ?? 0
+    }
+
+}
+
+/// 从持续写入的临时文件增量读取，不重新加载历史内容。
+private struct IncrementalOutputRead {
+    let lines: [CommandOutputLine]
+    /// 本次读取刚好用尽预算，下一轮仍可能有尚未读取的字节。
+    let mayHaveMore: Bool
+}
+
+private final class StreamingOutputReader {
+    private let handle: FileHandle
+    private let stream: CommandOutputLine.Stream
+    private var parser = CommandOutputLineParser()
+
+    init(url: URL, stream: CommandOutputLine.Stream) throws {
+        handle = try FileHandle(forReadingFrom: url)
+        self.stream = stream
+    }
+
+    func readAvailable(maximumBytes: Int) throws -> IncrementalOutputRead {
+        var remaining = max(1, maximumBytes)
+        var lines: [CommandOutputLine] = []
+        while remaining > 0 {
+            let requested = min(64 * 1024, remaining)
+            guard let data = try handle.read(upToCount: requested), !data.isEmpty else {
+                return IncrementalOutputRead(lines: lines, mayHaveMore: false)
+            }
+            lines.append(contentsOf: parser.append(data, stream: stream))
+            remaining -= data.count
+            if data.count < requested {
+                return IncrementalOutputRead(lines: lines, mayHaveMore: false)
+            }
+        }
+        return IncrementalOutputRead(lines: lines, mayHaveMore: true)
+    }
+
+    func finish() -> [CommandOutputLine] {
+        parser.finish(stream: stream)
+    }
+
+    func close() {
+        try? handle.close()
+    }
+}
+
+/// 保留没有行尾的字节，以免 UTF-8 字符恰好被两次文件读取截断。
+private struct CommandOutputLineParser {
+    private static let maximumBufferedLine = 256 * 1024
+    private var bytes = Data()
+    private var skipsLeadingLineFeed = false
+
+    mutating func append(_ data: Data, stream: CommandOutputLine.Stream) -> [CommandOutputLine] {
+        var incoming = data
+        if skipsLeadingLineFeed {
+            if incoming.first == 10 { incoming.removeFirst() }
+            skipsLeadingLineFeed = false
+        }
+        bytes.append(incoming)
+        var lines: [CommandOutputLine] = []
+        while let delimiter = nextDelimiter() {
+            let textBytes = Data(bytes[..<delimiter])
+            let delimiterByte = bytes[delimiter]
+            bytes.removeSubrange(...delimiter)
+            if delimiterByte == 13 {
+                if bytes.first == 10 { bytes.removeFirst() }
+                // 只有回车确实位于此次读取的末尾，下一次数据才需要吞掉可选的 LF。
+                else if bytes.isEmpty { skipsLeadingLineFeed = true }
+            }
+            if !textBytes.isEmpty {
+                lines.append(CommandOutputLine(stream: stream, text: String(decoding: textBytes, as: UTF8.self)))
+            }
+        }
+        while bytes.count > Self.maximumBufferedLine {
+            let boundary = safeBoundary(near: Self.maximumBufferedLine)
+            let segment = Data(bytes.prefix(boundary))
+            bytes.removeFirst(boundary)
+            if !segment.isEmpty {
+                lines.append(CommandOutputLine(stream: stream, text: String(decoding: segment, as: UTF8.self)))
+            }
+        }
+        return lines
+    }
+
+    mutating func finish(stream: CommandOutputLine.Stream) -> [CommandOutputLine] {
+        defer { bytes.removeAll(keepingCapacity: false); skipsLeadingLineFeed = false }
+        guard !bytes.isEmpty else { return [] }
+        return [CommandOutputLine(stream: stream, text: String(decoding: bytes, as: UTF8.self))]
+    }
+
+    private func nextDelimiter() -> Data.Index? {
+        let lineFeed = bytes.firstIndex(of: 10)
+        let carriageReturn = bytes.firstIndex(of: 13)
+        switch (lineFeed, carriageReturn) {
+        case let (.some(lhs), .some(rhs)): return min(lhs, rhs)
+        case let (.some(index), .none), let (.none, .some(index)): return index
+        case (.none, .none): return nil
+        }
+    }
+
+    /// 选择 UTF-8 起始字节前的位置，避免把常见多字节字符的尾字节交给下一段。
+    private func safeBoundary(near requested: Int) -> Int {
+        var boundary = min(requested, bytes.count)
+        while boundary > 0, boundary < bytes.count,
+              (bytes[bytes.index(bytes.startIndex, offsetBy: boundary)] & 0b1100_0000) == 0b1000_0000 {
+            boundary -= 1
+        }
+        return boundary == 0 ? min(requested, bytes.count) : boundary
     }
 }
 
