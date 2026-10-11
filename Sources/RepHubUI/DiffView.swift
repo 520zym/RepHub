@@ -21,7 +21,7 @@ public struct DiffView: View {
         let codePalette = appearance.codePalette(for: effectiveScheme)
         VStack(spacing: 0) {
             diffHeader(appPalette: appPalette)
-            Divider().overlay(appPalette.border)
+                .background(appPalette.sidebar.opacity(0.45))
             content(appPalette: appPalette, codePalette: codePalette)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -32,7 +32,7 @@ public struct DiffView: View {
     private func content(appPalette: AppPalette, codePalette: CodePalette) -> some View {
         if let patch = model.patch, !patch.text.isEmpty {
             if hasUnifiedHunk(patch.text) {
-                SideBySideDiff(rows: SideBySideDiffParser.parse(patch.text), presentation: presentation, palette: codePalette, border: appPalette.border)
+                SideBySideDiff(rows: SideBySideDiffParser.parse(patch.text), presentation: presentation, palette: codePalette)
             } else if isBinary(patch.text) {
                 binaryState(patch.text, palette: appPalette)
             } else {
@@ -93,7 +93,6 @@ private struct SideBySideDiff: View {
     let rows: [DiffRow]
     let presentation: DiffPresentation
     let palette: CodePalette
-    let border: Color
 
     var body: some View {
         Group {
@@ -104,25 +103,29 @@ private struct SideBySideDiff: View {
 
     private var sideBySideBody: some View {
         GeometryReader { geometry in
-            let columnWidth = max(1, (geometry.size.width - 1) / 2)
+            let columnWidth = max(1, (geometry.size.width - 6) / 2)
             let rowHeight = CGFloat(columnRows.count) * 24
             let contentHeight = max(1, max(rowHeight, geometry.size.height - 28))
             VStack(spacing: 0) {
                 HStack(spacing: 0) {
                     columnTitle("旧版本", width: columnWidth)
-                    Divider().overlay(border)
+                    columnGutter
                     columnTitle("新版本", width: columnWidth)
                 }
                 .frame(height: 28)
                 ScrollView(.vertical) {
                     HStack(spacing: 0) {
                         diffColumn(.old, width: columnWidth, height: contentHeight)
-                        Divider().overlay(border)
+                        columnGutter
                         diffColumn(.new, width: columnWidth, height: contentHeight)
                     }
                 }
             }
         }
+    }
+
+    private var columnGutter: some View {
+        palette.secondary.opacity(0.055).frame(width: 6)
     }
 
     private var unifiedBody: some View {
@@ -141,7 +144,7 @@ private struct SideBySideDiff: View {
     private func columnTitle(_ title: String, width: CGFloat) -> some View {
         Text(title).padding(.leading, 68).frame(width: width, alignment: .leading)
             .font(.system(size: 11, weight: .medium)).foregroundStyle(palette.secondary)
-            .frame(height: 28).background(palette.background)
+            .frame(height: 28).background(palette.secondary.opacity(0.035))
     }
 
     private var columnRows: [DiffRow] {

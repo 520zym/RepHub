@@ -16,6 +16,7 @@ struct RepHubApp: App {
         Window("RepHub", id: "workspace") {
             WorkspaceView(model: workspace, appearance: appearance)
                 .frame(minWidth: 1080, minHeight: 700)
+                .background(WindowSurface())
         }
         .defaultSize(width: 1440, height: 980)
         .commands {
@@ -36,6 +37,21 @@ struct RepHubApp: App {
             ThemeSettingsView(appearance: appearance)
                 .preferredColorScheme(appearance.preferredColorScheme)
                 .frame(width: 540, height: 470)
+        }
+    }
+}
+
+/// 仅对本工作台隐藏系统标题栏分隔线，保留原生工具栏及窗口行为。
+private struct WindowSurface: NSViewRepresentable {
+    func makeNSView(context: Context) -> SurfaceView { SurfaceView(frame: .zero) }
+    func updateNSView(_ nsView: SurfaceView, context: Context) {
+        nsView.window?.titlebarSeparatorStyle = .none
+    }
+
+    final class SurfaceView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            window?.titlebarSeparatorStyle = .none
         }
     }
 }

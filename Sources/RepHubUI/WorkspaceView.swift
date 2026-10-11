@@ -11,6 +11,7 @@ public struct WorkspaceView: View {
     @State private var historyExpanded = true
     @State private var commitMessage = ""
     @State private var commitTargets: Set<String> = []
+    @FocusState private var commitMessageFocused: Bool
 
     public init(model: WorkspaceModel, appearance: AppearanceStore) {
         self.model = model
@@ -62,7 +63,6 @@ public struct WorkspaceView: View {
             HStack(spacing: 0) {
                 ChangeTreeView(model: model, palette: palette)
                     .frame(width: sidebarWidth, height: editorHeight, alignment: .topLeading)
-                Rectangle().fill(palette.border.opacity(0.55)).frame(width: 1)
                 VStack(spacing: 0) {
                     DiffView(model: model, appearance: appearance)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -73,12 +73,10 @@ public struct WorkspaceView: View {
             .frame(height: editorHeight)
             .background(palette.surface)
             .clipShape(RoundedRectangle(cornerRadius: 9))
-            .overlay(RoundedRectangle(cornerRadius: 9).stroke(palette.border.opacity(0.55), lineWidth: 0.5))
             if historyExpanded {
                 HistoryWorkspaceView(model: model, appearance: appearance, showAsMainView: false)
                     .frame(height: historyHeight)
                     .clipShape(RoundedRectangle(cornerRadius: 9))
-                    .overlay(RoundedRectangle(cornerRadius: 9).stroke(palette.border.opacity(0.55), lineWidth: 0.5))
             }
         }
         .padding(inset)
@@ -104,7 +102,6 @@ public struct WorkspaceView: View {
                 .menuStyle(.borderlessButton).menuIndicator(.visible).fixedSize()
                 .help("打开或切换仓库")
                 if let binding = model.selectedBinding {
-                    Rectangle().fill(palette.border).frame(width: 1, height: 16)
                     Label(binding.currentBranch.isEmpty ? binding.providerName : binding.currentBranch, systemImage: "arrow.triangle.branch")
                         .labelStyle(.titleAndIcon)
                         .font(.system(size: 12)).lineLimit(1)
@@ -148,9 +145,12 @@ public struct WorkspaceView: View {
         HStack(spacing: 12) {
             TextField("提交说明…", text: $commitMessage)
                 .textFieldStyle(.plain).font(.system(size: 13))
+                .focused($commitMessageFocused)
                 .padding(.horizontal, 11).frame(height: 30)
                 .background(palette.surface, in: RoundedRectangle(cornerRadius: 7))
-                .overlay(RoundedRectangle(cornerRadius: 7).stroke(palette.border.opacity(0.65)))
+                .overlay {
+                    if commitMessageFocused { RoundedRectangle(cornerRadius: 7).stroke(palette.accent.opacity(0.85), lineWidth: 1) }
+                }
             ForEach(model.workspace?.bindings ?? []) { binding in
                 Toggle(binding.providerName == "Subversion" ? "SVN" : binding.providerName, isOn: Binding(
                     get: { commitTargets.contains(binding.id) },
@@ -163,8 +163,8 @@ public struct WorkspaceView: View {
                 .disabled(true).help("当前为读取版本，实际提交尚未接入")
         }
         .padding(.horizontal, 12).frame(height: 56)
+        .background(palette.sidebar.opacity(0.45))
         .background(palette.surface)
-        .overlay(alignment: .top) { Rectangle().fill(palette.border.opacity(0.55)).frame(height: 0.5) }
     }
 
     private func statusBar(palette: AppPalette) -> some View {
@@ -182,7 +182,7 @@ public struct WorkspaceView: View {
         }
         .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
         .padding(.horizontal, 14).frame(height: 28)
-        .overlay(alignment: .top) { Rectangle().fill(palette.border.opacity(0.5)).frame(height: 0.5) }
+        .background(palette.sidebar.opacity(0.25))
     }
 
     private func welcome(palette: AppPalette) -> some View {
@@ -263,7 +263,7 @@ private struct ChangeTreeView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(palette.sidebar.opacity(0.38))
+        .background(palette.sidebar)
     }
 
     private var treeRows: [ChangeTreeRow] {

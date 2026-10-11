@@ -56,15 +56,6 @@ private struct WorkbenchButtonBody: View {
         }
     }
 
-    private var border: Color {
-        guard isEnabled else { return palette.border.opacity(0.45) }
-        switch role {
-        case .quiet: return .clear
-        case .secondary: return palette.border.opacity(isHovering ? 0.92 : 0.72)
-        case .primary: return palette.accent.opacity(0.82)
-        }
-    }
-
     var body: some View {
         configuration.label
             .font(.system(size: 12, weight: .medium))
@@ -73,10 +64,6 @@ private struct WorkbenchButtonBody: View {
             .padding(.horizontal, 12)
             .frame(minHeight: height)
             .background(fill, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .stroke(border, lineWidth: role == .quiet ? 0 : 0.5)
-            }
             .opacity(configuration.isPressed ? 0.94 : 1)
             .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
             .onHover { isHovering = $0 }
@@ -143,10 +130,6 @@ public struct WorkbenchSegmentedPicker<Value: Hashable>: View {
         .padding(2)
         .frame(height: compact ? 26 : 30)
         .background(palette.secondaryText.opacity(0.06), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .stroke(palette.border.opacity(0.30), lineWidth: 0.5)
-        }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(title)
         .accessibilityValue(options.first(where: { $0.value == selection })?.title ?? "")
@@ -189,10 +172,10 @@ public struct WorkbenchSearchField: View {
         }
         .padding(.horizontal, 10)
         .frame(height: 30)
-        .background(palette.surface, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .background(palette.secondaryText.opacity(0.05), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .stroke(isFocused ? palette.accent.opacity(0.85) : palette.border.opacity(0.70), lineWidth: isFocused ? 1 : 0.5)
+                .stroke(isFocused ? palette.accent.opacity(0.85) : .clear, lineWidth: 1)
         }
         .accessibilityElement(children: .contain)
     }

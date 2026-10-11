@@ -15,7 +15,9 @@ struct HistoryWorkspaceView: View {
 
     var body: some View {
         let palette = appearance.palette(for: appearance.preferredColorScheme ?? systemColorScheme)
-        HSplitView {
+        SoftHorizontalSplit(initialWidth: showAsMainView ? 220 : 190,
+            range: showAsMainView ? 210...230 : 180...200,
+            flexibleMinimum: showAsMainView ? 770 : 580) {
             HistoryBranchSidebar(
                 snapshot: model.snapshot,
                 selectedReference: model.historyReference,
@@ -24,28 +26,29 @@ struct HistoryWorkspaceView: View {
                 isCompact: !showAsMainView,
                 selectReference: model.selectHistoryReference
             )
+        } trailing: {
             if showAsMainView {
                 GeometryReader { proxy in
-                    let availableHeight = max(0, proxy.size.height - 1)
-                    VStack(spacing: 0) {
-                        HSplitView {
+                    let availableHeight = max(0, proxy.size.height - 6)
+                    VStack(spacing: 6) {
+                        SoftHorizontalSplit(fixedSide: .trailing, initialWidth: 286, range: 270...310, flexibleMinimum: 500) {
                             revisionTable(palette: palette)
-                                .frame(minWidth: 500, idealWidth: 700)
+                        } trailing: {
                             HistoryRevisionInspector(model: model, palette: palette, isCompact: false)
-                                .frame(minWidth: 270, idealWidth: 286, maxWidth: 310)
                         }
                         .frame(height: availableHeight * 0.56)
-                        Divider()
                         DiffView(model: model, appearance: appearance)
                             .frame(height: availableHeight * 0.44)
                     }
                     .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
+                    .background(palette.background)
                 }
             } else {
-                revisionTable(palette: palette)
-                    .frame(minWidth: 320, idealWidth: 540, maxHeight: .infinity)
-                HistoryRevisionInspector(model: model, palette: palette, isCompact: true)
-                    .frame(minWidth: 260, idealWidth: 270, maxWidth: 300)
+                SoftHorizontalSplit(fixedSide: .trailing, initialWidth: 270, range: 260...300, flexibleMinimum: 320) {
+                    revisionTable(palette: palette)
+                } trailing: {
+                    HistoryRevisionInspector(model: model, palette: palette, isCompact: true)
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -121,7 +124,6 @@ private struct HistoryBranchSidebar: View {
             .padding(.horizontal, 14).frame(height: 39)
             WorkbenchSearchField("搜索分支或标签…", text: $search, palette: palette)
                 .padding(.horizontal, 10).padding(.bottom, 10)
-            Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
                     referenceButton(title: "所有分支", icon: "point.3.connected.trianglepath.dotted", reference: nil)
@@ -217,9 +219,8 @@ private struct HistoryRevisionTable: View {
                     .help("筛选历史范围，不会切换工作副本分支")
                 }
                 .padding(.horizontal, 14).frame(height: 48).background(palette.surface)
-                Divider()
                 tableHeader(graphWidth: graphWidth, showAuthor: showAuthor, showDate: showDate, showHash: showHash)
-                Divider()
+                    .background(palette.secondaryText.opacity(0.045))
                 if revisions.isEmpty {
                     ContentUnavailableView("暂无提交记录", systemImage: "clock.arrow.circlepath")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -238,9 +239,12 @@ private struct HistoryRevisionTable: View {
                             .tag(Optional(revision.id))
                             .contentShape(Rectangle())
                             .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
                         }
                     }
                     .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
                 }
             }
             .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
@@ -297,8 +301,7 @@ private struct HistoryRevisionInspector: View {
                         .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
                         .disabled(true).help("AI 审查当前不可用")
                 }
-                Divider()
-                Text("变更的文件  \(model.revisionFiles.count)").font(.subheadline.weight(.semibold))
+                Text("变更的文件  \(model.revisionFiles.count)").font(.subheadline.weight(.semibold)).padding(.top, 8)
                 revisionFiles
             } else {
                 ContentUnavailableView("选择一个提交", systemImage: "arrowshape.turn.up.right")
@@ -307,6 +310,7 @@ private struct HistoryRevisionInspector: View {
             Spacer(minLength: 0)
         }
         .padding(isCompact ? 10 : 14).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(palette.sidebar.opacity(0.45))
         .background(palette.surface)
     }
 
@@ -340,9 +344,12 @@ private struct HistoryRevisionInspector: View {
                     Spacer(minLength: 0)
                 }
                 .tag(Optional(change.path)).help(change.path)
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
             }
         }
         .listStyle(.plain)
+        .scrollContentBackground(.hidden)
         .frame(maxHeight: .infinity)
     }
 
