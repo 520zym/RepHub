@@ -15,9 +15,9 @@ struct RepHubApp: App {
     var body: some Scene {
         Window("RepHub", id: "workspace") {
             WorkspaceView(model: workspace, appearance: appearance)
-                .frame(minWidth: 960, minHeight: 620)
+                .frame(minWidth: 1080, minHeight: 700)
         }
-        .defaultSize(width: 1380, height: 860)
+        .defaultSize(width: 1440, height: 980)
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("打开本地文件夹…", action: workspace.chooseFolder)

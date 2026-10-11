@@ -11,6 +11,7 @@ public final class WorkspaceModel {
     public private(set) var workspace: Workspace?
     public private(set) var snapshots: [String: BindingSnapshot] = [:]
     public private(set) var selectedBindingID: String?
+    public private(set) var historyReference: String?
     public var selectedPath: String?
     public var selectedRevisionID: String?
     public private(set) var revisionFiles: [FileChange] = []
@@ -51,6 +52,7 @@ public final class WorkspaceModel {
             self.selectedRevisionID = nil
             self.revisionFiles = []
             self.selectedBindingID = workspace.bindings.first?.id
+            self.historyReference = nil
             if let binding = workspace.bindings.first {
                 try await self.load(binding: binding, reference: nil, token: token)
             }
@@ -59,19 +61,27 @@ public final class WorkspaceModel {
 
     public func refresh() {
         guard let binding = selectedBinding else { return }
+        let revisionID = selectedRevisionID
+        let reference = historyReference
         selectedRevisionID = nil
         revisionFiles = []
         selectedPath = nil
         patch = nil
         start { [weak self] token in
             guard let self else { return }
-            try await self.load(binding: binding, reference: nil, token: token)
+            try await self.load(binding: binding, reference: reference, token: token, readsWorkingPatch: revisionID == nil)
+            if let revisionID, self.accepts(token),
+               let revision = self.snapshot?.revisions.first(where: { $0.id == revisionID }) ?? self.snapshot?.revisions.first {
+                self.selectedRevisionID = revision.id
+                try await self.loadRevision(revision, binding: binding, token: token)
+            }
         }
     }
 
     public func selectBinding(_ binding: RepositoryBinding) {
         guard selectedBindingID != binding.id else { return }
         selectedBindingID = binding.id
+        historyReference = nil
         selectedPath = nil
         selectedRevisionID = nil
         revisionFiles = []
@@ -101,12 +111,24 @@ public final class WorkspaceModel {
         }
         start { [weak self] token in
             guard let self else { return }
-            let files = try await self.service.changedFiles(in: binding, revision: revision.id)
-            guard self.accepts(token), self.selectedBindingID == binding.id, self.selectedRevisionID == revision.id else { return }
-            let patch = try await self.service.diff(in: binding, path: nil, revision: revision.id)
-            guard self.accepts(token), self.selectedBindingID == binding.id, self.selectedRevisionID == revision.id else { return }
-            self.revisionFiles = files
-            self.patch = patch
+            try await self.loadRevision(revision, binding: binding, token: token)
+        }
+    }
+
+    /// 分支入口只改变历史查询范围，不改动当前工作副本。
+    public func selectHistoryReference(_ reference: String?) {
+        guard let binding = selectedBinding else { return }
+        historyReference = reference
+        selectedRevisionID = nil
+        selectedPath = nil
+        revisionFiles = []
+        patch = nil
+        start { [weak self] token in
+            guard let self else { return }
+            try await self.load(binding: binding, reference: reference, token: token, readsWorkingPatch: false)
+            guard self.accepts(token), let first = self.snapshot?.revisions.first else { return }
+            self.selectedRevisionID = first.id
+            try await self.loadRevision(first, binding: binding, token: token)
         }
     }
 
@@ -134,10 +156,33 @@ public final class WorkspaceModel {
         selectedBindingID.flatMap { snapshots[$0] }
     }
 
-    private func load(binding: RepositoryBinding, reference: String?, token: Int) async throws {
+    private func load(binding: RepositoryBinding, reference: String?, token: Int, readsWorkingPatch: Bool = true) async throws {
         let snapshot = await service.load(binding, reference: reference)
         guard accepts(token), selectedBindingID == binding.id else { return }
         snapshots[binding.id] = snapshot
+        guard readsWorkingPatch, let first = preferredFile(in: snapshot.changes) else { return }
+        selectedPath = first.path
+        let patch = try await service.diff(in: binding, path: first.path, revision: nil)
+        guard accepts(token), selectedBindingID == binding.id, selectedRevisionID == nil, selectedPath == first.path else { return }
+        self.patch = patch
+    }
+
+    private func loadRevision(_ revision: Revision, binding: RepositoryBinding, token: Int) async throws {
+        let files = try await service.changedFiles(in: binding, revision: revision.id)
+        guard accepts(token), selectedBindingID == binding.id, selectedRevisionID == revision.id else { return }
+        revisionFiles = files
+        let file = preferredFile(in: files)
+        selectedPath = file?.path
+        let patch = try await service.diff(in: binding, path: file?.path, revision: revision.id)
+        guard accepts(token), selectedBindingID == binding.id, selectedRevisionID == revision.id, selectedPath == file?.path else { return }
+        self.patch = patch
+    }
+
+    private func preferredFile(in files: [FileChange]) -> FileChange? {
+        let sourceExtensions: Set<String> = ["swift", "java", "kt", "js", "ts", "tsx", "py", "go", "rs", "c", "cpp", "h", "xml", "json", "yaml", "yml"]
+        return files.first(where: { $0.kind != .untracked && sourceExtensions.contains(($0.path as NSString).pathExtension.lowercased()) })
+            ?? files.first(where: { sourceExtensions.contains(($0.path as NSString).pathExtension.lowercased()) })
+            ?? files.first
     }
 
     private func loadPatch() {

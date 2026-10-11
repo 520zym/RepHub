@@ -18,7 +18,7 @@ let package = Package(
         .testTarget(name: "GitAdapterTests", dependencies: ["GitAdapter", "ToolExecution"]),
         .testTarget(name: "SVNAdapterTests", dependencies: ["SVNAdapter", "ToolExecution"]),
         .testTarget(name: "DesignSystemTests", dependencies: ["DesignSystem"]),
-        .testTarget(name: "RepHubUITests", dependencies: ["RepHubUI", "VersionControlCore"]),
+        .testTarget(name: "RepHubUITests", dependencies: ["RepHubUI", "RepositoryApplication", "VersionControlCore"]),
         .testTarget(name: "IntegrationTests", dependencies: ["RepositoryApplication", "GitAdapter", "SVNAdapter", "ToolExecution"]),
     ]
 )
