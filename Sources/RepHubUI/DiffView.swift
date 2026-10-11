@@ -40,6 +40,10 @@ public struct DiffView: View {
             }
         } else if model.isLoading {
             ProgressView("正在读取差异…").frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if model.isHistoryVisible {
+            ContentUnavailableView("选择一个提交", systemImage: "clock", description: Text("选择历史提交及文件后显示差异。"))
+        } else if model.snapshot?.changes.isEmpty == true {
+            ContentUnavailableView("工作区没有变更", systemImage: "checkmark.circle", description: Text("当前版本控制来源没有检测到本地变更。"))
         } else {
             ContentUnavailableView("选择一个变更", systemImage: "doc.text.magnifyingglass", description: Text("选择工作区文件或历史提交后显示差异。"))
         }
@@ -64,6 +68,7 @@ public struct DiffView: View {
     private var comparisonLabel: String {
         let provider = model.selectedBinding?.providerName ?? "版本控制"
         if let revision = model.selectedRevisionID { return "\(provider) · \(String(revision.prefix(8))) 与父版本比较" }
+        if model.isHistoryVisible { return "\(provider) · 提交历史" }
         let base = provider.localizedCaseInsensitiveContains("svn") || provider.localizedCaseInsensitiveContains("subversion") ? "BASE" : "HEAD"
         return "\(provider) · \(base) → 工作区"
     }
@@ -73,7 +78,8 @@ public struct DiffView: View {
     }
 
     private func hasUnifiedHunk(_ text: String) -> Bool {
-        text.split(separator: "\n", omittingEmptySubsequences: false).contains { $0.hasPrefix("@@ ") }
+        text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+            .split(separator: "\n", omittingEmptySubsequences: false).contains { $0.hasPrefix("@@ ") }
     }
 
     private func binaryState(_ text: String, palette: AppPalette) -> some View {

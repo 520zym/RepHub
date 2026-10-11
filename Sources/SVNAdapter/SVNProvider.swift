@@ -64,6 +64,9 @@ public struct SVNProvider: VersionControlProvider {
         var arguments = ["log", "--xml", "--limit", String(limit)]
         if let reference, !reference.isEmpty {
             arguments += ["-r", normalizedRevision(reference)]
+        } else {
+            // 工作副本默认只查询 BASE；显式范围可在尚未 update 时读取仓库最新修订。
+            arguments += ["-r", "HEAD:1"]
         }
         let result = try await svn(arguments, directory: binding.root)
         let document = try SVNXMLDocument(data: result.data)

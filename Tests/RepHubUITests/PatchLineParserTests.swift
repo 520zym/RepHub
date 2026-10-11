@@ -39,4 +39,14 @@ final class PatchLineParserTests: XCTestCase {
         XCTAssertEqual(lines[5].oldLine, nil)
         XCTAssertEqual(lines[5].newLine, nil)
     }
+
+    func testNormalizesMixedLineEndingsAndKeepsEmptyLineNumbers() {
+        let lines = PatchLineParser.parse("@@ -4,3 +4,3 @@\r\n retained\r\n \n-old\r\n+new\n")
+
+        XCTAssertEqual(lines[1], PatchDisplayLine(text: " retained", oldLine: 4, newLine: 4))
+        XCTAssertEqual(lines[2], PatchDisplayLine(text: " ", oldLine: 5, newLine: 5))
+        XCTAssertEqual(lines[3], PatchDisplayLine(text: "-old", oldLine: 6, newLine: nil))
+        XCTAssertEqual(lines[4], PatchDisplayLine(text: "+new", oldLine: nil, newLine: 6))
+        XCTAssertFalse(lines.contains { $0.text.contains("\r") })
+    }
 }

@@ -68,6 +68,11 @@ final class SVNProviderTests: XCTestCase {
         try "three\n".write(to: otherCheckout.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
         try "remote delete content\n".write(to: otherCheckout.appendingPathComponent("DELETE-ME.txt"), atomically: true, encoding: .utf8)
         try await command("svn", ["commit", otherCheckout.path, "-m", "remote change"])
+
+        let historyBeforeUpdate = try await provider.history(in: binding, limit: 2, reference: nil)
+        XCTAssertEqual(historyBeforeUpdate.first?.id, "r2")
+        XCTAssertEqual(historyBeforeUpdate.first?.message, "remote change")
+
         try await command("svn", ["update", checkout.path])
 
         let changes = try await provider.status(in: binding)

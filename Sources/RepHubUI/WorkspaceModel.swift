@@ -18,6 +18,7 @@ public final class WorkspaceModel {
     public private(set) var patch: RepositoryPatch?
     public private(set) var isLoading = false
     public private(set) var errorMessage: String?
+    public private(set) var isHistoryVisible = false
 
     private let service: RepositoryService
     private var workTask: Task<Void, Never>?
@@ -75,6 +76,18 @@ public final class WorkspaceModel {
                 self.selectedRevisionID = revision.id
                 try await self.loadRevision(revision, binding: binding, token: token)
             }
+        }
+    }
+
+    /// 切换主视图时同步选择范围，避免历史页继续展示工作区差异。
+    public func setHistoryVisible(_ visible: Bool) {
+        guard isHistoryVisible != visible else { return }
+        isHistoryVisible = visible
+
+        if visible {
+            selectRevision(snapshot?.revisions.first)
+        } else {
+            selectChange(preferredFile(in: snapshot?.changes ?? []))
         }
     }
 
@@ -160,7 +173,25 @@ public final class WorkspaceModel {
         let snapshot = await service.load(binding, reference: reference)
         guard accepts(token), selectedBindingID == binding.id else { return }
         snapshots[binding.id] = snapshot
-        guard readsWorkingPatch, let first = preferredFile(in: snapshot.changes) else { return }
+        guard readsWorkingPatch else { return }
+
+        if isHistoryVisible {
+            guard let revision = snapshot.revisions.first else {
+                selectedRevisionID = nil
+                selectedPath = nil
+                revisionFiles = []
+                patch = nil
+                return
+            }
+            selectedRevisionID = revision.id
+            selectedPath = nil
+            revisionFiles = []
+            patch = nil
+            try await loadRevision(revision, binding: binding, token: token)
+            return
+        }
+
+        guard let first = preferredFile(in: snapshot.changes) else { return }
         selectedPath = first.path
         let patch = try await service.diff(in: binding, path: first.path, revision: nil)
         guard accepts(token), selectedBindingID == binding.id, selectedRevisionID == nil, selectedPath == first.path else { return }

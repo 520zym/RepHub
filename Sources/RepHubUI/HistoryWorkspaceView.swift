@@ -15,54 +15,66 @@ struct HistoryWorkspaceView: View {
 
     var body: some View {
         let palette = appearance.palette(for: appearance.preferredColorScheme ?? systemColorScheme)
-        SoftHorizontalSplit(initialWidth: showAsMainView ? 220 : 190,
-            range: showAsMainView ? 210...230 : 180...200,
-            flexibleMinimum: showAsMainView ? 770 : 580) {
-            HistoryBranchSidebar(
-                snapshot: model.snapshot,
-                selectedReference: model.historyReference,
-                search: $branchSearch,
-                palette: palette,
-                isCompact: !showAsMainView,
-                selectReference: model.selectHistoryReference
-            )
-        } trailing: {
-            if showAsMainView {
-                GeometryReader { proxy in
-                    let availableHeight = max(0, proxy.size.height - 6)
-                    VStack(spacing: 6) {
-                        SoftHorizontalSplit(fixedSide: .trailing, initialWidth: 286, range: 270...310, flexibleMinimum: 500) {
-                            revisionTable(palette: palette)
-                        } trailing: {
-                            HistoryRevisionInspector(model: model, palette: palette, isCompact: false)
-                        }
-                        .frame(height: availableHeight * 0.56)
-                        DiffView(model: model, appearance: appearance)
-                            .frame(height: availableHeight * 0.44)
-                    }
-                    .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
-                    .background(palette.background)
+        Group {
+            if supportsBranches {
+                SoftHorizontalSplit(initialWidth: showAsMainView ? 220 : 190,
+                    range: showAsMainView ? 210...230 : 180...200,
+                    flexibleMinimum: showAsMainView ? 770 : 580) {
+                    HistoryBranchSidebar(
+                        snapshot: model.snapshot,
+                        selectedReference: model.historyReference,
+                        search: $branchSearch,
+                        palette: palette,
+                        isCompact: !showAsMainView,
+                        selectReference: model.selectHistoryReference
+                    )
+                } trailing: {
+                    historyContent(palette: palette)
                 }
             } else {
-                SoftHorizontalSplit(fixedSide: .trailing, initialWidth: 270, range: 260...300, flexibleMinimum: 320) {
-                    revisionTable(palette: palette)
-                } trailing: {
-                    HistoryRevisionInspector(model: model, palette: palette, isCompact: true)
-                }
+                historyContent(palette: palette)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(palette.surface)
-        .onChange(of: model.snapshot?.revisions.first?.id) { _, firstID in
-            guard showAsMainView, model.selectedRevisionID == nil,
-                  let firstID,
-                  let revision = model.snapshot?.revisions.first(where: { $0.id == firstID }) else { return }
-            model.selectRevision(revision)
+        .onAppear {
+            if showAsMainView { model.setHistoryVisible(true) }
         }
     }
 
     private var supportsGraph: Bool {
         model.selectedBinding?.capabilities.contains(.commitGraph) == true
+    }
+
+    private var supportsBranches: Bool {
+        model.selectedBinding?.capabilities.contains(.branches) == true
+    }
+
+    @ViewBuilder
+    private func historyContent(palette: AppPalette) -> some View {
+        if showAsMainView {
+            GeometryReader { proxy in
+                let availableHeight = max(0, proxy.size.height - 6)
+                VStack(spacing: 6) {
+                    SoftHorizontalSplit(fixedSide: .trailing, initialWidth: 286, range: 270...310, flexibleMinimum: 500) {
+                        revisionTable(palette: palette)
+                    } trailing: {
+                        HistoryRevisionInspector(model: model, palette: palette, isCompact: false)
+                    }
+                    .frame(height: availableHeight * 0.56)
+                    DiffView(model: model, appearance: appearance)
+                        .frame(height: availableHeight * 0.44)
+                }
+                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
+                .background(palette.background)
+            }
+        } else {
+            SoftHorizontalSplit(fixedSide: .trailing, initialWidth: 270, range: 260...300, flexibleMinimum: 320) {
+                revisionTable(palette: palette)
+            } trailing: {
+                HistoryRevisionInspector(model: model, palette: palette, isCompact: true)
+            }
+        }
     }
 
     private var bindingSelection: Binding<String?> {
@@ -91,6 +103,8 @@ struct HistoryWorkspaceView: View {
         HistoryRevisionTable(
             revisions: filteredRevisions,
             supportsGraph: supportsGraph,
+            supportsBranches: supportsBranches,
+            issues: (model.workspace?.issues ?? []) + (model.snapshot?.issues ?? []),
             bindings: model.workspace?.bindings ?? [],
             selectedBindingID: bindingSelection,
             selectedRevisionID: Binding(
@@ -178,6 +192,8 @@ private struct HistoryBranchSidebar: View {
 private struct HistoryRevisionTable: View {
     let revisions: [Revision]
     let supportsGraph: Bool
+    let supportsBranches: Bool
+    let issues: [String]
     let bindings: [RepositoryBinding]
     @Binding var selectedBindingID: String?
     @Binding var selectedRevisionID: String?
@@ -194,42 +210,54 @@ private struct HistoryRevisionTable: View {
             let showAuthor = proxy.size.width >= 500
             let showHash = proxy.size.width >= 405
             let graphRows = supportsGraph ? GitGraphLayout.rows(for: revisions) : []
-            let graphWidth = max(26, CGFloat(graphRows.map(\.laneCount).max() ?? 1) * 11 + 3)
+            let graphWidth = supportsGraph ? max(26, CGFloat(graphRows.map(\.laneCount).max() ?? 1) * 11 + 3) : 0
             VStack(spacing: 0) {
                 HStack(spacing: 10) {
                     bindingSource
                     WorkbenchSearchField("搜索提交、作者、版本号…", text: $search, palette: palette)
-                    Menu {
-                        Button("所有分支") { selectReference(nil) }
-                        if !references.isEmpty { Divider() }
-                        ForEach(references) { reference in
-                            Button(reference.name) { selectReference(reference.name) }
+                    if supportsBranches {
+                        Menu {
+                            Button("所有分支") { selectReference(nil) }
+                            if !references.isEmpty { Divider() }
+                            ForEach(references) { reference in
+                                Button(reference.name) { selectReference(reference.name) }
+                            }
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "arrow.triangle.branch")
+                                Text(selectedReference ?? "所有分支").lineLimit(1).truncationMode(.middle)
+                            }
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(selectedReference == nil ? palette.secondaryText : palette.accent)
+                            .padding(.horizontal, 8).frame(height: 30)
+                            .background(selectedReference == nil ? .clear : palette.selection.opacity(0.6), in: RoundedRectangle(cornerRadius: 7))
                         }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "arrow.triangle.branch")
-                            Text(selectedReference ?? "所有分支").lineLimit(1)
-                        }
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(selectedReference == nil ? palette.secondaryText : palette.accent)
-                        .padding(.horizontal, 8).frame(height: 30)
-                        .background(selectedReference == nil ? .clear : palette.selection.opacity(0.6), in: RoundedRectangle(cornerRadius: 7))
+                        .menuStyle(.borderlessButton).menuIndicator(.visible)
+                        .frame(width: 132)
+                        .help("筛选历史范围，不会切换工作副本分支")
                     }
-                    .menuStyle(.borderlessButton).menuIndicator(.visible).fixedSize()
-                    .help("筛选历史范围，不会切换工作副本分支")
                 }
                 .padding(.horizontal, 14).frame(height: 48).background(palette.surface)
                 tableHeader(graphWidth: graphWidth, showAuthor: showAuthor, showDate: showDate, showHash: showHash)
                     .background(palette.secondaryText.opacity(0.045))
                 if revisions.isEmpty {
-                    ContentUnavailableView("暂无提交记录", systemImage: "clock.arrow.circlepath")
+                    VStack(spacing: 6) {
+                        Image(systemName: issues.isEmpty ? "clock.arrow.circlepath" : "exclamationmark.triangle")
+                            .font(.title3)
+                        Text(issues.isEmpty ? "暂无提交记录" : "提交历史暂时不可用")
+                            .font(.callout.weight(.medium))
+                        if !issues.isEmpty {
+                            Text("可在右侧展开查看读取原因")
+                                .font(.caption)
+                        }
+                    }
+                    .foregroundStyle(palette.secondaryText)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     List(selection: $selectedRevisionID) {
                         ForEach(Array(revisions.enumerated()), id: \.element.id) { index, revision in
                             HStack(spacing: 8) {
                                 if supportsGraph { HistoryGraphCell(row: graphRows[index], accent: palette.accent, width: graphWidth, drawsConnections: drawsGraphConnections) }
-                                else { Color.clear.frame(width: graphWidth) }
                                 Text(revision.subject).lineLimit(1).layoutPriority(2).frame(maxWidth: .infinity, alignment: .leading)
                                 if showAuthor { Text(revision.author).lineLimit(1).frame(width: 92, alignment: .leading) }
                                 if showDate { Text(revision.date.formatted(date: .numeric, time: .shortened)).lineLimit(1).frame(width: 126, alignment: .leading) }
@@ -268,11 +296,11 @@ private struct HistoryRevisionTable: View {
 
     private func tableHeader(graphWidth: CGFloat, showAuthor: Bool, showDate: Bool, showHash: Bool) -> some View {
         HStack(spacing: 8) {
-            Text("图").frame(width: graphWidth)
+            if supportsGraph { Text("图").frame(width: graphWidth) }
             Text("提交说明").frame(maxWidth: .infinity, alignment: .leading)
             if showAuthor { Text("作者").frame(width: 92, alignment: .leading) }
             if showDate { Text("日期").frame(width: 126, alignment: .leading) }
-            if showHash { Text("哈希").frame(width: 70, alignment: .leading) }
+            if showHash { Text(supportsGraph ? "哈希" : "修订号").frame(width: 70, alignment: .leading) }
         }
         .font(.caption.weight(.semibold)).foregroundStyle(palette.secondaryText)
         .padding(.horizontal, 10).padding(.vertical, 7)
@@ -283,11 +311,16 @@ private struct HistoryRevisionInspector: View {
     @Bindable var model: WorkspaceModel
     let palette: AppPalette
     let isCompact: Bool
+    @State private var issueDetailsExpanded = false
+    @State private var messageDetailsExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: isCompact ? 7 : 12) {
+            if !issues.isEmpty {
+                HistoryIssueNotice(message: issues.joined(separator: "\n"), palette: palette, isExpanded: $issueDetailsExpanded)
+            }
             if let revision = selectedRevision {
-                Text(revision.subject).font(.headline).lineLimit(isCompact ? 2 : nil).fixedSize(horizontal: false, vertical: !isCompact)
+                Text(revision.subject).font(.headline).lineLimit(isCompact ? 2 : 3)
                 referenceLabels(revision.references)
                 HStack(spacing: 8) {
                     Text(revision.shortID).font(.system(.caption, design: .monospaced)).foregroundStyle(palette.accent)
@@ -296,7 +329,18 @@ private struct HistoryRevisionInspector: View {
                 if !isCompact {
                     Label(revision.date.formatted(date: .abbreviated, time: .shortened), systemImage: "calendar")
                         .font(.caption).foregroundStyle(palette.secondaryText)
-                    if !messageBody.isEmpty { Text(messageBody).font(.callout).textSelection(.enabled) }
+                    if !messageBody.isEmpty {
+                        DisclosureGroup(isExpanded: $messageDetailsExpanded) {
+                            ScrollView {
+                                Text(messageBody).font(.callout).textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .frame(maxHeight: 88)
+                        } label: {
+                            Text(messageBody).font(.callout).lineLimit(2)
+                        }
+                        .tint(palette.accent)
+                    }
                     Button { } label: { Label("审查此提交", systemImage: "sparkles") }
                         .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
                         .disabled(true).help("AI 审查当前不可用")
@@ -316,6 +360,10 @@ private struct HistoryRevisionInspector: View {
 
     private var selectedRevision: Revision? {
         model.snapshot?.revisions.first { $0.id == model.selectedRevisionID }
+    }
+
+    private var issues: [String] {
+        (model.workspace?.issues ?? []) + (model.snapshot?.issues ?? [])
     }
 
     private var messageBody: String {
@@ -355,6 +403,40 @@ private struct HistoryRevisionInspector: View {
 
     private func changeColor(_ kind: FileChangeKind) -> Color {
         switch kind { case .added, .copied: palette.added; case .deleted: palette.removed; default: palette.accent }
+    }
+}
+
+private struct HistoryIssueNotice: View {
+    let message: String
+    let palette: AppPalette
+    @Binding var isExpanded: Bool
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            ScrollView {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(palette.text)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 96)
+            .padding(.top, 3)
+        } label: {
+            Label(summary, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(palette.text)
+                .lineLimit(1)
+        }
+        .tint(palette.removed)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .background(palette.removed.opacity(0.10), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .help(message)
+    }
+
+    private var summary: String {
+        message.split(whereSeparator: \.isNewline).first.map(String.init) ?? "仓库读取失败"
     }
 }
 

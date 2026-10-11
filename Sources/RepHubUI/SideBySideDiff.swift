@@ -18,7 +18,7 @@ enum DiffRow: Equatable {
 /// 不修改已有 `PatchLineParser`，供并排差异区按 hunk 对齐左右行。
 enum SideBySideDiffParser {
     static func parse(_ patch: String) -> [DiffRow] {
-        let lines = patch.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let lines = normalizedLines(in: patch)
         var rows: [DiffRow] = []
         var oldLine: Int?
         var newLine: Int?
@@ -99,6 +99,14 @@ enum SideBySideDiffParser {
     private static func displayNumber(_ number: Int?) -> Int? {
         guard let number, number > 0 else { return nil }
         return number
+    }
+
+    private static func normalizedLines(in patch: String) -> [String] {
+        patch
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
     }
 
 }

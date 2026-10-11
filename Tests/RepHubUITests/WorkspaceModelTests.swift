@@ -82,6 +82,54 @@ final class WorkspaceModelTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(revisions.filter { $0 == "a1b2c3d4" }.count, 2)
     }
 
+    func testHistoryModeSwitchesDualBindingsWithoutLoadingWorkingDiff() async throws {
+        let gitLog = WorkspaceInvocationLog()
+        let svnLog = WorkspaceInvocationLog()
+        let git = WorkspaceFixtureProvider(log: gitLog)
+        let svn = WorkspaceFixtureProvider(providerID: .svn, revisions: [Revision(id: "r42", author: "zym", date: .distantPast, message: "svn history")], log: svnLog)
+        let model = WorkspaceModel(service: RepositoryService(providers: [git, svn]))
+
+        model.setHistoryVisible(true)
+        model.open(try makeDirectory())
+        try await waitUntil { model.selectedBinding?.providerID == .git && model.patch?.text == "revision:a1b2c3d4:Sources/Revision.swift" }
+
+        let svnBinding = try XCTUnwrap(model.workspace?.bindings.first(where: { $0.providerID == .svn }))
+        model.selectBinding(svnBinding)
+        try await waitUntil { model.selectedBinding?.providerID == .svn && model.selectedRevisionID == "r42" && model.patch?.text == "revision:r42:Sources/Revision.swift" }
+
+        let gitDiffs = await gitLog.diffRequests()
+        let svnDiffs = await svnLog.diffRequests()
+        XCTAssertFalse(gitDiffs.contains { $0.revision == nil })
+        XCTAssertFalse(svnDiffs.contains { $0.revision == nil })
+    }
+
+    func testHistoryModeWithEmptyHistoryDoesNotShowWorkingDiff() async throws {
+        let provider = WorkspaceFixtureProvider(providerID: .svn, revisions: [])
+        let model = WorkspaceModel(service: RepositoryService(providers: [provider]))
+
+        model.setHistoryVisible(true)
+        model.open(try makeDirectory())
+        try await waitUntil { model.snapshot != nil && !model.isLoading }
+
+        XCTAssertNil(model.selectedRevisionID)
+        XCTAssertNil(model.selectedPath)
+        XCTAssertNil(model.patch)
+        let diffs = await provider.log.diffRequests()
+        XCTAssertTrue(diffs.isEmpty)
+    }
+
+    func testLeavingHistoryModeRestoresWorkingDiff() async throws {
+        let provider = WorkspaceFixtureProvider()
+        let model = WorkspaceModel(service: RepositoryService(providers: [provider]))
+
+        model.setHistoryVisible(true)
+        model.open(try makeDirectory())
+        try await waitUntil { model.patch?.text == "revision:a1b2c3d4:Sources/Revision.swift" }
+
+        model.setHistoryVisible(false)
+        try await waitUntil { model.selectedRevisionID == nil && model.selectedPath == "Sources/App.swift" && model.patch?.text == "working:Sources/App.swift" }
+    }
+
     private func makeDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("rephub-ui-workspace-\(UUID().uuidString)", isDirectory: true)
@@ -117,23 +165,26 @@ private struct WorkspaceFixtureProvider: VersionControlProvider {
         let revision: String?
     }
 
-    let id: ProviderID = .git
-    let displayName = "Git 测试适配器"
+    let id: ProviderID
+    var displayName: String { id == .svn ? "SVN 测试适配器" : "Git 测试适配器" }
     let log: WorkspaceInvocationLog
     let delays: [String: UInt64]
+    let revisions: [Revision]
 
-    init(delays: [String: UInt64] = [:], log: WorkspaceInvocationLog = WorkspaceInvocationLog()) {
+    init(providerID: ProviderID = .git, revisions: [Revision]? = nil, delays: [String: UInt64] = [:], log: WorkspaceInvocationLog = WorkspaceInvocationLog()) {
+        self.id = providerID
+        self.revisions = revisions ?? [Revision(id: providerID == .svn ? "r1" : "a1b2c3d4", author: "zym", date: .distantPast, message: "feat: 历史读取")]
         self.delays = delays
         self.log = log
     }
 
     func detect(at directory: URL) async throws -> RepositoryBinding? {
         RepositoryBinding(
-            providerID: .git,
+            providerID: id,
             providerName: displayName,
             root: directory,
-            currentBranch: "main",
-            capabilities: [.status, .diff, .history, .branches, .commitGraph]
+            currentBranch: id == .git ? "main" : "",
+            capabilities: id == .git ? [.status, .diff, .history, .branches, .commitGraph] : [.status, .diff, .history]
         )
     }
 
@@ -149,7 +200,7 @@ private struct WorkspaceFixtureProvider: VersionControlProvider {
 
     func history(in binding: RepositoryBinding, limit: Int, reference: String?) async throws -> [Revision] {
         await log.recordHistory(reference)
-        return [Revision(id: "a1b2c3d4", author: "zym", date: .distantPast, message: "feat: 历史读取")]
+        return revisions
     }
 
     func branches(in binding: RepositoryBinding) async throws -> [BranchReference] { [] }

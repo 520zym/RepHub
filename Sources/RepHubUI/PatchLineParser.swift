@@ -11,8 +11,7 @@ enum PatchLineParser {
     static func parse(_ text: String) -> [PatchDisplayLine] {
         var oldLine: Int?
         var newLine: Int?
-        return text.split(separator: "\n", omittingEmptySubsequences: false).map { rawLine in
-            let line = String(rawLine)
+        return normalizedLines(in: text).map { line in
             if let range = hunkRange(line) {
                 oldLine = range.old
                 newLine = range.new
@@ -51,5 +50,13 @@ enum PatchLineParser {
     private static func rangeStart(_ field: String, prefix: Character) -> Int? {
         guard field.first == prefix else { return nil }
         return Int(field.dropFirst().split(separator: ",", maxSplits: 1).first ?? "")
+    }
+
+    private static func normalizedLines(in text: String) -> [String] {
+        text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
     }
 }

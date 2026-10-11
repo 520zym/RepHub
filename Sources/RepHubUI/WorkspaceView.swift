@@ -42,11 +42,7 @@ public struct WorkspaceView: View {
         .toolbar { toolbar(palette: palette) }
         .toolbar(removing: .title)
         .onChange(of: section) { _, value in
-            if value == .history {
-                model.selectRevision(model.snapshot?.revisions.first(where: { $0.id == model.selectedRevisionID }) ?? model.snapshot?.revisions.first)
-            } else if model.selectedRevisionID != nil {
-                model.selectChange(model.snapshot?.changes.first)
-            }
+            model.setHistoryVisible(value == .history)
         }
         .onChange(of: model.workspace?.id) { _, _ in
             commitTargets = Set(model.workspace?.bindings.map(\.id) ?? [])
@@ -61,7 +57,7 @@ public struct WorkspaceView: View {
         let sidebarWidth = min(290, max(210, (size.width - inset * 2) * 0.22))
         return VStack(spacing: inset) {
             HStack(spacing: 0) {
-                ChangeTreeView(model: model, palette: palette)
+                ChangeTreeView(model: model, palette: palette, showsBindingPicker: !historyExpanded)
                     .frame(width: sidebarWidth, height: editorHeight, alignment: .topLeading)
                 VStack(spacing: 0) {
                     DiffView(model: model, appearance: appearance)
@@ -96,17 +92,20 @@ public struct WorkspaceView: View {
                     HStack(spacing: 7) {
                         Image(systemName: "externaldrive").font(.system(size: 14))
                         Text(model.workspace?.name ?? "RepHub").font(.system(size: 13, weight: .semibold))
+                            .lineLimit(1).truncationMode(.middle).frame(maxWidth: 190)
                     }
                     .frame(height: 30)
                 }
                 .menuStyle(.borderlessButton).menuIndicator(.visible).fixedSize()
                 .help("打开或切换仓库")
                 if let binding = model.selectedBinding {
-                    Label(binding.currentBranch.isEmpty ? binding.providerName : binding.currentBranch, systemImage: "arrow.triangle.branch")
+                    Label(binding.currentBranch.isEmpty ? binding.providerName : binding.currentBranch,
+                          systemImage: binding.capabilities.contains(.branches) ? "arrow.triangle.branch" : "externaldrive")
                         .labelStyle(.titleAndIcon)
                         .font(.system(size: 12)).lineLimit(1)
+                        .truncationMode(.middle).frame(maxWidth: 170)
                         .foregroundStyle(palette.secondaryText)
-                        .help("当前工作副本分支")
+                        .help(binding.currentBranch.isEmpty ? binding.providerName : binding.currentBranch)
                 }
             }
         }
@@ -168,10 +167,12 @@ public struct WorkspaceView: View {
     }
 
     private func statusBar(palette: AppPalette) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: model.errorMessage == nil ? "checkmark.circle" : "exclamationmark.triangle")
-            Text(model.errorMessage ?? (model.isLoading ? "正在读取仓库…" : "就绪"))
-                .lineLimit(1).help(model.errorMessage ?? "")
+        let issues = (model.workspace?.issues ?? []) + (model.snapshot?.issues ?? [])
+        let hasError = model.errorMessage != nil || !issues.isEmpty
+        return HStack(spacing: 8) {
+            Image(systemName: hasError ? "exclamationmark.triangle" : "checkmark.circle")
+            Text(model.isLoading ? "正在读取仓库…" : (model.errorMessage ?? (hasError ? "部分读取失败" : "就绪")))
+                .lineLimit(1).help(model.errorMessage ?? issues.joined(separator: "\n"))
             Spacer()
             if let snapshot = model.snapshot {
                 Text("\(snapshot.changes.count) 个变更")
@@ -201,6 +202,7 @@ private enum WorkspaceSection: Hashable { case workingCopy, history }
 private struct ChangeTreeView: View {
     @Bindable var model: WorkspaceModel
     let palette: AppPalette
+    let showsBindingPicker: Bool
     @State private var filter = ""
     @State private var collapsed: Set<String> = []
 
@@ -215,6 +217,15 @@ private struct ChangeTreeView: View {
                 Spacer()
                 Text("\(model.snapshot?.changes.count ?? 0)").font(.system(size: 11)).foregroundStyle(palette.secondaryText)
             }.padding(.horizontal, 14).frame(height: 39)
+            if showsBindingPicker, let bindings = model.workspace?.bindings, bindings.count > 1 {
+                WorkbenchSegmentedPicker(title: "版本控制", selection: Binding(
+                    get: { model.selectedBindingID },
+                    set: { id in
+                        if let binding = bindings.first(where: { $0.id == id }) { model.selectBinding(binding) }
+                    }
+                ), options: bindings.map { .init(Optional($0.id), $0.providerID == .svn ? "SVN" : $0.providerName) }, palette: palette)
+                    .padding(.horizontal, 10).padding(.bottom, 8)
+            }
             WorkbenchSearchField("筛选文件…", text: $filter, palette: palette)
             .padding(.horizontal, 10).padding(.bottom, 10)
             ScrollView {
@@ -243,7 +254,7 @@ private struct ChangeTreeView: View {
                                 }
                             }
                             .font(.system(size: 12))
-                            .padding(.leading, 9 + CGFloat(row.depth) * 13).padding(.trailing, 9)
+                            .padding(.leading, 9 + CGFloat(min(row.depth, 5)) * 13).padding(.trailing, 9)
                             .frame(maxWidth: .infinity, minHeight: 29, alignment: .leading)
                             .contentShape(Rectangle())
                             .background(row.change != nil && row.change?.path == model.selectedPath ? palette.selection : .clear, in: RoundedRectangle(cornerRadius: 6))

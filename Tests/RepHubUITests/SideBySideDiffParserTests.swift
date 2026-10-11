@@ -33,4 +33,27 @@ final class SideBySideDiffParserTests: XCTestCase {
             new: DiffSideLine(number: 1, text: "++literalPlusCode", kind: .added)
         ))
     }
+
+    func testNormalizesMixedLineEndingsWithoutLosingEmptyContextLines() {
+        let rows = SideBySideDiffParser.parse("@@ -4,3 +4,3 @@\r\n retained\r\n \n-old\r\n+new\n")
+
+        XCTAssertEqual(rows[1], .paired(
+            old: DiffSideLine(number: 4, text: "retained", kind: .context),
+            new: DiffSideLine(number: 4, text: "retained", kind: .context)
+        ))
+        XCTAssertEqual(rows[2], .paired(
+            old: DiffSideLine(number: 5, text: "", kind: .context),
+            new: DiffSideLine(number: 5, text: "", kind: .context)
+        ))
+        XCTAssertEqual(rows[3], .paired(
+            old: DiffSideLine(number: 6, text: "old", kind: .removed),
+            new: DiffSideLine(number: 6, text: "new", kind: .added)
+        ))
+        XCTAssertFalse(rows.contains { row in
+            switch row {
+            case .metadata(let text, _): text.contains("\r")
+            case .paired(let old, let new): (old?.text.contains("\r") ?? false) || (new?.text.contains("\r") ?? false)
+            }
+        })
+    }
 }
