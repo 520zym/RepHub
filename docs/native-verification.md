@@ -91,6 +91,18 @@
 
 详细配置、依赖与证据见 [SVN TLS 兼容](svn-tls-compatibility.md)。截图：`build/verification/tls-tv-svn-history.png`、`tls-eu-svn-history.png`、`tls-svn-settings.png`。
 
+## 自动识别与静默兼容
+
+按后续要求移除“SVN 连接”手动设置页和持久化规则读取。SVN 适配器默认先正常连接，只有明确的协议握手错误才自动尝试一次旧 TLS；成功结果按 HTTPS 主机和端口在本次运行缓存 15 分钟，过期重新优先现代协商。缓存命中后连接失败会丢弃缓存。证书、认证、DNS、网络超时和取消不触发回退。
+
+- 重启更新后的应用，没有执行任何兼容设置：打开 TV 双仓库并选择 SVN，自动读到 150 条历史、`r15730` 文件与并排差异。
+- 同次运行切换至 EU ROOT 纯 SVN 仓库，150 条历史及 `r15263` 的并排差异成功，状态均为“就绪”；未弹出兼容确认或临时 SSL 错误。
+- 原生设置仅保留外观和代码配色，原有三项外观选择保持；没有 SVN TLS 控件。
+- `swift test --filter 'SVNTLSPolicyTests|SVNTLSHandshakeTests|SVNProviderTests|RepositoryEndpointPolicyTests|IntegrationTests'` 通过 16 项：自动回退及 TLS 策略 10、四版本握手矩阵 1、SVN 本地适配器 1、端点校验 2、双仓库集成 2，无失败或跳过。覆盖成功缓存、不同主机/端口、过期、失败后恢复默认、stderr 错误分类、证书与认证优先拒绝、超时和取消，以及运行时不支持时保留诊断。
+- `scripts/build-app.sh` 编译、打包及签名成功；真实业务仓库只读。
+
+本轮截图：`build/verification/auto-tls-tv-history.png`、`auto-tls-eu-history.png`、`auto-tls-settings.png`。旧版本连接规则文件不再参与运行，没有迁移成默认降级名单。
+
 ## 尚未覆盖
 
 尚未验证所有旧 SVN 密码套件、其他 SSL 运行时、网络代理及全新的凭据/证书信任流程；认证沿用现有本机配置。未执行业务目录写入。当前没有更新、初始化、提交、推送或 AI 的执行能力。不同目录关联、后台监控、完整语法高亮及历史分页也属于后续阶段。

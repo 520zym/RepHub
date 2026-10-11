@@ -10,17 +10,9 @@ import SVNAdapter
 struct RepHubApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @State private var appearance = AppearanceStore()
-    @State private var workspace: WorkspaceModel
-    private let connections: RepositoryConnectionSettings
-
-    init() {
-        let connections = RepositoryConnectionSettings()
-        self.connections = connections
-        _workspace = State(initialValue: WorkspaceModel(service: RepositoryService(providers: [
-            GitProvider(),
-            SVNProvider(tlsMode: { await connections.mode(for: $0) })
-        ])))
-    }
+    @State private var workspace = WorkspaceModel(service: RepositoryService(providers: [
+        GitProvider(), SVNProvider()
+    ]))
 
     var body: some Scene {
         Window("RepHub", id: "workspace") {
@@ -44,14 +36,8 @@ struct RepHubApp: App {
         }
 
         Settings {
-            TabView {
-                ThemeSettingsView(appearance: appearance)
-                    .tabItem { Label("外观", systemImage: "paintpalette") }
-                RepositoryConnectionSettingsView(settings: connections, onChange: workspace.refresh)
-                    .tabItem { Label("SVN 连接", systemImage: "network") }
-            }
-            .preferredColorScheme(appearance.preferredColorScheme)
-            .frame(width: 610, height: 500)
+            ThemeSettingsView(appearance: appearance)
+                .preferredColorScheme(appearance.preferredColorScheme)
         }
     }
 }

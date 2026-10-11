@@ -8,14 +8,30 @@ import VersionControlCore
 /// 仅通过 Subversion 命令行读取工作副本；不保存认证信息，也不修改工作副本。
 public struct SVNProvider: VersionControlProvider {
     public let runner: CommandRunner
-    private let tlsMode: @Sendable (String?) async -> RepositoryTLSMode
+    private let tlsFallback: SVNAutomaticTLSFallback
+    private let commandExecutor: @Sendable ([String], URL, URL?) async throws -> CommandResult
 
-    public init(
+    public init(runner: CommandRunner = CommandRunner()) {
+        self.runner = runner
+        self.tlsFallback = SVNAutomaticTLSFallback()
+        self.commandExecutor = { arguments, directory, configuration in
+            try await runner.run(
+                executable: "svn",
+                arguments: arguments,
+                directory: directory,
+                opensslConfiguration: configuration
+            )
+        }
+    }
+
+    init(
         runner: CommandRunner = CommandRunner(),
-        tlsMode: @escaping @Sendable (String?) async -> RepositoryTLSMode = { _ in .modern }
+        tlsFallback: SVNAutomaticTLSFallback,
+        commandExecutor: @escaping @Sendable ([String], URL, URL?) async throws -> CommandResult
     ) {
         self.runner = runner
-        self.tlsMode = tlsMode
+        self.tlsFallback = tlsFallback
+        self.commandExecutor = commandExecutor
     }
 
     public let id: ProviderID = .svn
@@ -135,31 +151,19 @@ public struct SVNProvider: VersionControlProvider {
     private func svn(_ arguments: [String], directory: URL, remoteURL: String? = nil) async throws -> CommandResult {
         // --non-interactive 防止凭据提示阻塞 UI；不接受或绕过 TLS 证书错误。
         let command = ["--non-interactive", "--no-auth-cache"] + arguments
-        let mode = await tlsMode(remoteURL)
-        let result: CommandResult
-        if mode == .legacyCompatible, usesHTTPS(remoteURL) {
-            try await SVNOpenSSLRuntime.shared.requireOpenSSL3(using: runner)
-            let runner = runner
-            result = try await SVNTLSConfiguration.withLegacyCompatibleConfiguration { configuration in
-                try await runner.run(
-                    executable: "svn",
-                    arguments: command,
-                    directory: directory,
-                    opensslConfiguration: configuration
-                )
+        let executor = commandExecutor
+        let runner = runner
+        let result = try await tlsFallback.execute(
+            remoteURL: remoteURL,
+            modern: { try await executor(command, directory, nil) },
+            legacy: {
+                try await SVNOpenSSLRuntime.shared.requireOpenSSL3(using: runner)
+                return try await SVNTLSConfiguration.withLegacyCompatibleConfiguration { configuration in
+                    try await executor(command, directory, configuration)
+                }
             }
-        } else {
-            result = try await runner.run(executable: "svn", arguments: command, directory: directory)
-        }
+        )
         return try requireSuccess(result, tool: "svn")
-    }
-
-    private func usesHTTPS(_ remoteURL: String?) -> Bool {
-        guard let remoteURL, let components = URLComponents(string: remoteURL) else { return false }
-        return components.scheme?.lowercased() == "https"
-            && components.host?.isEmpty == false
-            && components.user == nil
-            && components.password == nil
     }
 
     private func workingCopyRepositoryPath(in binding: RepositoryBinding) async throws -> String {
