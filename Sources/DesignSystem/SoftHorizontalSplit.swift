@@ -4,7 +4,7 @@ import SwiftUI
 /// 使用相邻背景色分区，保留透明拖拽热区的横向分栏。
 public struct SoftHorizontalSplit<Leading: View, Trailing: View>: View {
     private let fixedSide: HorizontalEdge
-    private let range: ClosedRange<CGFloat>
+    private let minimumFixed: CGFloat
     private let flexibleMinimum: CGFloat
     private let leading: () -> Leading
     private let trailing: () -> Trailing
@@ -16,13 +16,13 @@ public struct SoftHorizontalSplit<Leading: View, Trailing: View>: View {
     public init(
         fixedSide: HorizontalEdge = .leading,
         initialWidth: CGFloat,
-        range: ClosedRange<CGFloat>,
+        minimumFixed: CGFloat = 100,
         flexibleMinimum: CGFloat,
         @ViewBuilder leading: @escaping () -> Leading,
         @ViewBuilder trailing: @escaping () -> Trailing
     ) {
         self.fixedSide = fixedSide
-        self.range = range
+        self.minimumFixed = minimumFixed
         self.flexibleMinimum = flexibleMinimum
         self.leading = leading
         self.trailing = trailing
@@ -39,13 +39,17 @@ public struct SoftHorizontalSplit<Leading: View, Trailing: View>: View {
                 if fixedSide == .leading {
                     leading()
                         .frame(width: fixedWidth)
+                        .clipped()
                     trailing()
                         .frame(width: flexibleWidth)
+                        .clipped()
                 } else {
                     leading()
                         .frame(width: flexibleWidth)
+                        .clipped()
                     trailing()
                         .frame(width: fixedWidth)
+                        .clipped()
                 }
             }
             .frame(width: proxy.size.width, height: proxy.size.height, alignment: .leading)
@@ -72,7 +76,7 @@ public struct SoftHorizontalSplit<Leading: View, Trailing: View>: View {
             .gesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .global)
                     .onChanged { value in
-                        let origin = dragOrigin ?? width
+                        let origin = dragOrigin ?? clamp(width, to: bounds)
                         if dragOrigin == nil {
                             dragOrigin = origin
                         }
@@ -109,11 +113,9 @@ public struct SoftHorizontalSplit<Leading: View, Trailing: View>: View {
 
     private func resolvedBounds(for availableWidth: CGFloat) -> ClosedRange<CGFloat> {
         let available = max(0, availableWidth)
-        let requestedLower = max(0, range.lowerBound)
-        let requestedUpper = max(requestedLower, range.upperBound)
         let maximumForFlexibleSide = max(0, available - max(0, flexibleMinimum))
-        let upper = min(requestedUpper, maximumForFlexibleSide)
-        let lower = min(requestedLower, upper)
+        let upper = maximumForFlexibleSide
+        let lower = min(max(0, minimumFixed), upper)
         return lower...upper
     }
 

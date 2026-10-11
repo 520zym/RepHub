@@ -3,8 +3,41 @@ import Foundation
 import ToolExecution
 import VersionControlCore
 
+private struct GitHistoryCursor: Codable {
+    enum Kind: String, Codable { case repository, file }
+
+    let version: Int
+    let kind: Kind
+    let bindingID: String
+    let reference: String?
+    let path: String?
+    let tips: [String]
+    let offset: Int
+    let trackedPath: String?
+
+    init(kind: Kind, bindingID: String, reference: String?, path: String? = nil, tips: [String], offset: Int, trackedPath: String?) {
+        self.version = 1
+        self.kind = kind
+        self.bindingID = bindingID
+        self.reference = reference
+        self.path = path
+        self.tips = tips
+        self.offset = offset
+        self.trackedPath = trackedPath
+    }
+
+    func advanced(by count: Int, trackedPath: String? = nil) -> GitHistoryCursor {
+        GitHistoryCursor(
+            kind: kind, bindingID: bindingID, reference: reference, path: path, tips: tips,
+            offset: offset + count, trackedPath: trackedPath ?? self.trackedPath
+        )
+    }
+
+
+}
+
 /// Git 适配器。读取与受限的获取／快进更新均通过参数数组执行，不经过 shell。
-public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryProvider, RepositoryAcquisitionProvider, RepositoryCommitProvider, @unchecked Sendable {
+public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPagingProvider, RepositoryAcquisitionProvider, RepositoryCommitProvider, @unchecked Sendable {
     public let id: ProviderID = .git
     public let displayName = "Git"
 
@@ -153,6 +186,43 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPr
         return try parseHistory(result.data)
     }
 
+    /// 分页历史固定首次请求可见的提交端点。之后即使其他客户端更新了分支或远端引用，
+    /// 也仍沿用这些不可变的对象 ID，避免 "加载更多" 发生重复或跳过。
+    public func historyPage(in binding: RepositoryBinding, request: HistoryPageRequest) async throws -> RepositoryHistoryPage {
+        try ensureGit(binding)
+        let limit = try validatedHistoryPageLimit(request.limit)
+        let cursor: GitHistoryCursor
+        if let encoded = request.cursor {
+            cursor = try decodeHistoryCursor(encoded)
+            try validate(cursor: cursor, kind: .repository, binding: binding, reference: request.reference, path: nil)
+        } else {
+            cursor = GitHistoryCursor(
+                kind: .repository,
+                bindingID: binding.id,
+                reference: normalizedHistoryReference(request.reference),
+                tips: try await fixedHistoryTips(in: binding.root, reference: request.reference),
+                offset: 0,
+                trackedPath: nil
+            )
+        }
+        guard !cursor.tips.isEmpty else { return RepositoryHistoryPage(revisions: []) }
+
+        let result = try await git(
+            [
+                "log", "--topo-order", "--date=iso-strict", "--skip=\(cursor.offset)", "--max-count=\(limit + 1)",
+                "--format=%H%x00%an%x00%aI%x00%P%x00%D%x00%B%x00%x1e", "--end-of-options"
+            ] + cursor.tips,
+            in: binding.root
+        )
+        let output = try requireSuccess(result, tool: "git")
+        let revisions = try parseHistory(output.data)
+        let page = Array(revisions.prefix(limit))
+        let next = revisions.count > limit
+            ? try encodeHistoryCursor(cursor.advanced(by: page.count))
+            : nil
+        return RepositoryHistoryPage(revisions: page, nextCursor: next)
+    }
+
     /// 以 Git 的重命名追溯读取单个文件的提交历史。命令和路径均以参数数组传递，
     /// `--literal-pathspecs` 防止以冒号开头的文件名被解释为路径规格语法。
     public func fileHistory(
@@ -184,6 +254,59 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPr
             _ = try requireSuccess(result, tool: "git")
         }
         return try parseFileHistory(result.data, newestPath: path)
+    }
+
+    /// 固定初始提交与路径，从同一追溯链读取所需前缀后切页。
+    /// --follow 不能与 --skip 混用：被跳过的改名会丢失追溯状态；从单一父线重启也可能遗漏合并历史。
+    public func fileHistoryPage(
+        in binding: RepositoryBinding,
+        path: String,
+        request: HistoryPageRequest
+    ) async throws -> FileHistoryPage {
+        try ensureGit(binding)
+        guard !path.isEmpty else { throw VersionControlError.invalidData("未提供文件路径。") }
+        let limit = try validatedHistoryPageLimit(request.limit)
+        let cursor: GitHistoryCursor
+        if let encoded = request.cursor {
+            cursor = try decodeHistoryCursor(encoded)
+            try validate(cursor: cursor, kind: .file, binding: binding, reference: request.reference, path: path)
+        } else {
+            let reference = normalizedHistoryReference(request.reference) ?? "HEAD"
+            guard let tip = try await resolvedCommit(reference, in: binding.root) else {
+                if try await isEmptyRepository(binding.root) { return FileHistoryPage(entries: []) }
+                throw VersionControlError.invalidRepository("Git 引用不存在或不指向提交：\(reference)")
+            }
+            cursor = GitHistoryCursor(
+                kind: .file,
+                bindingID: binding.id,
+                reference: normalizedHistoryReference(request.reference),
+                path: path,
+                tips: [tip],
+                offset: 0,
+                trackedPath: path
+            )
+        }
+        guard let tip = cursor.tips.first else {
+            throw VersionControlError.invalidData("Git 文件历史游标不完整。")
+        }
+        let (readCount, overflow) = cursor.offset.addingReportingOverflow(limit + 1)
+        guard !overflow else { throw VersionControlError.invalidData("Git 文件历史游标范围无效。") }
+        let result = try await git(
+            [
+                "--literal-pathspecs", "log", "--follow", "-M", "--name-status", "-z", "--topo-order", "--date=iso-strict",
+                "--max-count=\(readCount)",
+                "--format=%x1e%H%x00%an%x00%aI%x00%P%x00%D%x00%B%x00",
+                "--end-of-options", tip, "--", path
+            ],
+            in: binding.root
+        )
+        let output = try requireSuccess(result, tool: "git")
+        let entries = try parseFileHistory(output.data, newestPath: path)
+        let page = Array(entries.dropFirst(cursor.offset).prefix(limit))
+        let next = entries.count > cursor.offset + limit
+            ? try encodeHistoryCursor(cursor.advanced(by: page.count))
+            : nil
+        return FileHistoryPage(entries: page, nextCursor: next)
     }
 
     /// 使用历史记录中该修订对应的路径，确保重命名前的提交不会错误地按当前文件名取差异。
@@ -992,6 +1115,124 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPr
         // attributesOfItem 可识别断开的符号链接；不能因 fileExists 返回 false 而误覆盖它。
         if (try? fileManager.attributesOfItem(atPath: destination.path)) != nil {
             throw VersionControlError.executionFailed("目标文件夹已存在，不能覆盖：\(destination.path)")
+        }
+    }
+
+    private func validatedHistoryPageLimit(_ limit: Int) throws -> Int {
+        guard limit > 0 else { throw VersionControlError.invalidData("历史每页条数必须大于 0。") }
+        guard limit <= 500 else { throw VersionControlError.unsupported("历史每页最多读取 500 条。") }
+        return limit
+    }
+
+    private func normalizedHistoryReference(_ reference: String?) -> String? {
+        let value = reference?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value?.isEmpty == false ? value : nil
+    }
+
+    /// 读取当前可达端点后立即将其解析为提交对象，而不是在后续页继续使用会移动的分支名。
+    private func fixedHistoryTips(in directory: URL, reference: String?) async throws -> [String] {
+        if let reference = normalizedHistoryReference(reference) {
+            guard let tip = try await resolvedCommit(reference, in: directory) else {
+                if try await isEmptyRepository(directory) { return [] }
+                throw VersionControlError.invalidRepository("Git 引用不存在或不指向提交：\(reference)")
+            }
+            return [tip]
+        }
+
+        // 一次读取所有 ref 的对象类型和 Git 已经完成的一层 peeled 值。常规分支、轻量 tag
+        // 与普通附注 tag 都不需要逐个启动 rev-parse；嵌套 tag 才回退到单独剥离。
+        let refs = try await git(
+            [
+                "for-each-ref", "--format=%(refname)%00%(objecttype)%00%(objectname)%00%(*objecttype)%00%(*objectname)",
+                "refs/heads", "refs/remotes", "refs/tags"
+            ],
+            in: directory
+        )
+        let records = try requireSuccess(refs, tool: "git").data
+            .split(separator: 0x0A, omittingEmptySubsequences: true)
+        var tips: [String] = []
+        var nestedTags: [String] = []
+        for record in records {
+            let fields = record.split(separator: 0, omittingEmptySubsequences: false).map { String(decoding: $0, as: UTF8.self) }
+            guard fields.count == 5 else { throw VersionControlError.invalidData("Git 引用输出字段不完整。") }
+            let name = fields[0]
+            let objectType = fields[1]
+            let objectID = fields[2]
+            let peeledType = fields[3]
+            let peeledID = fields[4]
+            if objectType == "commit", isGitObjectID(objectID) {
+                appendHistoryTip(objectID, to: &tips)
+            } else if peeledType == "commit", isGitObjectID(peeledID) {
+                appendHistoryTip(peeledID, to: &tips)
+            } else if objectType == "tag" {
+                // `*` 对嵌套 tag 仍可能是 tag；只对这种少见情况再解析到 commit。
+                nestedTags.append(name)
+            }
+        }
+        for name in nestedTags {
+            if let tip = try await resolvedCommit(name, in: directory) { appendHistoryTip(tip, to: &tips) }
+        }
+        // 游离 HEAD 不一定被任何引用指向，且单独解析一次即可。
+        if let head = try await resolvedCommit("HEAD", in: directory) { appendHistoryTip(head, to: &tips) }
+        return tips
+    }
+
+    private func appendHistoryTip(_ tip: String, to tips: inout [String]) {
+        if !tips.contains(tip) { tips.append(tip) }
+    }
+
+    /// `^{commit}` 会剥离附注 tag，同时排除指向 blob/tree 的异常引用。
+    private func resolvedCommit(_ reference: String, in directory: URL) async throws -> String? {
+        let result = try await git(["rev-parse", "--verify", "--quiet", "--end-of-options", "\(reference)^{commit}"], in: directory)
+        if result.exitCode == 1 || result.exitCode == 128 { return nil }
+        let output = try requireSuccess(result, tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !output.isEmpty else { return nil }
+        return output
+    }
+
+    private func encodeHistoryCursor(_ cursor: GitHistoryCursor) throws -> String {
+        let data = try JSONEncoder().encode(cursor)
+        return data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    private func decodeHistoryCursor(_ value: String) throws -> GitHistoryCursor {
+        guard value.count <= 262_144 else { throw VersionControlError.invalidData("Git 历史游标过长。") }
+        var base64 = value.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        base64.append(String(repeating: "=", count: (4 - base64.count % 4) % 4))
+        guard let data = Data(base64Encoded: base64),
+              let cursor = try? JSONDecoder().decode(GitHistoryCursor.self, from: data) else {
+            throw VersionControlError.invalidData("Git 历史游标无效或已损坏，请刷新后重试。")
+        }
+        guard cursor.version == 1, cursor.offset >= 0, !cursor.bindingID.isEmpty,
+              !cursor.tips.contains(where: { !isGitObjectID($0) }) else {
+            throw VersionControlError.invalidData("Git 历史游标格式无效，请刷新后重试。")
+        }
+        return cursor
+    }
+
+    private func isGitObjectID(_ value: String) -> Bool {
+        guard value.count == 40 || value.count == 64 else { return false }
+        return value.utf8.allSatisfy { (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0) }
+    }
+
+    private func validate(
+        cursor: GitHistoryCursor,
+        kind: GitHistoryCursor.Kind,
+        binding: RepositoryBinding,
+        reference: String?,
+        path: String?
+    ) throws {
+        guard cursor.kind == kind,
+              cursor.bindingID == binding.id,
+              cursor.reference == normalizedHistoryReference(reference),
+              cursor.path == path else {
+            throw VersionControlError.invalidData("Git 历史游标不属于当前仓库或查询范围，请刷新后重试。")
+        }
+        if kind == .file, cursor.trackedPath?.isEmpty != false {
+            throw VersionControlError.invalidData("Git 文件历史游标缺少追溯路径，请刷新后重试。")
         }
     }
 

@@ -77,7 +77,7 @@ struct GitHistoryTests {
         #expect(sync.states[incomingID] == .incoming)
         #expect(sync.states[sharedID] == .synchronized)
         #expect(sync.states[otherBranchID] == nil)
-        #expect(sync.detail.contains("本机"))
+        #expect(sync.detail.contains("基于已获取的 origin/main"))
         #expect(sync.detail.contains("获取远端"))
     }
 

@@ -7,7 +7,7 @@ import VersionControlCore
 
 /// 通过 Subversion 命令行读取工作副本，并执行受限的更新、远端浏览和检出操作。
 /// 用户输入的认证信息只保留在当前进程内存中，不写入 SVN 认证缓存。
-public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryProvider, RepositoryAcquisitionProvider, RepositoryCommitProvider {
+public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingProvider, RepositoryAcquisitionProvider, RepositoryCommitProvider {
     public let runner: CommandRunner
     private let tlsFallback: SVNAutomaticTLSFallback
     private let commandExecutor: @Sendable ([String], URL, URL?) async throws -> CommandResult
@@ -169,6 +169,48 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryProvide
         }
     }
 
+    /// SVN 的修订号在整个仓库内单调递增，但某个目录可能跳过许多修订。分页游标因此保存
+    /// 下一次查询的数值下界，而不是把 `offset` 交给 SVN；这样新增的 HEAD 不会插入旧分页。
+    public func historyPage(
+        in binding: RepositoryBinding,
+        request: HistoryPageRequest
+    ) async throws -> RepositoryHistoryPage {
+        let limit = try historyPageLimit(request.limit)
+        let state: SVNHistoryCursor
+        if let rawCursor = request.cursor, !rawCursor.isEmpty {
+            state = try decodeHistoryCursor(rawCursor, binding: binding, path: nil, reference: request.reference)
+        } else {
+            let requested = try await resolvedPagingRevision(request.reference, in: binding)
+            // 新建但尚未产生任何修订的仓库是合法状态（HEAD=r0），不能构造 `0:1` 倒序范围。
+            guard requested != "0" else { return RepositoryHistoryPage(revisions: []) }
+            let target = try repositoryHistoryTarget(in: binding, pegRevision: requested)
+            let entries = try await svnLogEntries(
+                arguments: ["log", "--xml", "--limit", "1", "-r", "\(requested):1", target],
+                in: binding
+            )
+            guard let first = entries.first, let top = Int(first.revision), top > 0 else {
+                return RepositoryHistoryPage(revisions: [])
+            }
+            // URL 的 peg、查询上界和调用方原始引用都固定在游标中；续页绝不重新解析 HEAD。
+            state = SVNHistoryCursor(
+                bindingID: binding.id, path: nil, reference: requested,
+                requestScope: historyRequestScope(request.reference), pegRevision: requested, nextRevision: top
+            )
+        }
+
+        let target = try repositoryHistoryTarget(in: binding, pegRevision: state.pegRevision)
+        let entries = try await svnLogEntries(
+            arguments: ["log", "--xml", "--limit", String(limit + 1), "-r", "\(state.nextRevision):1", target],
+            in: binding
+        )
+        let pageEntries = Array(entries.prefix(limit))
+        let revisions = pageEntries.map { revision(from: $0) }
+        let nextCursor = entries.count > limit
+            ? try makeNextHistoryCursor(from: pageEntries, state: state)
+            : nil
+        return RepositoryHistoryPage(revisions: revisions, nextCursor: nextCursor)
+    }
+
     public func branches(in binding: RepositoryBinding) async throws -> [BranchReference] {
         []
     }
@@ -232,6 +274,81 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryProvide
             // 不能把 log 的仓库绝对路径伪装成当前 binding 下的相对路径。
             return FileHistoryEntry(revision: revision, path: fallbackPath, pegRevision: "r\(effectivePeg)")
         }
+    }
+
+    public func fileHistoryPage(
+        in binding: RepositoryBinding,
+        path: String,
+        request: HistoryPageRequest
+    ) async throws -> FileHistoryPage {
+        let limit = try historyPageLimit(request.limit)
+        let normalizedPath = normalizedRelativePath(path)
+        let target = try repositoryFileURL(path: normalizedPath, in: binding)
+        let localTarget = binding.root.appendingPathComponent(normalizedPath)
+        if FileManager.default.fileExists(atPath: localTarget.path), try await isNotVersioned(path: normalizedPath, in: binding) {
+            throw VersionControlError.invalidRepository("文件未受 SVN 管理，无法读取单文件提交历史：\(normalizedPath)")
+        }
+
+        let state: SVNHistoryCursor
+        let initialDeletion: SVNXMLDocument.LogEntry?
+        if let rawCursor = request.cursor, !rawCursor.isEmpty {
+            state = try decodeHistoryCursor(rawCursor, binding: binding, path: normalizedPath, reference: request.reference)
+            initialDeletion = nil
+        } else {
+            let requestedPeg = try await resolvedPagingRevision(request.reference, in: binding)
+            // 还没有任何修订时文件不可能存在；直接返回空页，避免把 r0 交给 svn log。
+            guard requestedPeg != "0" else { return FileHistoryPage(entries: []) }
+            do {
+                _ = try await svnLogEntries(
+                    arguments: ["log", "--xml", "--limit", "1", "-r", "\(requestedPeg):1", "\(target)@\(requestedPeg)"],
+                    in: binding
+                )
+                state = SVNHistoryCursor(
+                    bindingID: binding.id, path: normalizedPath, reference: requestedPeg,
+                    requestScope: historyRequestScope(request.reference), pegRevision: requestedPeg,
+                    nextRevision: Int(requestedPeg) ?? 0
+                )
+                initialDeletion = nil
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                guard isMissingSVNPath(error), let number = Int(requestedPeg), number > 1,
+                      let deletion = try await deletionLogEntry(
+                        target: target, path: normalizedPath, revision: requestedPeg, binding: binding
+                      ) else {
+                    throw error
+                }
+                state = SVNHistoryCursor(
+                    bindingID: binding.id, path: normalizedPath, reference: requestedPeg,
+                    requestScope: historyRequestScope(request.reference), pegRevision: String(number - 1),
+                    nextRevision: number - 1
+                )
+                initialDeletion = deletion
+            }
+        }
+
+        let logEntries = try await svnLogEntries(
+            arguments: [
+                "log", "--xml", "-v", "--limit", String(limit + 1),
+                "-r", "\(state.nextRevision):1", "\(target)@\(state.pegRevision)"
+            ],
+            in: binding
+        )
+        // 删除修订只属于首屏；后续页固定使用删除前的 peg，才能继续沿复制/改名链追溯。
+        let entries = (initialDeletion.map { [$0] } ?? []) + logEntries
+        let pageEntries = Array(entries.prefix(limit))
+        let fileEntries = pageEntries.map { entry in
+            FileHistoryEntry(
+                revision: revision(from: entry), path: normalizedPath,
+                pegRevision: "r\(state.pegRevision)"
+            )
+        }
+        // `logEntries` 比页面多取一条；首屏存在删除记录时，仍需保证删除记录占用一个位置。
+        let hasMore = entries.count > limit
+        let nextCursor = hasMore
+            ? try makeNextHistoryCursor(from: pageEntries, state: state)
+            : nil
+        return FileHistoryPage(entries: fileEntries, nextCursor: nextCursor)
     }
 
     public func fileHistoryDiff(in binding: RepositoryBinding, entry: FileHistoryEntry) async throws -> RepositoryPatch {
@@ -1218,6 +1335,99 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryProvide
         revision.hasPrefix("r") || revision.hasPrefix("R") ? String(revision.dropFirst()) : revision
     }
 
+    private func historyPageLimit(_ requested: Int) throws -> Int {
+        guard (1...500).contains(requested) else {
+            throw VersionControlError.invalidData("历史分页大小必须在 1 到 500 之间。")
+        }
+        return requested
+    }
+
+    private func normalizedPagingReference(_ reference: String?) -> String {
+        let value = reference?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "HEAD"
+        return value.isEmpty ? "HEAD" : normalizedRevision(value)
+    }
+
+    /// `nil`、显式 `HEAD` 与指定修订代表不同的首屏请求，不能把它们的游标混用。
+    private func historyRequestScope(_ reference: String?) -> String {
+        guard let reference else { return "default" }
+        let trimmed = reference.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "empty" }
+        let normalized = normalizedPagingReference(trimmed)
+        if normalized.uppercased() == "HEAD" { return "head" }
+        return "revision:\(normalized)"
+    }
+
+    /// `HEAD` 不能直接写入游标。先通过当前工作副本 URL 固定为数值修订，即使下一页期间
+    /// 仓库有新提交，后续查询也只会继续本次快照以下的历史。
+    private func resolvedPagingRevision(_ reference: String?, in binding: RepositoryBinding) async throws -> String {
+        let requested = normalizedPagingReference(reference)
+        if let number = Int(requested), number >= 0 { return String(number) }
+        guard requested.uppercased() == "HEAD", let remoteURL = binding.remoteURL, !remoteURL.isEmpty else {
+            throw VersionControlError.invalidData("SVN 历史引用必须是修订号或 HEAD。")
+        }
+        let result = try await svn(
+            ["info", "--xml", "-r", "HEAD", svnRemoteTarget(remoteURL)],
+            directory: binding.root,
+            remoteURL: remoteURL
+        )
+        guard let revision = try SVNXMLDocument(data: result.data).infoEntry?.revision,
+              let number = Int(revision), number >= 0 else {
+            throw VersionControlError.invalidData("无法固定 SVN 历史的 HEAD 修订号。")
+        }
+        return String(number)
+    }
+
+    private func svnLogEntries(arguments: [String], in binding: RepositoryBinding) async throws -> [SVNXMLDocument.LogEntry] {
+        let result = try await svn(arguments, directory: binding.root, remoteURL: binding.remoteURL)
+        return try SVNXMLDocument(data: result.data).logEntries
+    }
+
+    private func repositoryHistoryTarget(in binding: RepositoryBinding, pegRevision: String) throws -> String {
+        guard let remoteURL = binding.remoteURL, !remoteURL.isEmpty,
+              let peg = Int(pegRevision), peg > 0 else {
+            throw VersionControlError.invalidRepository("SVN 工作副本缺少远端 URL，无法固定历史分页范围。")
+        }
+        return "\(remoteURL)@\(peg)"
+    }
+
+    private func revision(from entry: SVNXMLDocument.LogEntry) -> Revision {
+        Revision(
+            id: "r\(entry.revision)", author: entry.author ?? "",
+            date: parseDate(entry.date), message: entry.message ?? ""
+        )
+    }
+
+    private func decodeHistoryCursor(
+        _ raw: String,
+        binding: RepositoryBinding,
+        path: String?,
+        reference: String?
+    ) throws -> SVNHistoryCursor {
+        let cursor = try SVNHistoryCursor.decode(raw)
+        guard cursor.version == SVNHistoryCursor.currentVersion,
+              cursor.bindingID == binding.id,
+              cursor.path == path,
+              cursor.nextRevision > 0,
+              Int(cursor.reference) != nil,
+              Int(cursor.pegRevision) != nil else {
+            throw VersionControlError.invalidData("SVN 历史游标不适用于当前仓库或路径，请刷新历史。")
+        }
+        guard cursor.requestScope == historyRequestScope(reference) else {
+            throw VersionControlError.invalidData("SVN 历史游标与当前引用不一致，请刷新历史。")
+        }
+        return cursor
+    }
+
+    private func makeNextHistoryCursor(
+        from entries: [SVNXMLDocument.LogEntry],
+        state: SVNHistoryCursor
+    ) throws -> String? {
+        guard let last = entries.last, let revision = Int(last.revision), revision > 1 else { return nil }
+        var next = state
+        next.nextRevision = revision - 1
+        return try next.encode()
+    }
+
     private func svnPathArgument(_ path: String) -> String {
         // 结尾 @ 表示没有 peg revision；仅含 @ 的路径需要它，普通路径追加会变成另一个文件名。
         path + "@"
@@ -1245,6 +1455,51 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryProvide
         return document.statusEntries
             .filter { $0.item == "unversioned" }
             .map { relativePath($0.path, root: binding.root) }
+    }
+}
+
+/// 游标只在 SVN 适配器内解释。它同时绑定工作副本、引用和文件路径，避免把上一仓库或
+/// 另一文件的数值修订错误地带到当前查询中。
+private struct SVNHistoryCursor: Codable, Sendable {
+    static let currentVersion = 1
+
+    let version: Int
+    let bindingID: String
+    let path: String?
+    let reference: String
+    let requestScope: String
+    let pegRevision: String
+    var nextRevision: Int
+
+    init(
+        version: Int = SVNHistoryCursor.currentVersion,
+        bindingID: String,
+        path: String?,
+        reference: String,
+        requestScope: String,
+        pegRevision: String,
+        nextRevision: Int
+    ) {
+        self.version = version
+        self.bindingID = bindingID
+        self.path = path
+        self.reference = reference
+        self.requestScope = requestScope
+        self.pegRevision = pegRevision
+        self.nextRevision = nextRevision
+    }
+
+    func encode() throws -> String {
+        let data = try JSONEncoder().encode(self)
+        return data.base64EncodedString()
+    }
+
+    static func decode(_ value: String) throws -> SVNHistoryCursor {
+        guard let data = Data(base64Encoded: value),
+              let cursor = try? JSONDecoder().decode(SVNHistoryCursor.self, from: data) else {
+            throw VersionControlError.invalidData("SVN 历史游标无效，请刷新历史。")
+        }
+        return cursor
     }
 }
 

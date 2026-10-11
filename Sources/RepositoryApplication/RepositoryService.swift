@@ -20,9 +20,12 @@ public struct BindingSnapshot: Sendable {
     public let branches: [BranchReference]
     public let issues: [String]
     public let syncStatus: RepositorySyncStatus?
-    public init(binding: RepositoryBinding, changes: [FileChange] = [], revisions: [Revision] = [], branches: [BranchReference] = [], issues: [String] = [], syncStatus: RepositorySyncStatus? = nil) {
+    /// 历史首页后的不透明游标。界面只能原样传回服务层，不能推断 Git／SVN 语义。
+    public let nextHistoryCursor: String?
+    public init(binding: RepositoryBinding, changes: [FileChange] = [], revisions: [Revision] = [], branches: [BranchReference] = [], issues: [String] = [], syncStatus: RepositorySyncStatus? = nil, nextHistoryCursor: String? = nil) {
         self.binding = binding; self.changes = changes; self.revisions = revisions; self.branches = branches; self.issues = issues
         self.syncStatus = syncStatus
+        self.nextHistoryCursor = nextHistoryCursor
     }
 }
 
@@ -167,13 +170,17 @@ public actor RepositoryService {
         }
         // Separate failures: e.g. unavailable SVN history must not hide readable local changes.
         var changes: [FileChange] = [], revisions: [Revision] = [], branches: [BranchReference] = [], issues: [String] = []
+        var nextHistoryCursor: String?
+        var syncStatus: RepositorySyncStatus?
         do { changes = try await provider.status(in: binding) }
         catch { issues.append("文件状态：\(error.localizedDescription)") }
         if Task.isCancelled { return BindingSnapshot(binding: binding, changes: changes, issues: issues) }
-        var historyLoaded = false
         do {
-            revisions = try await provider.history(in: binding, limit: 150, reference: reference)
-            historyLoaded = true
+            let page = try await historyPage(in: binding, reference: reference)
+            revisions = page.revisions
+            nextHistoryCursor = page.nextCursor
+            syncStatus = page.syncStatus
+            issues.append(contentsOf: page.issues)
         }
         catch { issues.append("提交历史：\(error.localizedDescription)") }
         if Task.isCancelled { return BindingSnapshot(binding: binding, changes: changes, revisions: revisions, issues: issues) }
@@ -181,34 +188,80 @@ public actor RepositoryService {
             do { branches = try await provider.branches(in: binding) }
             catch { issues.append("分支：\(error.localizedDescription)") }
         }
-        var syncStatus: RepositorySyncStatus?
-        if !Task.isCancelled, historyLoaded, binding.capabilities.contains(.synchronization),
-           let historyProvider = provider as? any RepositoryHistoryProvider {
-            do { syncStatus = try await historyProvider.synchronization(in: binding, revisions: revisions, path: nil) }
-            catch { issues.append("同步状态：\(RepositoryDisplaySanitizer.redact(error.localizedDescription))") }
+        return BindingSnapshot(binding: binding, changes: changes, revisions: revisions, branches: branches,
+                               issues: issues, syncStatus: syncStatus, nextHistoryCursor: nextHistoryCursor)
+    }
+
+    /// 读取一页仓库历史。游标完全由具体适配器维护，调用方不能解析或自行构造。
+    ///
+    /// 未实现分页扩展的旧适配器仍可读取首页；它们没有续页能力时明确报错，避免伪造“已读完”。
+    public func historyPage(in binding: RepositoryBinding, reference: String? = nil,
+                            cursor: String? = nil, loadedRevisions: [Revision] = []) async throws -> HistoryPageSnapshot {
+        let provider = try provider(for: binding)
+        try Task.checkCancellation()
+        let request = HistoryPageRequest(limit: 150, reference: reference, cursor: cursor)
+        let page: RepositoryHistoryPage
+        if let paging = provider as? any RepositoryHistoryPagingProvider {
+            page = try await paging.historyPage(in: binding, request: request)
+        } else if cursor == nil {
+            page = RepositoryHistoryPage(revisions: try await provider.history(in: binding, limit: request.limit, reference: reference))
+        } else {
+            throw VersionControlError.unsupported("当前版本控制适配器暂不支持继续读取更早的提交。")
         }
-        return BindingSnapshot(binding: binding, changes: changes, revisions: revisions, branches: branches, issues: issues, syncStatus: syncStatus)
+        try Task.checkCancellation()
+        let synchronization = try await synchronization(for: provider, binding: binding,
+                                                        revisions: mergingRevisions(loadedRevisions, page.revisions), path: nil)
+        try Task.checkCancellation()
+        return HistoryPageSnapshot(revisions: page.revisions, nextCursor: page.nextCursor,
+                                   syncStatus: synchronization.status, issues: synchronization.issues)
     }
 
     /// 单文件历史直接查询适配器，不筛选已加载的仓库最近提交。
-    public func fileHistory(in binding: RepositoryBinding, path: String, reference: String? = nil) async throws -> FileHistorySnapshot {
+    public func fileHistory(in binding: RepositoryBinding, path: String, reference: String? = nil,
+                            cursor: String? = nil, loadedRevisions: [Revision] = []) async throws -> FileHistorySnapshot {
         try validateRelativeFilePath(path)
         guard binding.capabilities.contains(.fileHistory),
               let provider = try provider(for: binding) as? any RepositoryHistoryProvider else {
             throw VersionControlError.unsupported("当前版本控制来源不支持文件历史。")
         }
         try Task.checkCancellation()
-        let entries = try await provider.fileHistory(in: binding, path: path, limit: 150, reference: reference)
-        try Task.checkCancellation()
-        var syncStatus: RepositorySyncStatus?
-        var issues: [String] = []
-        if binding.capabilities.contains(.synchronization) {
-            do { syncStatus = try await provider.synchronization(in: binding, revisions: entries.map(\.revision), path: path) }
-            catch is CancellationError { throw CancellationError() }
-            catch { issues.append("同步状态：\(RepositoryDisplaySanitizer.redact(error.localizedDescription))") }
+        let request = HistoryPageRequest(limit: 150, reference: reference, cursor: cursor)
+        let page: FileHistoryPage
+        if let paging = provider as? any RepositoryHistoryPagingProvider {
+            page = try await paging.fileHistoryPage(in: binding, path: path, request: request)
+        } else if cursor == nil {
+            page = FileHistoryPage(entries: try await provider.fileHistory(in: binding, path: path,
+                                                                            limit: request.limit, reference: reference))
+        } else {
+            throw VersionControlError.unsupported("当前版本控制适配器暂不支持继续读取更早的文件提交。")
         }
         try Task.checkCancellation()
-        return FileHistorySnapshot(path: path, entries: entries, syncStatus: syncStatus, issues: issues)
+        let synchronization = try await synchronization(for: provider, binding: binding,
+                                                        revisions: mergingRevisions(loadedRevisions, page.entries.map(\.revision)), path: path)
+        try Task.checkCancellation()
+        return FileHistorySnapshot(path: path, entries: page.entries, nextCursor: page.nextCursor,
+                                   syncStatus: synchronization.status, issues: synchronization.issues)
+    }
+
+    private func synchronization(for provider: any VersionControlProvider, binding: RepositoryBinding,
+                                 revisions: [Revision], path: String?) async throws -> (status: RepositorySyncStatus?, issues: [String]) {
+        guard binding.capabilities.contains(.synchronization),
+              let historyProvider = provider as? any RepositoryHistoryProvider else {
+            return (nil, [])
+        }
+        do {
+            return (try await historyProvider.synchronization(in: binding, revisions: revisions, path: path), [])
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return (nil, ["同步状态：\(RepositoryDisplaySanitizer.redact(error.localizedDescription))"])
+        }
+    }
+
+    /// 同一历史范围可能因页边界重叠重复提交；同步状态必须基于已经展示的去重集合。
+    private func mergingRevisions(_ loaded: [Revision], _ page: [Revision]) -> [Revision] {
+        var seen = Set<String>()
+        return (loaded + page).filter { seen.insert($0.id).inserted }
     }
 
     public func fileHistoryDiff(in binding: RepositoryBinding, entry: FileHistoryEntry) async throws -> RepositoryPatch {

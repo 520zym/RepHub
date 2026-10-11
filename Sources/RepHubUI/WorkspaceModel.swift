@@ -22,6 +22,11 @@ public final class WorkspaceModel {
     /// 文件历史的锚点（例如从旧路径继续追溯），不应覆盖仓库的分支筛选。
     public private(set) var historyFileReference: String?
     public private(set) var historyFileEntries: [FileHistoryEntry] = []
+    private var fileHistoryNextCursor: String?
+    public private(set) var isLoadingMoreHistory = false
+    public private(set) var historyPageError: String?
+    private var historyPageTask: Task<Void, Never>?
+    private var historyPageGeneration = 0
     private var fileHistorySyncStatus: RepositorySyncStatus?
     private var fileHistoryIssues: [String] = []
     private var explicitHistoryIssues: [String] = []
@@ -106,6 +111,7 @@ public final class WorkspaceModel {
     isolated deinit {
         workTask?.cancel()
         operationTask?.cancel()
+        historyPageTask?.cancel()
     }
 
     /// 版本控制写操作期间，所有会改变所选工作区或读取范围的入口均应保持锁定。
@@ -137,12 +143,14 @@ public final class WorkspaceModel {
 
     public func showRepositoryAcquisition() {
         guard !isInteractionLocked else { return }
+        cancelHistoryPage()
         showsRepositoryAcquisition = true
         repositoryAcquisition.prepare()
     }
 
     public func prepareCommit(initialTargets: Set<String>, initialMessage: String) {
         guard !isInteractionLocked, let workspace, !workspace.isUnmanaged else { return }
+        cancelHistoryPage()
         repositoryCommit.prepare(in: workspace, initialTargets: initialTargets, initialMessage: initialMessage)
     }
 
@@ -226,6 +234,7 @@ public final class WorkspaceModel {
 
     private func openWorkspace(_ url: URL, requiresManagedRepository: Bool) {
         guard !isInteractionLocked else { return }
+        cancelHistoryPage()
         start { [service] token in
             let workspace = try await service.open(directory: url)
             guard self.accepts(token) else { return }
@@ -256,6 +265,7 @@ public final class WorkspaceModel {
     public func refresh() {
         guard !isInteractionLocked else { return }
         guard let binding = selectedBinding else { return }
+        cancelHistoryPage()
         let revisionID = selectedRevisionID
         let reference = historyReference
         let filePath = historyFilePath
@@ -354,6 +364,7 @@ public final class WorkspaceModel {
     /// 显示某一文件的历史。调用方可传入已删除的历史路径；只有路径本身越界时会被拒绝。
     public func showFileHistory(path: String, reference: String? = nil) {
         guard !isInteractionLocked, let binding = selectedBinding else { return }
+        cancelHistoryPage()
         saveReadingSelection()
         filePreview = nil
         guard let path = validatedRelativePath(path) else {
@@ -370,6 +381,7 @@ public final class WorkspaceModel {
         historyPresentationRequest += 1
         historyFilePath = path
         historyFileEntries = []
+        fileHistoryNextCursor = nil
         fileHistorySyncStatus = nil
         fileHistoryIssues = []
         explicitHistoryIssues = []
@@ -394,6 +406,7 @@ public final class WorkspaceModel {
             guard self.accepts(token), self.selectedBindingID == binding.id,
                   self.historyFilePath == path, self.historyFileReference == reference else { return }
             self.historyFileEntries = fileHistory.entries
+            self.fileHistoryNextCursor = fileHistory.nextCursor
             self.fileHistorySyncStatus = fileHistory.syncStatus
             self.fileHistoryIssues = fileHistory.issues
             guard let entry = fileHistory.entries.first else { return }
@@ -511,6 +524,81 @@ public final class WorkspaceModel {
     /// 当前历史范围内可展示的提交；文件范围下保留适配器提供的重命名/peg 信息，选择时会回查对应条目。
     public var historyRevisions: [Revision] {
         historyFilePath == nil ? (snapshot?.revisions ?? []) : historyFileEntries.map(\.revision)
+    }
+
+    public var hasMoreHistory: Bool { nextHistoryCursor != nil }
+
+    public func cancelLoadingMoreHistory() { cancelHistoryPage() }
+
+    private var nextHistoryCursor: String? {
+        historyFilePath == nil ? snapshot?.nextHistoryCursor : fileHistoryNextCursor
+    }
+
+    /// 翻页有独立任务，选中某条提交读取差异不会取消正在加载的历史。
+    public func loadMoreHistory() {
+        guard !isInteractionLocked, !isLoading, !isLoadingMoreHistory,
+              let binding = selectedBinding, let cursor = nextHistoryCursor else { return }
+        let generation = historyPageGeneration
+        let workspaceID = workspace?.id
+        let reference = historyReference
+        let filePath = historyFilePath
+        let fileReference = historyFileReference
+        let loadedRevisions = historyRevisions
+        isLoadingMoreHistory = true
+        historyPageError = nil
+        historyPageTask = Task { [weak self, service] in
+            guard let self else { return }
+            @MainActor func acceptsPage() -> Bool {
+                !Task.isCancelled && self.historyPageGeneration == generation && self.workspace?.id == workspaceID
+                    && self.selectedBindingID == binding.id && self.historyReference == reference
+                    && self.historyFilePath == filePath && self.historyFileReference == fileReference
+                    && self.nextHistoryCursor == cursor && !self.isInteractionLocked
+            }
+            do {
+                if let filePath {
+                    let page = try await service.fileHistory(in: binding, path: filePath, reference: fileReference,
+                                                            cursor: cursor, loadedRevisions: loadedRevisions)
+                    guard acceptsPage() else { return }
+                    guard page.nextCursor != cursor else { throw VersionControlError.invalidData("历史分页未能继续，请刷新后重试。") }
+                    var seen = Set(self.historyFileEntries.map(\.id))
+                    self.historyFileEntries += page.entries.filter { seen.insert($0.id).inserted }
+                    self.fileHistoryNextCursor = page.nextCursor
+                    self.fileHistorySyncStatus = page.syncStatus ?? self.fileHistorySyncStatus
+                    self.fileHistoryIssues = Self.mergingIssues(self.fileHistoryIssues, page.issues)
+                } else {
+                    let page = try await service.historyPage(in: binding, reference: reference, cursor: cursor,
+                                                            loadedRevisions: loadedRevisions)
+                    guard acceptsPage(), let current = self.snapshots[binding.id] else { return }
+                    guard page.nextCursor != cursor else { throw VersionControlError.invalidData("历史分页未能继续，请刷新后重试。") }
+                    var seen = Set(current.revisions.map(\.id))
+                    let revisions = current.revisions + page.revisions.filter { seen.insert($0.id).inserted }
+                    self.snapshots[binding.id] = BindingSnapshot(
+                        binding: current.binding, changes: current.changes, revisions: revisions,
+                        branches: current.branches, issues: Self.mergingIssues(current.issues, page.issues),
+                        syncStatus: page.syncStatus ?? current.syncStatus, nextHistoryCursor: page.nextCursor)
+                }
+                self.isLoadingMoreHistory = false
+            } catch is CancellationError {
+                if self.historyPageGeneration == generation { self.isLoadingMoreHistory = false }
+            } catch {
+                guard acceptsPage() else { return }
+                self.isLoadingMoreHistory = false
+                self.historyPageError = RepositoryDisplaySanitizer.redact(error.localizedDescription)
+            }
+        }
+    }
+
+    private func cancelHistoryPage() {
+        historyPageTask?.cancel()
+        historyPageTask = nil
+        historyPageGeneration += 1
+        isLoadingMoreHistory = false
+        historyPageError = nil
+    }
+
+    private static func mergingIssues(_ previous: [String], _ next: [String]) -> [String] {
+        var seen = Set<String>()
+        return (previous + next).filter { seen.insert($0).inserted }
     }
 
     /// 单次写操作只针对一个绑定。服务层负责串行化以及结束后的全部绑定刷新。
@@ -812,6 +900,7 @@ public final class WorkspaceModel {
     }
 
     private func invalidateReadingCache() {
+        cancelHistoryPage()
         workingSelection = nil
         historySelection = nil
         filePreview = nil
@@ -833,6 +922,7 @@ public final class WorkspaceModel {
     ) async throws {
         // 先清空旧数据；读取失败时绝不能把旧文件的同步状态或提交列表保留在界面上。
         historyFileEntries = []
+        fileHistoryNextCursor = nil
         fileHistorySyncStatus = nil
         fileHistoryIssues = []
         explicitHistoryIssues = []
@@ -848,6 +938,7 @@ public final class WorkspaceModel {
         guard acceptsHistoryLoad(token, restoresOperation: restoresOperation), selectedBindingID == binding.id,
               historyFilePath == path, historyFileReference == reference else { return }
         historyFileEntries = fileHistory.entries
+        fileHistoryNextCursor = fileHistory.nextCursor
         fileHistorySyncStatus = fileHistory.syncStatus
         fileHistoryIssues = fileHistory.issues
         guard let entry = preferredRevisionID.flatMap({ requested in
@@ -883,9 +974,11 @@ public final class WorkspaceModel {
     }
 
     private func clearFileHistoryState() {
+        cancelHistoryPage()
         historyFilePath = nil
         historyFileReference = nil
         historyFileEntries = []
+        fileHistoryNextCursor = nil
         fileHistorySyncStatus = nil
         fileHistoryIssues = []
         explicitHistoryIssues = []

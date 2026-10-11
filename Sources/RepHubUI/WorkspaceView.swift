@@ -112,31 +112,36 @@ public struct WorkspaceView: View {
 
     private func workingCopy(size: CGSize, palette: AppPalette) -> some View {
         let inset: CGFloat = 8
-        let historyHeight = historyExpanded ? min(290, max(210, size.height * 0.32)) : 0
-        let editorHeight = max(0, size.height - inset * 2 - (historyExpanded ? historyHeight + inset : 0))
-        let sidebarWidth = min(290, max(210, (size.width - inset * 2) * 0.22))
-        return VStack(spacing: inset) {
-            HStack(spacing: 0) {
-                WorkspaceFileTreeView(model: model, palette: palette, showsBindingPicker: !historyExpanded)
-                    .frame(width: sidebarWidth, height: editorHeight, alignment: .topLeading)
-                VStack(spacing: 0) {
-                    DiffView(model: model, appearance: appearance)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    commitBar(palette: palette)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-            .frame(height: editorHeight)
-            .background(palette.surface)
-            .clipShape(RoundedRectangle(cornerRadius: 9))
+        let initialHistoryHeight = min(290, max(210, size.height * 0.32))
+        return Group {
             if historyExpanded {
-                HistoryWorkspaceView(model: model, appearance: appearance, showAsMainView: false)
-                    .frame(height: historyHeight)
-                    .clipShape(RoundedRectangle(cornerRadius: 9))
+                SoftVerticalSplit(fixedSide: .bottom, initialHeight: initialHistoryHeight, minimumFixed: 120, flexibleMinimum: 180) {
+                    workingCopyEditor(palette: palette, showsBindingPicker: false)
+                        .padding(.bottom, inset / 2)
+                } bottom: {
+                    HistoryWorkspaceView(model: model, appearance: appearance, showAsMainView: false)
+                        .padding(.top, inset / 2)
+                }
+            } else {
+                workingCopyEditor(palette: palette, showsBindingPicker: true)
             }
         }
         .padding(inset)
         .frame(width: size.width, height: size.height, alignment: .topLeading)
+    }
+
+    private func workingCopyEditor(palette: AppPalette, showsBindingPicker: Bool) -> some View {
+        SoftHorizontalSplit(initialWidth: 240, minimumFixed: 110, flexibleMinimum: 200) {
+            WorkspaceFileTreeView(model: model, palette: palette, showsBindingPicker: showsBindingPicker)
+        } trailing: {
+            VStack(spacing: 0) {
+                DiffView(model: model, appearance: appearance)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                commitBar(palette: palette)
+            }
+        }
+        .background(palette.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 9))
     }
 
     @ToolbarContentBuilder private func toolbar(palette: AppPalette) -> some ToolbarContent {
@@ -265,7 +270,7 @@ public struct WorkspaceView: View {
             if let snapshot = model.snapshot {
                 Text("\(snapshot.changes.count) 个变更")
                 Text("·")
-                Text("\(snapshot.revisions.count) 条历史")
+                Text("\(model.historyRevisions.count) 条历史")
             }
             if model.isOperationInProgress { Text("操作进行中").padding(.leading, 8) }
         }

@@ -18,8 +18,8 @@ struct HistoryWorkspaceView: View {
         Group {
             if supportsBranches {
                 SoftHorizontalSplit(initialWidth: showAsMainView ? 220 : 190,
-                    range: showAsMainView ? 210...230 : 180...200,
-                    flexibleMinimum: showAsMainView ? 770 : 580) {
+                    minimumFixed: showAsMainView ? 110 : 100,
+                    flexibleMinimum: showAsMainView ? 260 : 180) {
                     HistoryBranchSidebar(
                         snapshot: model.snapshot,
                         selectedReference: model.historyReference,
@@ -54,23 +54,20 @@ struct HistoryWorkspaceView: View {
     @ViewBuilder
     private func historyContent(palette: AppPalette) -> some View {
         if showAsMainView {
-            GeometryReader { proxy in
-                let availableHeight = max(0, proxy.size.height - 6)
-                VStack(spacing: 6) {
-                    SoftHorizontalSplit(fixedSide: .trailing, initialWidth: 286, range: 270...310, flexibleMinimum: 500) {
-                        revisionTable(palette: palette)
-                    } trailing: {
-                        HistoryRevisionInspector(model: model, palette: palette, isCompact: false)
-                    }
-                    .frame(height: availableHeight * 0.56)
-                    DiffView(model: model, appearance: appearance)
-                        .frame(height: availableHeight * 0.44)
+            SoftVerticalSplit(fixedSide: .bottom, initialHeight: 390, minimumFixed: 120, flexibleMinimum: 180) {
+                SoftHorizontalSplit(fixedSide: .trailing, initialWidth: 286, minimumFixed: 120, flexibleMinimum: 220) {
+                    revisionTable(palette: palette)
+                } trailing: {
+                    HistoryRevisionInspector(model: model, palette: palette, isCompact: false)
                 }
-                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
-                .background(palette.background)
+                .padding(.bottom, 3)
+            } bottom: {
+                DiffView(model: model, appearance: appearance)
+                    .padding(.top, 3)
             }
+            .background(palette.background)
         } else {
-            SoftHorizontalSplit(fixedSide: .trailing, initialWidth: 270, range: 260...300, flexibleMinimum: 320) {
+            SoftHorizontalSplit(fixedSide: .trailing, initialWidth: 270, minimumFixed: 100, flexibleMinimum: 160) {
                 revisionTable(palette: palette)
             } trailing: {
                 HistoryRevisionInspector(model: model, palette: palette, isCompact: true)
@@ -124,6 +121,13 @@ struct HistoryWorkspaceView: View {
             chooseFileHistory: model.chooseFileHistory,
             clearFileHistory: model.clearFileHistory,
             drawsGraphConnections: !isFileHistory && revisionSearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            loadedCount: model.historyRevisions.count,
+            hasMore: model.hasMoreHistory,
+            isLoadingMore: model.isLoadingMoreHistory,
+            isReading: model.isLoading || model.isInteractionLocked,
+            loadMoreError: model.historyPageError,
+            loadMore: model.loadMoreHistory,
+            cancelLoadMore: model.cancelLoadingMoreHistory,
             palette: palette
         )
     }
@@ -164,7 +168,7 @@ private struct HistoryBranchSidebar: View {
             }
             Spacer(minLength: 0)
         }
-        .frame(minWidth: isCompact ? 180 : 210, idealWidth: isCompact ? 190 : 220, maxWidth: isCompact ? 200 : 230, maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(palette.sidebar)
         .accessibilityElement(children: .contain)
         .task(id: branchSignature) { rebuildTrees() }
@@ -340,7 +344,16 @@ private struct HistoryRevisionTable: View {
     let chooseFileHistory: () -> Void
     let clearFileHistory: () -> Void
     let drawsGraphConnections: Bool
+    let loadedCount: Int
+    let hasMore: Bool
+    let isLoadingMore: Bool
+    let isReading: Bool
+    let loadMoreError: String?
+    let loadMore: () -> Void
+    let cancelLoadMore: () -> Void
     let palette: AppPalette
+
+    @State private var isNearHistoryEnd = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -352,7 +365,7 @@ private struct HistoryRevisionTable: View {
             VStack(spacing: 0) {
                 HStack(spacing: 10) {
                     bindingSource
-                    WorkbenchSearchField("搜索提交、作者、版本号…", text: $search, palette: palette)
+                    WorkbenchSearchField("搜索已加载的提交、作者、版本号…", text: $search, palette: palette)
                     if supportsBranches {
                         Menu {
                             Button("所有分支") { selectReference(nil) }
@@ -394,7 +407,7 @@ private struct HistoryRevisionTable: View {
                     VStack(spacing: 6) {
                         Image(systemName: issues.isEmpty ? "clock.arrow.circlepath" : "exclamationmark.triangle")
                             .font(.title3)
-                        Text(issues.isEmpty ? "暂无提交记录" : "提交历史暂时不可用")
+                        Text(!search.isEmpty ? "已加载记录中没有匹配的提交" : (issues.isEmpty ? "暂无提交记录" : "提交历史暂时不可用"))
                             .font(.callout.weight(.medium))
                         if !issues.isEmpty {
                             Text("可在右侧展开查看读取原因")
@@ -427,14 +440,60 @@ private struct HistoryRevisionTable: View {
                             .listRowBackground(Color.clear)
                         }
                     }
+                    .onScrollGeometryChange(for: Bool.self) { geometry in
+                        geometry.visibleRect.height > 0 && geometry.contentSize.height > geometry.visibleRect.height
+                            && geometry.visibleRect.maxY >= geometry.contentSize.height - 64
+                    } action: { _, nearEnd in
+                        isNearHistoryEnd = nearEnd
+                        loadMoreIfNearEnd()
+                    }
+                    .onChange(of: isReading) { _, reading in
+                        if !reading { loadMoreIfNearEnd() }
+                    }
                     .listStyle(.plain)
                     .scrollContentBackground(.hidden)
                 }
+                paginationFooter
             }
             .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(palette.surface)
+    }
+
+    private func loadMoreIfNearEnd() {
+        guard isNearHistoryEnd, !isReading, !isLoadingMore, hasMore, loadMoreError == nil,
+              search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        loadMore()
+    }
+
+    private var paginationFooter: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let loadMoreError {
+                Text("继续加载失败：\(loadMoreError)")
+                    .font(.system(size: 11)).foregroundStyle(palette.removed)
+                    .lineLimit(2).help(loadMoreError)
+            }
+            HStack(spacing: 8) {
+                Text("已加载 \(loadedCount) 条")
+                    .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                if isLoadingMore {
+                    ProgressView().controlSize(.small)
+                    Button("取消加载", action: cancelLoadMore)
+                        .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
+                } else if hasMore {
+                    Button(loadMoreError == nil ? "加载更早的提交" : "重试加载", action: loadMore)
+                        .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary, compact: true))
+                        .disabled(isReading)
+                } else if !isReading, issues.isEmpty, loadedCount > 0 {
+                    Text("已到最早记录").font(.system(size: 11)).foregroundStyle(palette.secondaryText)
+                }
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 5)
+        .background(palette.sidebar.opacity(0.4))
     }
 
     private func fileHistoryScope(path: String, reference: String?) -> some View {
