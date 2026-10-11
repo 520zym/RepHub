@@ -11,6 +11,7 @@ public struct WorkspaceView: View {
     @State private var historyExpanded = true
     @State private var commitMessage = ""
     @State private var commitTargets: Set<String> = []
+    @State private var showsOperationSheet = false
     @FocusState private var commitMessageFocused: Bool
 
     public init(model: WorkspaceModel, appearance: AppearanceStore) {
@@ -28,8 +29,10 @@ public struct WorkspaceView: View {
                 } else if section == .history {
                     HistoryWorkspaceView(model: model, appearance: appearance, showAsMainView: true)
                         .frame(width: geometry.size.width, height: max(0, geometry.size.height - 28))
+                        .allowsHitTesting(!model.isInteractionLocked)
                 } else {
                     workingCopy(size: CGSize(width: geometry.size.width, height: max(0, geometry.size.height - 28)), palette: palette)
+                        .allowsHitTesting(!model.isInteractionLocked)
                 }
                 statusBar(palette: palette)
             }
@@ -47,6 +50,13 @@ public struct WorkspaceView: View {
         .onChange(of: model.workspace?.id) { _, _ in
             commitTargets = Set(model.workspace?.bindings.map(\.id) ?? [])
             commitMessage = ""
+        }
+        .sheet(isPresented: $showsOperationSheet, onDismiss: model.dismissOperationResult) {
+            RepositoryOperationView(model: model, palette: palette) {
+                model.dismissOperationResult()
+                showsOperationSheet = false
+            }
+            .interactiveDismissDisabled(model.isOperationInProgress)
         }
     }
 
@@ -98,6 +108,7 @@ public struct WorkspaceView: View {
                 }
                 .menuStyle(.borderlessButton).menuIndicator(.visible).fixedSize()
                 .help("打开或切换仓库")
+                .disabled(model.isInteractionLocked)
                 if let binding = model.selectedBinding {
                     Label(binding.currentBranch.isEmpty ? binding.providerName : binding.currentBranch,
                           systemImage: binding.capabilities.contains(.branches) ? "arrow.triangle.branch" : "externaldrive")
@@ -114,6 +125,7 @@ public struct WorkspaceView: View {
             WorkbenchSegmentedPicker(title: "视图", selection: $section,
                 options: [.init(.workingCopy, "工作区"), .init(.history, "提交历史")], palette: palette)
                 .frame(width: 200)
+                .disabled(model.isInteractionLocked)
         }
         .sharedBackgroundVisibility(.hidden)
         ToolbarItem(placement: .primaryAction) {
@@ -122,7 +134,14 @@ public struct WorkspaceView: View {
                 Button(action: model.refresh) { Label("刷新", systemImage: "arrow.clockwise").labelStyle(.iconOnly) }
                     .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
                     .accessibilityLabel("刷新")
-                    .disabled(model.selectedBinding == nil || model.isLoading).help("刷新仓库 · ⌘R")
+                    .disabled(model.selectedBinding == nil || model.isLoading || model.isInteractionLocked).help("刷新仓库 · ⌘R")
+                Button { showsOperationSheet = true } label: {
+                    Label("更新", systemImage: "arrow.triangle.2.circlepath").labelStyle(.titleAndIcon)
+                }
+                .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary, compact: true))
+                .accessibilityLabel("更新工作区")
+                .disabled(model.workspace?.bindings.contains(where: { model.supports(.fetch, for: $0) || model.supports(.update, for: $0) }) != true || model.isInteractionLocked)
+                .help("获取远端或更新一个版本控制来源")
                 if section == .workingCopy {
                     Button { historyExpanded.toggle() } label: {
                         Label(historyExpanded ? "收起历史" : "显示历史", systemImage: "rectangle.bottomthird.inset.filled").labelStyle(.iconOnly)
@@ -130,6 +149,7 @@ public struct WorkspaceView: View {
                     .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
                     .accessibilityLabel(historyExpanded ? "收起历史" : "显示历史")
                     .help(historyExpanded ? "收起底部提交历史" : "显示底部提交历史")
+                    .disabled(model.isInteractionLocked)
                 }
                 Button {} label: { Label("AI 审查", systemImage: "sparkles").labelStyle(.titleAndIcon) }
                     .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
@@ -159,7 +179,7 @@ public struct WorkspaceView: View {
             Button {} label: { Label("AI 生成", systemImage: "sparkles") }
                 .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet)).disabled(true).help("AI 生成提交说明尚未接入")
             Button("提交") {}.buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
-                .disabled(true).help("当前为读取版本，实际提交尚未接入")
+                .disabled(true).help("提交功能尚未接入")
         }
         .padding(.horizontal, 12).frame(height: 56)
         .background(palette.sidebar.opacity(0.45))
@@ -169,9 +189,11 @@ public struct WorkspaceView: View {
     private func statusBar(palette: AppPalette) -> some View {
         let issues = (model.workspace?.issues ?? []) + (model.snapshot?.issues ?? [])
         let hasError = model.errorMessage != nil || !issues.isEmpty
+        let hasConflicts = model.snapshot?.changes.contains { $0.kind == .conflicted } == true
         return HStack(spacing: 8) {
-            Image(systemName: hasError ? "exclamationmark.triangle" : "checkmark.circle")
-            Text(model.isLoading ? "正在读取仓库…" : (model.errorMessage ?? (hasError ? "部分读取失败" : "就绪")))
+            Image(systemName: hasError || hasConflicts ? "exclamationmark.triangle" : "checkmark.circle")
+                .foregroundStyle(hasConflicts ? palette.removed : palette.secondaryText)
+            Text(statusText(hasError: hasError))
                 .lineLimit(1).help(model.errorMessage ?? issues.joined(separator: "\n"))
             Spacer()
             if let snapshot = model.snapshot {
@@ -179,11 +201,22 @@ public struct WorkspaceView: View {
                 Text("·")
                 Text("\(snapshot.revisions.count) 条历史")
             }
-            Text("只读预览").padding(.leading, 8)
+            if model.isOperationInProgress { Text("操作进行中").padding(.leading, 8) }
         }
         .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
         .padding(.horizontal, 14).frame(height: 28)
         .background(palette.sidebar.opacity(0.25))
+    }
+
+    private func statusText(hasError: Bool) -> String {
+        if model.isOperationInProgress { return model.operationProgressMessage.isEmpty ? "正在执行版本控制操作…" : model.operationProgressMessage }
+        if let result = model.operationResult { return result.summary }
+        if model.isLoading { return "正在读取仓库…" }
+        if model.errorMessage == nil, !hasError {
+            let conflicts = model.snapshot?.changes.filter { $0.kind == .conflicted }.count ?? 0
+            if conflicts > 0 { return "\(conflicts) 个冲突待处理" }
+        }
+        return model.errorMessage ?? (hasError ? "部分读取失败" : "就绪")
     }
 
     private func welcome(palette: AppPalette) -> some View {
@@ -250,7 +283,7 @@ private struct ChangeTreeView: View {
                                 Spacer(minLength: 1)
                                 if let change = row.change {
                                     Text(change.kind.symbol).font(.system(size: 10, weight: .semibold, design: .monospaced))
-                                        .foregroundStyle(change.kind == .deleted ? palette.removed : palette.accent)
+                                        .foregroundStyle(change.kind == .deleted || change.kind == .conflicted ? palette.removed : palette.accent)
                                 }
                             }
                             .font(.system(size: 12))

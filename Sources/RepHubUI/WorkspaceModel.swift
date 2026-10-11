@@ -19,18 +19,43 @@ public final class WorkspaceModel {
     public private(set) var isLoading = false
     public private(set) var errorMessage: String?
     public private(set) var isHistoryVisible = false
+    public private(set) var operationKind: RepositoryOperationKind?
+    public private(set) var operationBinding: RepositoryBinding?
+    public private(set) var operationProgressMessage = ""
+    public private(set) var operationResult: RepositoryOperationResult?
+    public private(set) var isOperationCancelling = false
 
     private let service: RepositoryService
     private var workTask: Task<Void, Never>?
+    private var operationTask: Task<Void, Never>?
     private var requestToken = 0
+    private var operationToken = 0
 
     public init(service: RepositoryService) {
         self.service = service
     }
 
-    isolated deinit { workTask?.cancel() }
+    isolated deinit {
+        workTask?.cancel()
+        operationTask?.cancel()
+    }
+
+    /// 版本控制写操作期间，所有会改变所选工作区或读取范围的入口均应保持锁定。
+    public var isOperationInProgress: Bool { operationKind != nil && operationResult == nil }
+    /// 供应用退出保护使用；操作后的状态核对同样属于进行中状态。
+    public var isOperating: Bool { isOperationInProgress }
+    public var isInteractionLocked: Bool { isOperationInProgress }
+    public var operationRefreshIssues: [String] {
+        var seen = Set<String>()
+        return ((workspace?.issues ?? []) + snapshots.values.flatMap(\.issues)).filter { seen.insert($0).inserted }
+    }
+
+    public func supports(_ operation: RepositoryOperationKind, for binding: RepositoryBinding) -> Bool {
+        binding.capabilities.contains(operation.capability)
+    }
 
     public func chooseFolder() {
+        guard !isInteractionLocked else { return }
         let panel = NSOpenPanel()
         panel.title = "打开工作区"
         panel.message = "选择已有 Git 或 Subversion 工作目录"
@@ -43,6 +68,7 @@ public final class WorkspaceModel {
     }
 
     public func open(_ url: URL) {
+        guard !isInteractionLocked else { return }
         start { [service] token in
             let workspace = try await service.open(directory: url)
             guard self.accepts(token) else { return }
@@ -61,6 +87,7 @@ public final class WorkspaceModel {
     }
 
     public func refresh() {
+        guard !isInteractionLocked else { return }
         guard let binding = selectedBinding else { return }
         let revisionID = selectedRevisionID
         let reference = historyReference
@@ -81,6 +108,7 @@ public final class WorkspaceModel {
 
     /// 切换主视图时同步选择范围，避免历史页继续展示工作区差异。
     public func setHistoryVisible(_ visible: Bool) {
+        guard !isInteractionLocked else { return }
         guard isHistoryVisible != visible else { return }
         isHistoryVisible = visible
 
@@ -92,6 +120,7 @@ public final class WorkspaceModel {
     }
 
     public func selectBinding(_ binding: RepositoryBinding) {
+        guard !isInteractionLocked else { return }
         guard selectedBindingID != binding.id else { return }
         selectedBindingID = binding.id
         historyReference = nil
@@ -106,6 +135,7 @@ public final class WorkspaceModel {
     }
 
     public func selectChange(_ change: FileChange?) {
+        guard !isInteractionLocked else { return }
         selectedPath = change?.path
         selectedRevisionID = nil
         revisionFiles = []
@@ -114,6 +144,7 @@ public final class WorkspaceModel {
     }
 
     public func selectRevision(_ revision: Revision?) {
+        guard !isInteractionLocked else { return }
         selectedRevisionID = revision?.id
         selectedPath = nil
         revisionFiles = []
@@ -130,6 +161,7 @@ public final class WorkspaceModel {
 
     /// 分支入口只改变历史查询范围，不改动当前工作副本。
     public func selectHistoryReference(_ reference: String?) {
+        guard !isInteractionLocked else { return }
         guard let binding = selectedBinding else { return }
         historyReference = reference
         selectedRevisionID = nil
@@ -147,6 +179,7 @@ public final class WorkspaceModel {
 
     /// 历史文件只缩小当前修订的差异范围，不改变已选修订或工作区状态列表。
     public func selectRevisionFile(_ change: FileChange?) {
+        guard !isInteractionLocked else { return }
         selectedPath = change?.path
         patch = nil
         guard let binding = selectedBinding,
@@ -167,6 +200,179 @@ public final class WorkspaceModel {
 
     public var snapshot: BindingSnapshot? {
         selectedBindingID.flatMap { snapshots[$0] }
+    }
+
+    /// 单次写操作只针对一个绑定。服务层负责串行化以及结束后的全部绑定刷新。
+    public func performOperation(_ kind: RepositoryOperationKind, on binding: RepositoryBinding) {
+        guard !isInteractionLocked,
+              workspace != nil,
+              supports(kind, for: binding) else { return }
+
+        operationToken += 1
+        let token = operationToken
+        operationKind = kind
+        operationBinding = binding
+        operationResult = nil
+        operationProgressMessage = "正在准备\(kind.title)…"
+        isOperationCancelling = false
+        // 读取任务不得在写操作进行时以迟到结果覆盖服务层的操作后快照。
+        workTask?.cancel()
+        requestToken += 1
+        isLoading = false
+
+        // 记录阅读上下文。写操作结束后的快照来自服务层，补回当前所选差异即可。
+        let preservedBindingID = selectedBindingID
+        let preservedReference = historyReference
+        let preservedRevisionID = selectedRevisionID
+        let preservedPath = selectedPath
+        let operationWorkspace = workspace ?? Workspace(directory: binding.root, bindings: [binding], issues: [])
+        operationTask = Task { [weak self, service] in
+            do {
+                let response = try await service.perform(kind, bindingID: binding.id, in: operationWorkspace) { progress in
+                    await MainActor.run {
+                        guard let self, self.operationToken == token else { return }
+                        self.operationProgressMessage = progress.message
+                    }
+                }
+                // 取消后的调用任务带有取消标记。差异恢复必须切到独立任务，
+                // 不能让已取消的上下文直接中断服务层已核对完的快照恢复。
+                Task.detached { [weak self, service] in
+                    await self?.applyOperationResponse(
+                        response,
+                        service: service,
+                        preferredBindingID: preservedBindingID,
+                        reference: preservedReference,
+                        revisionID: preservedRevisionID,
+                        path: preservedPath,
+                        token: token
+                    )
+                }
+            } catch is CancellationError {
+                // 服务层会在取消后核对状态并返回结果；这里仅兜底处理异常早退。
+                guard let self, self.operationToken == token else { return }
+                self.operationResult = RepositoryOperationResult(kind: kind, bindingID: binding.id, outcome: .cancelled, summary: "已取消，未确认是否产生远端或工作区变更。")
+                self.operationProgressMessage = self.operationResult?.summary ?? "已取消"
+                self.isOperationCancelling = false
+            } catch {
+                guard let self, self.operationToken == token else { return }
+                self.operationResult = RepositoryOperationResult(kind: kind, bindingID: binding.id, outcome: .failed, summary: "操作未完成", details: error.localizedDescription)
+                self.operationProgressMessage = self.operationResult?.summary ?? "操作未完成"
+                self.isOperationCancelling = false
+            }
+        }
+    }
+
+    private func applyOperationResponse(
+        _ response: WorkspaceOperationResult,
+        service: RepositoryService,
+        preferredBindingID: String?,
+        reference: String?,
+        revisionID: String?,
+        path: String?,
+        token: Int
+    ) async {
+        guard operationToken == token else { return }
+        workspace = response.workspace
+        snapshots = Dictionary(uniqueKeysWithValues: response.snapshots.map { ($0.binding.id, $0) })
+        await restoreSelectionAfterOperation(
+            service: service,
+            preferredBindingID: preferredBindingID,
+            reference: reference,
+            revisionID: revisionID,
+            path: path,
+            token: token
+        )
+        guard operationToken == token else { return }
+        operationResult = response.result
+        operationProgressMessage = response.result.summary
+        isOperationCancelling = false
+    }
+
+    /// 取消并不回滚已由 Git/SVN 落地的步骤；仍等待服务层刷新真实状态。
+    public func cancelOperation() {
+        guard isOperationInProgress, !isOperationCancelling else { return }
+        isOperationCancelling = true
+        operationProgressMessage = "正在取消并核对工作区状态…"
+        operationTask?.cancel()
+    }
+
+    public func dismissOperationResult() {
+        guard !isOperationInProgress else { return }
+        operationKind = nil
+        operationBinding = nil
+        operationProgressMessage = ""
+        operationResult = nil
+        isOperationCancelling = false
+    }
+
+    private func restoreSelectionAfterOperation(
+        service: RepositoryService,
+        preferredBindingID: String?,
+        reference: String?,
+        revisionID: String?,
+        path: String?,
+        token: Int
+    ) async {
+        guard let workspace else { return }
+        let binding = workspace.bindings.first { $0.id == preferredBindingID } ?? workspace.bindings.first
+        selectedBindingID = binding?.id
+        historyReference = reference
+        selectedRevisionID = revisionID
+        selectedPath = path
+        revisionFiles = []
+        patch = nil
+        guard let binding else { return }
+
+        // service.perform 的全量快照采用默认历史范围。保留分支筛选时必须重新按该范围读取。
+        do {
+            if let reference {
+                let scopedSnapshot = await service.load(binding, reference: reference)
+                guard operationToken == token, selectedBindingID == binding.id else { return }
+                snapshots[binding.id] = scopedSnapshot
+            }
+
+            if isHistoryVisible {
+                let revision = revisionID.flatMap { requested in
+                    snapshots[binding.id]?.revisions.first(where: { $0.id == requested })
+                } ?? snapshots[binding.id]?.revisions.first
+                guard let revision else {
+                    selectedRevisionID = nil
+                    selectedPath = nil
+                    revisionFiles = []
+                    patch = nil
+                    return
+                }
+                selectedRevisionID = revision.id
+                selectedPath = nil
+                try await loadRevisionAfterOperation(revision, binding: binding, service: service, token: token)
+            } else if let revisionID,
+                      let revision = snapshots[binding.id]?.revisions.first(where: { $0.id == revisionID }) {
+                try await loadRevisionAfterOperation(revision, binding: binding, service: service, token: token)
+            } else {
+                let candidate = path.flatMap { requested in
+                    snapshots[binding.id]?.changes.first(where: { $0.path == requested })
+                } ?? preferredFile(in: snapshots[binding.id]?.changes ?? [])
+                selectedRevisionID = nil
+                selectedPath = candidate?.path
+                let patch = try await service.diff(in: binding, path: candidate?.path, revision: nil)
+                guard operationToken == token, selectedBindingID == binding.id else { return }
+                self.patch = patch
+            }
+        } catch {
+            guard operationToken == token else { return }
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func loadRevisionAfterOperation(_ revision: Revision, binding: RepositoryBinding, service: RepositoryService, token: Int) async throws {
+        let files = try await service.changedFiles(in: binding, revision: revision.id)
+        guard operationToken == token, selectedBindingID == binding.id, selectedRevisionID == revision.id else { return }
+        revisionFiles = files
+        let file = preferredFile(in: files)
+        selectedPath = file?.path
+        let patch = try await service.diff(in: binding, path: file?.path, revision: revision.id)
+        guard operationToken == token, selectedBindingID == binding.id, selectedRevisionID == revision.id, selectedPath == file?.path else { return }
+        self.patch = patch
     }
 
     private func load(binding: RepositoryBinding, reference: String?, token: Int, readsWorkingPatch: Bool = true) async throws {

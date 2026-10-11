@@ -130,6 +130,59 @@ final class WorkspaceModelTests: XCTestCase {
         try await waitUntil { model.selectedRevisionID == nil && model.selectedPath == "Sources/App.swift" && model.patch?.text == "working:Sources/App.swift" }
     }
 
+    func testOperationLocksToOneBindingAndRefreshesAllBindingsAfterCompletion() async throws {
+        let gitLog = WorkspaceInvocationLog()
+        let svnLog = WorkspaceInvocationLog()
+        let git = WorkspaceFixtureProvider(operationDelay: 120_000_000, log: gitLog)
+        let svn = WorkspaceFixtureProvider(providerID: .svn, log: svnLog)
+        let model = WorkspaceModel(service: RepositoryService(providers: [git, svn]))
+
+        model.open(try makeDirectory())
+        try await waitUntil { model.workspace?.bindings.count == 2 && model.snapshot != nil }
+        let gitBinding = try XCTUnwrap(model.workspace?.bindings.first(where: { $0.providerID == .git }))
+        let svnBinding = try XCTUnwrap(model.workspace?.bindings.first(where: { $0.providerID == .svn }))
+
+        model.performOperation(.update, on: gitBinding)
+        try await waitUntil { model.isOperationInProgress }
+        model.performOperation(.update, on: svnBinding)
+        model.selectBinding(svnBinding)
+        XCTAssertEqual(model.selectedBindingID, gitBinding.id, "写操作期间不应切换来源")
+
+        try await waitUntil { model.operationResult != nil && !model.isOperationInProgress }
+        let gitOperations = await gitLog.operations()
+        let svnOperations = await svnLog.operations()
+        XCTAssertEqual(gitOperations.map(\.0), [.update])
+        XCTAssertTrue(svnOperations.isEmpty, "双版本控制目录一次只能更新一个目标")
+        XCTAssertNotNil(model.snapshots[gitBinding.id])
+        XCTAssertNotNil(model.snapshots[svnBinding.id], "服务完成后应刷新所有已识别绑定")
+    }
+
+    func testCancellingOperationKeepsSheetStateLockedUntilRefreshedSnapshotReturns() async throws {
+        let log = WorkspaceInvocationLog()
+        let provider = WorkspaceFixtureProvider(operationDelay: 600_000_000, log: log)
+        let model = WorkspaceModel(service: RepositoryService(providers: [provider]))
+
+        model.open(try makeDirectory())
+        try await waitUntil { model.selectedBinding != nil && model.snapshot != nil }
+        let binding = try XCTUnwrap(model.selectedBinding)
+        model.performOperation(.update, on: binding)
+        try await waitUntil { model.isOperating }
+        try await waitForOperationStart(.update, log: log)
+
+        model.cancelOperation()
+        XCTAssertTrue(model.isOperating, "请求取消后仍须等待服务层完成状态核对")
+        XCTAssertTrue(model.isOperationCancelling)
+        try await waitUntil {
+            guard let outcome = model.operationResult?.outcome else { return false }
+            if case .cancelled = outcome { return !model.isOperating }
+            return false
+        }
+
+        let operations = await log.operations()
+        XCTAssertEqual(operations.map(\.0), [.update])
+        XCTAssertNotNil(model.snapshots[binding.id], "取消后仍应使用重新读取的工作区快照")
+    }
+
     private func makeDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("rephub-ui-workspace-\(UUID().uuidString)", isDirectory: true)
@@ -157,9 +210,18 @@ final class WorkspaceModelTests: XCTestCase {
         let started = await log.didStartDiff(path)
         XCTAssertTrue(started, "等待迟到响应开始超时")
     }
+
+    private func waitForOperationStart(_ operation: RepositoryOperationKind, log: WorkspaceInvocationLog) async throws {
+        let deadline = DispatchTime.now().uptimeNanoseconds + 1_000_000_000
+        while !(await log.didStartOperation(operation)) && DispatchTime.now().uptimeNanoseconds < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let started = await log.didStartOperation(operation)
+        XCTAssertTrue(started, "等待版本控制操作开始超时")
+    }
 }
 
-private struct WorkspaceFixtureProvider: VersionControlProvider {
+private struct WorkspaceFixtureProvider: RepositoryOperationProvider {
     struct DiffRequest: Sendable {
         let path: String?
         let revision: String?
@@ -170,11 +232,13 @@ private struct WorkspaceFixtureProvider: VersionControlProvider {
     let log: WorkspaceInvocationLog
     let delays: [String: UInt64]
     let revisions: [Revision]
+    let operationDelay: UInt64
 
-    init(providerID: ProviderID = .git, revisions: [Revision]? = nil, delays: [String: UInt64] = [:], log: WorkspaceInvocationLog = WorkspaceInvocationLog()) {
+    init(providerID: ProviderID = .git, revisions: [Revision]? = nil, delays: [String: UInt64] = [:], operationDelay: UInt64 = 0, log: WorkspaceInvocationLog = WorkspaceInvocationLog()) {
         self.id = providerID
         self.revisions = revisions ?? [Revision(id: providerID == .svn ? "r1" : "a1b2c3d4", author: "zym", date: .distantPast, message: "feat: 历史读取")]
         self.delays = delays
+        self.operationDelay = operationDelay
         self.log = log
     }
 
@@ -184,7 +248,24 @@ private struct WorkspaceFixtureProvider: VersionControlProvider {
             providerName: displayName,
             root: directory,
             currentBranch: id == .git ? "main" : "",
-            capabilities: id == .git ? [.status, .diff, .history, .branches, .commitGraph] : [.status, .diff, .history]
+            capabilities: id == .git ? [.status, .diff, .history, .branches, .commitGraph, .fetch, .update] : [.status, .diff, .history, .update]
+        )
+    }
+
+    func perform(
+        _ operation: RepositoryOperationKind,
+        in binding: RepositoryBinding,
+        progress: @escaping RepositoryOperationProgressHandler
+    ) async throws -> RepositoryOperationResult {
+        await log.recordOperation(operation, bindingID: binding.id)
+        await progress(RepositoryOperationProgress("测试：正在更新 \(binding.providerName)…"))
+        if operationDelay > 0 { try await Task.sleep(nanoseconds: operationDelay) }
+        return RepositoryOperationResult(
+            kind: operation,
+            bindingID: binding.id,
+            outcome: .succeeded,
+            summary: "测试更新完成",
+            changedFiles: [FileChange(path: "Sources/Updated.swift", kind: .modified)]
         )
     }
 
@@ -238,13 +319,19 @@ private actor WorkspaceInvocationLog {
     private var diffs: [WorkspaceFixtureProvider.DiffRequest] = []
     private var startedDiffs: [WorkspaceFixtureProvider.DiffRequest] = []
     private var history: [String?] = []
+    private var performedOperations: [(RepositoryOperationKind, String)] = []
 
     func recordChangedFiles(_ revision: String) { changedFiles.append(revision) }
     func recordHistory(_ reference: String?) { history.append(reference) }
     func recordDiffStart(path: String?, revision: String?) { startedDiffs.append(.init(path: path, revision: revision)) }
     func recordDiff(path: String?, revision: String?) { diffs.append(.init(path: path, revision: revision)) }
+    func recordOperation(_ operation: RepositoryOperationKind, bindingID: String) { performedOperations.append((operation, bindingID)) }
     func changedFileRequests() -> [String] { changedFiles }
     func historyReferences() -> [String?] { history }
     func didStartDiff(_ path: String) -> Bool { startedDiffs.contains { $0.path == path } }
     func diffRequests() -> [WorkspaceFixtureProvider.DiffRequest] { diffs }
+    func operations() -> [(RepositoryOperationKind, String)] { performedOperations }
+    func didStartOperation(_ operation: RepositoryOperationKind) -> Bool {
+        performedOperations.contains { $0.0.rawValue == operation.rawValue }
+    }
 }

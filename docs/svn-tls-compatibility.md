@@ -13,7 +13,7 @@
 ## 实现边界
 
 - `VersionControlCore` 定义协议模式及端点模型，自动识别、重试和缓存封装在 `SVNAdapter`；应用入口只组装 `SVNProvider()`。UI 与业务层不解析 SSL 错误，也不引用具体 SVN 适配器。
-- SVN 历史、修订文件及远端修订差异使用自动协商。本地识别、状态及工作区差异不依赖旧 TLS 运行时。未来更新与提交等写操作需要另外设计结果确认，不能直接复用只读重试。
+- SVN 历史、修订文件及远端修订差异使用自动协商。本地识别、状态及工作区差异不依赖旧 TLS 运行时。更新先用只读 `info` 确定 TLS 模式，再以该模式执行一次 `update`；完成、取消或失败后重新读取实际状态。写命令不能直接套用只读重试。提交尚未接入。
 - 仅 HTTPS 的协议 / 握手错误允许重试，包括本机实际返回的 `E120171: An error occurred during SSL communication`。`E170013` 连接失败本身不足以触发兼容；证书、主机名、认证、DNS、网络超时和取消不触发回退。通用 SSL 错误只能作为兼容尝试的依据，成功不代表已精确测定服务端协议版本。
 - 只有兼容调用生成独立的临时 OpenSSL 配置，通过该 SVN 子进程的 `OPENSSL_CONF` 传入，结束后清理。没有写入全局 OpenSSL 配置、SVN servers 文件或 shell 环境。
 - 配置范围为 `MinProtocol = TLSv1`、`MaxProtocol = TLSv1.3`、`CipherString = DEFAULT:@SECLEVEL=0`、`Options = UnsafeLegacyServerConnect`。自动协商允许范围内的协议，未启用 SSLv2/SSLv3，也未启用更宽泛的 `UnsafeLegacyRenegotiation`。
