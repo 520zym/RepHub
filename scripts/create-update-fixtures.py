@@ -2,7 +2,8 @@
 """建立 RepHub 更新功能的本地隔离 Git/SVN 验收夹具。
 
 不访问网络，不读取业务仓库；所有远端、工作副本和 HOME 都位于
-build/update-fixtures/<uuid>。脚本不会删除任何已有目录。
+系统临时目录 RepHub-UpdateFixtures/<uuid>，避免被 RepHub 自身 Git 识别。
+脚本不会删除任何已有目录。
 """
 
 from __future__ import annotations
@@ -12,12 +13,12 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 
 
-PROJECT = Path(__file__).resolve().parents[1]
-DEFAULT_PARENT = PROJECT / "build" / "update-fixtures"
+DEFAULT_PARENT = Path(tempfile.gettempdir()) / "RepHub-UpdateFixtures"
 
 
 def ensure_inside(root: Path, target: Path) -> Path:
@@ -99,7 +100,7 @@ def svn_pair(root: Path, home: Path, name: str) -> tuple[Path, Path, str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, help="必须位于 build/update-fixtures 下且不存在")
+    parser.add_argument("--root", type=Path, help="必须位于系统临时目录 RepHub-UpdateFixtures 下且不存在")
     args = parser.parse_args()
 
     for tool in ("git", "svn", "svnadmin"):

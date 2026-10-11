@@ -29,11 +29,14 @@ public final class GitProvider: RepositoryOperationProvider, @unchecked Sendable
         let branch = branchResult.exitCode == 0
             ? branchResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
             : ""
-        let remoteResult = try await git(["config", "--get", "remote.origin.url"], in: root)
-        if remoteResult.exitCode != 0 && remoteResult.exitCode != 1 { _ = try requireSuccess(remoteResult, tool: "git") }
-        let remote = remoteResult.exitCode == 0
-            ? remoteResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
-            : nil
+        // 优先展示当前分支明确跟踪的远端；无上游时才回退 origin，避免界面与更新目标不一致。
+        let configuredRemote = branch.isEmpty ? nil : try await configuredRemoteName(for: branch, in: root)
+        let remote: String?
+        if let configuredRemote {
+            remote = try await remoteURL(named: configuredRemote, in: root)
+        } else {
+            remote = try await remoteURL(named: "origin", in: root)
+        }
 
         return RepositoryBinding(
             providerID: .git,
@@ -250,6 +253,7 @@ public final class GitProvider: RepositoryOperationProvider, @unchecked Sendable
         // fetch 期间可能有其他 Git 客户端切分支或更新引用。真正写入前必须核对原目标仍有效。
         let beforeWriteUpstream = try await configuredUpstream(in: binding.root)
         guard beforeWriteUpstream.branch == upstream.branch, beforeWriteUpstream.remote == upstream.remote,
+              beforeWriteUpstream.remoteURL == upstream.remoteURL,
               try await currentHead(in: binding.root) == before,
               try await resolvedUpstream(in: binding.root) == remote else {
             return rejectedUpdate(binding, "获取期间当前分支、提交或上游引用已经改变；请刷新后重新选择更新目标。")
@@ -300,6 +304,7 @@ public final class GitProvider: RepositoryOperationProvider, @unchecked Sendable
     private struct ConfiguredUpstream {
         let branch: String
         let remote: String
+        let remoteURL: String
     }
 
     /// 只允许当前分支在 branch.<name>.remote 中显式配置的真实远端。
@@ -316,16 +321,7 @@ public final class GitProvider: RepositoryOperationProvider, @unchecked Sendable
         let branch = branchResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !branch.isEmpty else { throw VersionControlError.invalidData("Git 未返回当前分支。") }
 
-        let remoteResult = try await git(["config", "--get", "branch.\(branch).remote"], in: directory)
-        guard remoteResult.exitCode == 0 else {
-            if remoteResult.exitCode == 1 {
-                throw VersionControlError.unsupported("当前分支未配置上游远端；请先在 Git 中设置跟踪分支。")
-            }
-            _ = try requireSuccess(remoteResult, tool: "git")
-            throw VersionControlError.invalidData("无法读取 Git 上游远端。")
-        }
-        let remote = remoteResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !remote.isEmpty, remote != "." else {
+        guard let remote = try await configuredRemoteName(for: branch, in: directory) else {
             throw VersionControlError.unsupported("当前分支未配置可获取的远端上游。")
         }
         let mergeResult = try await git(["config", "--get", "branch.\(branch).merge"], in: directory)
@@ -333,15 +329,33 @@ public final class GitProvider: RepositoryOperationProvider, @unchecked Sendable
               mergeResult.output.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("refs/heads/") else {
             throw VersionControlError.unsupported("当前分支的上游引用配置不完整。")
         }
-        let remoteURL = try await git(["remote", "get-url", "--all", remote], in: directory)
-        guard remoteURL.exitCode == 0,
-              !remoteURL.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        guard let remoteURL = try await remoteURL(named: remote, in: directory) else {
             throw VersionControlError.unsupported("当前分支配置的远端 \(remote) 不可用。")
         }
         guard try await hasSafeRemoteTrackingRefspec(remote: remote, in: directory) else {
             throw VersionControlError.unsupported("当前远端的 fetch refspec 可能写入本地分支；仅支持写入该远端的远端跟踪引用。")
         }
-        return ConfiguredUpstream(branch: branch, remote: remote)
+        return ConfiguredUpstream(branch: branch, remote: remote, remoteURL: remoteURL)
+    }
+
+    private func configuredRemoteName(for branch: String, in directory: URL) async throws -> String? {
+        let result = try await git(["config", "--get", "branch.\(branch).remote"], in: directory)
+        if result.exitCode == 1 { return nil }
+        let remote = try requireSuccess(result, tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return remote.isEmpty || remote == "." ? nil : remote
+    }
+
+    private func remoteURL(named remote: String, in directory: URL) async throws -> String? {
+        let result = try await git(["remote", "get-url", "--", remote], in: directory)
+        if result.exitCode == 2 || result.exitCode == 3 {
+            return nil
+        }
+        if result.exitCode != 0 {
+            _ = try requireSuccess(result, tool: "git")
+            return nil
+        }
+        let value = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
     }
 
     /// fetch 只允许写入 refs/remotes/<remote>/；拒绝可写 refs/heads 等本地引用的自定义 refspec。

@@ -95,6 +95,7 @@ struct GitProviderTests {
         let writer = fixture.root.appendingPathComponent("dual-writer", isDirectory: true)
         try await success("git", ["clone", dualRemote.path, writer.path], fixture: fixture)
         try await success("git", ["checkout", "main"], in: writer, fixture: fixture)
+        try await configureAuthor(in: writer, fixture: fixture)
         try await commitAndPush("dual remote update\n", to: "README.md", in: writer, fixture: fixture)
 
         let provider = GitProvider(runner: fixture.runner)
@@ -103,6 +104,32 @@ struct GitProviderTests {
         expectSucceeded(result)
         #expect(FileManager.default.fileExists(atPath: fixture.dualWorkingCopy.appendingPathComponent(".svn").path))
         #expect(try String(contentsOf: fixture.dualWorkingCopy.appendingPathComponent("README.md"), encoding: .utf8) == "dual remote update\n")
+    }
+
+    @Test("分支跟踪非 origin 远端时显示并更新该远端")
+    func usesCurrentBranchConfiguredRemoteInsteadOfOrigin() async throws {
+        let fixture = try await LocalRepositoryFixture.create()
+        defer { try? fixture.remove() }
+        let otherRemote = fixture.root.appendingPathComponent("remotes/other.git", isDirectory: true)
+        let otherWriter = fixture.root.appendingPathComponent("other-writer", isDirectory: true)
+        try await success("git", ["init", "--bare", otherRemote.path], fixture: fixture)
+        try await success("git", ["clone", fixture.gitRemote.path, otherWriter.path], fixture: fixture)
+        try await success("git", ["checkout", "main"], in: otherWriter, fixture: fixture)
+        try await configureAuthor(in: otherWriter, fixture: fixture)
+        try await success("git", ["remote", "add", "other", otherRemote.path], in: otherWriter, fixture: fixture)
+        try await success("git", ["push", "-u", "other", "main"], in: otherWriter, fixture: fixture)
+        try await commitAndPush("other remote update\n", to: "README.md", in: otherWriter, remote: "other", fixture: fixture)
+
+        try await success("git", ["remote", "add", "other", otherRemote.path], in: fixture.gitReader, fixture: fixture)
+        try await success("git", ["fetch", "other", "refs/heads/main:refs/remotes/other/main"], in: fixture.gitReader, fixture: fixture)
+        try await success("git", ["branch", "--set-upstream-to=other/main", "main"], in: fixture.gitReader, fixture: fixture)
+        let provider = GitProvider(runner: fixture.runner)
+        let binding = try #require(await provider.detect(at: fixture.gitReader))
+        #expect(binding.remoteURL == otherRemote.path)
+
+        let result = try await provider.perform(.update, in: binding, progress: { _ in })
+        expectSucceeded(result)
+        #expect(try String(contentsOf: fixture.gitReader.appendingPathComponent("README.md"), encoding: .utf8) == "other remote update\n")
     }
 
     @Test("空 Git 仓库可识别且没有历史")
@@ -231,15 +258,20 @@ struct GitProviderTests {
 
     private enum FixtureError: Error { case git(String) }
 
-    private func commitAndPush(_ content: String, to path: String, in directory: URL, fixture: LocalRepositoryFixture) async throws {
+    private func commitAndPush(_ content: String, to path: String, in directory: URL, remote: String = "origin", fixture: LocalRepositoryFixture) async throws {
         try content.write(to: directory.appendingPathComponent(path), atomically: true, encoding: .utf8)
         try await success("git", ["add", "--", path], in: directory, fixture: fixture)
         try await success("git", ["commit", "-m", "fixture remote update"], in: directory, fixture: fixture)
-        try await success("git", ["push", "origin", "HEAD:main"], in: directory, fixture: fixture)
+        try await success("git", ["push", remote, "HEAD:main"], in: directory, fixture: fixture)
     }
 
     private func success(_ executable: String, _ arguments: [String], in directory: URL? = nil, fixture: LocalRepositoryFixture) async throws {
         _ = try requireSuccess(try await fixture.run(executable: executable, arguments: arguments, directory: directory), tool: executable)
+    }
+
+    private func configureAuthor(in directory: URL, fixture: LocalRepositoryFixture) async throws {
+        try await success("git", ["config", "user.name", "RepHub Fixture"], in: directory, fixture: fixture)
+        try await success("git", ["config", "user.email", "fixture@localhost"], in: directory, fixture: fixture)
     }
 
     private func expectSucceeded(_ result: RepositoryOperationResult) {
