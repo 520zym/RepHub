@@ -46,7 +46,8 @@ for iconSize in iconSizes {
         hasAlpha: true,
         isPlanar: false,
         colorSpaceName: .deviceRGB,
-        bitmapFormat: .alphaNonpremultiplied,
+        // 与 CGContext 的 premultipliedLast 保持一致，避免半透明边缘被重复预乘。
+        bitmapFormat: [],
         bytesPerRow: 0,
         bitsPerPixel: 0
     ) else {
@@ -66,8 +67,10 @@ for iconSize in iconSizes {
         fputs("无法创建 \(pixels)px 图标绘制上下文\n", stderr)
         exit(1)
     }
+    let bounds = CGRect(x: 0, y: 0, width: pixels, height: pixels)
+    context.clear(bounds)
     context.interpolationQuality = .high
-    context.draw(sourceCGImage, in: CGRect(x: 0, y: 0, width: pixels, height: pixels))
+    context.draw(sourceCGImage, in: bounds)
 
     guard let data = bitmap.representation(using: .png, properties: [:]) else {
         fputs("无法编码 \(pixels)px 图标位图\n", stderr)
