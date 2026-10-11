@@ -32,6 +32,103 @@ public actor RepositoryService {
     private var isPerformingOperation = false
     public init(providers: [any VersionControlProvider]) { self.providers = providers }
 
+    public func acquisitionOptions() -> [RepositoryAcquisitionOption] {
+        providers.compactMap { ($0 as? any RepositoryAcquisitionProvider)?.acquisitionOption }
+    }
+
+    public func browseRemote(providerID: ProviderID, location: RemoteRepositoryLocation) async throws -> RemoteDirectoryListing {
+        let provider = try acquisitionProvider(for: providerID)
+        guard provider.acquisitionOption.supportsBrowsing else {
+            throw VersionControlError.unsupported("当前版本控制方式不支持浏览远端文件夹。")
+        }
+        try Task.checkCancellation()
+        do { return try await provider.browseRemote(location) }
+        catch is CancellationError { throw CancellationError() }
+        catch { throw VersionControlError.executionFailed(acquisitionError(error, location: location)) }
+    }
+
+    /// 先在独立目录完成获取，再移动到用户选择的新目录；已有路径一律不覆盖。
+    public func acquire(providerID: ProviderID, location: RemoteRepositoryLocation,
+                        destinationParent: URL, directoryName: String,
+                        progress: @escaping RepositoryOperationProgressHandler) async throws -> RepositoryAcquisitionResult {
+        guard !isPerformingOperation else {
+            throw VersionControlError.unsupported("已有仓库操作正在执行，请等待完成或取消。")
+        }
+        let provider = try acquisitionProvider(for: providerID)
+        let destination = try acquisitionDestination(parent: destinationParent, name: directoryName)
+        try Task.checkCancellation()
+        isPerformingOperation = true
+        defer { isPerformingOperation = false }
+        let staging = destination.deletingLastPathComponent()
+            .appendingPathComponent(".rephub-acquire-\(UUID().uuidString)", isDirectory: true)
+        let payload = staging.appendingPathComponent("working-copy", isDirectory: true)
+        let files = FileManager.default
+        do {
+            try files.createDirectory(at: staging, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            await progress(RepositoryOperationProgress("正在连接远端仓库…"))
+            try await provider.acquire(location, to: payload, progress: progress)
+            try Task.checkCancellation()
+            let attributes = try files.attributesOfItem(atPath: payload.path)
+            guard attributes[.type] as? FileAttributeType == .typeDirectory else {
+                throw VersionControlError.invalidRepository("获取结果不是有效的工作副本目录。")
+            }
+            await progress(RepositoryOperationProgress("正在保存工作副本…"))
+            // 获取期间可能有其他程序创建同名目录，发布前重新校验；moveItem 也拒绝覆盖。
+            _ = try acquisitionDestination(parent: destination.deletingLastPathComponent(), name: directoryName)
+            try Task.checkCancellation()
+            try files.moveItem(at: payload, to: destination)
+            try? files.removeItem(at: staging)
+            return RepositoryAcquisitionResult(outcome: .succeeded, destination: destination,
+                summary: "工作副本已保存，可以开始查看代码。")
+        } catch {
+            // 只删除自己创建的空暂存目录，部分下载保留供用户检查。
+            let containsFiles = ((try? files.contentsOfDirectory(atPath: staging.path))?.isEmpty == false)
+            if !containsFiles { try? files.removeItem(at: staging) }
+            let cancelled = error is CancellationError
+            let partial = containsFiles ? staging : nil
+            let recovery = partial.map { "\n\n已下载的部分内容保留在：\($0.path)\n可在 Finder 中检查后自行移走或删除，再重新获取。" } ?? ""
+            return RepositoryAcquisitionResult(outcome: cancelled ? .cancelled : .failed,
+                destination: destination, partialDirectory: partial,
+                summary: cancelled ? "获取已取消。" : "未能完成获取。",
+                details: (cancelled ? "目标文件夹尚未创建。" : acquisitionError(error, location: location)) + recovery)
+        }
+    }
+
+    private func acquisitionProvider(for id: ProviderID) throws -> any RepositoryAcquisitionProvider {
+        guard let provider = providers.first(where: { $0.id == id }) as? any RepositoryAcquisitionProvider else {
+            throw VersionControlError.unsupported("未注册支持远端获取的版本控制适配器。")
+        }
+        return provider
+    }
+
+    private func acquisitionDestination(parent: URL, name: String) throws -> URL {
+        guard parent.isFileURL, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              name != ".", name != "..", !name.contains("/"),
+              !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+            throw VersionControlError.invalidRepository("请选择本地保存位置，并填写单个新文件夹名称。")
+        }
+        let parent = parent.standardizedFileURL.resolvingSymlinksInPath()
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: parent.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw VersionControlError.invalidRepository("保存位置不存在或不是文件夹。")
+        }
+        let destination = parent.appendingPathComponent(name, isDirectory: true)
+        // attributesOfItem 也能识别悬空符号链接，不能把它误当成空位置。
+        guard !FileManager.default.fileExists(atPath: destination.path),
+              (try? FileManager.default.attributesOfItem(atPath: destination.path)) == nil else {
+            throw VersionControlError.invalidRepository("同名文件夹或文件已经存在，请选择一个新的名称。")
+        }
+        return destination
+    }
+
+    private func acquisitionError(_ error: any Error, location: RemoteRepositoryLocation) -> String {
+        var message = RepositoryDisplaySanitizer.redact(error.localizedDescription)
+        if let password = location.credentials?.password, !password.isEmpty {
+            message = message.replacingOccurrences(of: password, with: "***")
+        }
+        return message
+    }
+
     public func open(directory: URL) async throws -> Workspace {
         let directory = directory.standardizedFileURL.resolvingSymlinksInPath()
         var isDirectory: ObjCBool = false

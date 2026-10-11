@@ -5,11 +5,13 @@ import FoundationXML
 import ToolExecution
 import VersionControlCore
 
-/// 通过 Subversion 命令行读取工作副本，并执行受限的更新操作；不保存认证信息。
-public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryProvider {
+/// 通过 Subversion 命令行读取工作副本，并执行受限的更新、远端浏览和检出操作。
+/// 用户输入的认证信息只保留在当前进程内存中，不写入 SVN 认证缓存。
+public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryProvider, RepositoryAcquisitionProvider {
     public let runner: CommandRunner
     private let tlsFallback: SVNAutomaticTLSFallback
     private let commandExecutor: @Sendable ([String], URL, URL?) async throws -> CommandResult
+    private let credentials = SVNSessionCredentialStore()
 
     public init(runner: CommandRunner = CommandRunner()) {
         self.runner = runner
@@ -36,6 +38,61 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryProvide
 
     public let id: ProviderID = .svn
     public let displayName = "Subversion"
+    public let acquisitionOption = RepositoryAcquisitionOption(
+        providerID: .svn,
+        title: "SVN",
+        actionTitle: "检出",
+        supportsBrowsing: true,
+        supportsCredentials: true
+    )
+
+    public func browseRemote(_ location: RemoteRepositoryLocation) async throws -> RemoteDirectoryListing {
+        let address = try normalizedRemoteAddress(location.url)
+        try await rememberCredentials(location.credentials, for: address)
+        let command = ["list", "--xml", svnRemoteTarget(address)]
+        let result = try await runRemoteRead(command, remoteURL: address)
+        let document = try SVNXMLDocument(data: result.data)
+        let entries = try document.listEntries.map { entry in
+            let childURL = try remoteChildURL(parent: address, name: entry.name)
+            return RemoteDirectoryEntry(name: entry.name, url: childURL, isDirectory: entry.isDirectory)
+        }.sorted { lhs, rhs in
+            if lhs.isDirectory != rhs.isDirectory { return lhs.isDirectory }
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+        }
+        return RemoteDirectoryListing(url: address, entries: entries)
+    }
+
+    public func acquire(
+        _ location: RemoteRepositoryLocation,
+        to destination: URL,
+        progress: @escaping RepositoryOperationProgressHandler
+    ) async throws {
+        let address = try normalizedRemoteAddress(location.url)
+        try await rememberCredentials(location.credentials, for: address)
+        let destination = destination.standardizedFileURL
+        let fileManager = FileManager.default
+        let isDestinationLink = (try? fileManager.destinationOfSymbolicLink(atPath: destination.path)) != nil
+        guard !fileManager.fileExists(atPath: destination.path), !isDestinationLink else {
+            throw VersionControlError.invalidRepository("检出目标已存在：\(destination.path)")
+        }
+        var parentIsDirectory = ObjCBool(false)
+        guard fileManager.fileExists(atPath: destination.deletingLastPathComponent().path, isDirectory: &parentIsDirectory),
+              parentIsDirectory.boolValue else {
+            throw VersionControlError.invalidRepository("检出目标的父目录不存在：\(destination.deletingLastPathComponent().path)")
+        }
+
+        await progress(RepositoryOperationProgress("检查 SVN 目录…"))
+        // 这里先只读探测 TLS 模式，随后 checkout 仅执行一次，避免自动兼容重放写操作。
+        let tlsMode = try await probeRemoteTLSMode(address)
+        try Task.checkCancellation()
+
+        await progress(RepositoryOperationProgress("检出 SVN 工作副本…"))
+        let command = ["--non-interactive", "--no-auth-cache", "checkout", "--ignore-externals", svnRemoteTarget(address), destination.path]
+        let result = try await runRemoteWrite(command, remoteURL: address, tlsMode: tlsMode, timeout: 600)
+        _ = try requireSuccess(result, tool: "svn")
+        try Task.checkCancellation()
+        await progress(RepositoryOperationProgress("SVN 检出完成。"))
+    }
 
     public func detect(at directory: URL) async throws -> RepositoryBinding? {
         let fileManager = FileManager.default
@@ -313,7 +370,7 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryProvide
         await progress(RepositoryOperationProgress("更新 SVN 工作副本…"))
         // `svn update` 本身不支持 --xml；CommandRunner 固定英文 locale，下面只读取其稳定的状态列。
         let command = ["--non-interactive", "--no-auth-cache", "update", "--ignore-externals", "--accept", "postpone"]
-        let updateResult = try await runUpdate(command, directory: binding.root, tlsMode: tlsMode)
+        let updateResult = try await runUpdate(command, directory: binding.root, remoteURL: binding.remoteURL, tlsMode: tlsMode)
         _ = try requireSuccess(updateResult, tool: "svn")
         try Task.checkCancellation()
 
@@ -347,19 +404,157 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryProvide
     private func svn(_ arguments: [String], directory: URL, remoteURL: String? = nil) async throws -> CommandResult {
         // --non-interactive 防止凭据提示阻塞 UI；不接受或绕过 TLS 证书错误。
         let command = ["--non-interactive", "--no-auth-cache"] + arguments
-        let executor = commandExecutor
-        let runner = runner
         let result = try await tlsFallback.execute(
             remoteURL: remoteURL,
-            modern: { try await executor(command, directory, nil) },
+            modern: { try await runRemoteCommand(command, directory: directory, remoteURL: remoteURL, configuration: nil) },
             legacy: {
                 try await SVNOpenSSLRuntime.shared.requireOpenSSL3(using: runner)
                 return try await SVNTLSConfiguration.withLegacyCompatibleConfiguration { configuration in
-                    try await executor(command, directory, configuration)
+                    try await runRemoteCommand(command, directory: directory, remoteURL: remoteURL, configuration: configuration)
                 }
             }
         )
         return try requireSuccess(result, tool: "svn")
+    }
+
+    private func runRemoteRead(_ command: [String], remoteURL: String) async throws -> CommandResult {
+        let directory = FileManager.default.temporaryDirectory
+        let result = try await tlsFallback.execute(
+            remoteURL: remoteURL,
+            modern: { try await runRemoteCommand(["--non-interactive", "--no-auth-cache"] + command, directory: directory, remoteURL: remoteURL, configuration: nil) },
+            legacy: {
+                try await SVNOpenSSLRuntime.shared.requireOpenSSL3(using: runner)
+                return try await SVNTLSConfiguration.withLegacyCompatibleConfiguration { configuration in
+                    try await runRemoteCommand(["--non-interactive", "--no-auth-cache"] + command, directory: directory, remoteURL: remoteURL, configuration: configuration)
+                }
+            }
+        )
+        return try requireSuccess(result, tool: "svn")
+    }
+
+    private func probeRemoteTLSMode(_ remoteURL: String) async throws -> SVNAutomaticTLSFallback.Mode {
+        let command = ["--non-interactive", "--no-auth-cache", "info", "--xml", svnRemoteTarget(remoteURL)]
+        let directory = FileManager.default.temporaryDirectory
+        let probe = try await tlsFallback.probe(
+            remoteURL: remoteURL,
+            modern: { try await runRemoteCommand(command, directory: directory, remoteURL: remoteURL, configuration: nil) },
+            legacy: {
+                try await SVNOpenSSLRuntime.shared.requireOpenSSL3(using: runner)
+                return try await SVNTLSConfiguration.withLegacyCompatibleConfiguration { configuration in
+                    try await runRemoteCommand(command, directory: directory, remoteURL: remoteURL, configuration: configuration)
+                }
+            }
+        )
+        _ = try requireSuccess(probe.result, tool: "svn")
+        let document = try SVNXMLDocument(data: probe.result.data)
+        guard document.infoEntry?.kind == "dir" else {
+            throw VersionControlError.invalidRepository("SVN 地址不是可检出的目录。")
+        }
+        return probe.mode
+    }
+
+    private func runRemoteWrite(
+        _ command: [String], remoteURL: String, tlsMode: SVNAutomaticTLSFallback.Mode, timeout: TimeInterval
+    ) async throws -> CommandResult {
+        let directory = FileManager.default.temporaryDirectory
+        switch tlsMode {
+        case .modern:
+            return try await runRemoteCommand(command, directory: directory, remoteURL: remoteURL, configuration: nil, timeout: timeout)
+        case .legacyCompatible:
+            try await SVNOpenSSLRuntime.shared.requireOpenSSL3(using: runner)
+            return try await SVNTLSConfiguration.withLegacyCompatibleConfiguration { configuration in
+                try await runRemoteCommand(command, directory: directory, remoteURL: remoteURL, configuration: configuration, timeout: timeout)
+            }
+        }
+    }
+
+    private func runRemoteCommand(
+        _ arguments: [String], directory: URL, remoteURL: String?, configuration: URL?, timeout: TimeInterval = 20
+    ) async throws -> CommandResult {
+        guard let remoteURL, let credential = await credentials.credential(for: remoteURL) else {
+            // 获取写操作的时限不能被测试注入的只读执行器悄然缩回默认 20 秒。
+            if timeout != 20 {
+                return try await runner.run(
+                    executable: "svn", arguments: arguments, directory: directory,
+                    timeout: timeout, opensslConfiguration: configuration
+                )
+            }
+            return try await commandExecutor(arguments, directory, configuration)
+        }
+        // 密码只通过本进程 stdin pipe 传入；不出现在 argv、环境变量、文件或错误文本中。
+        var authenticated = arguments
+        authenticated.insert(contentsOf: ["--username", credential.username, "--password-from-stdin"], at: 0)
+        return try await runner.run(
+            executable: "svn",
+            arguments: authenticated,
+            directory: directory,
+            timeout: timeout,
+            opensslConfiguration: configuration,
+            standardInput: Data((credential.password + "\n").utf8)
+        )
+    }
+
+    private func rememberCredentials(_ credential: RepositoryCredentials?, for remoteURL: String) async throws {
+        guard let credential else { return }
+        guard !credential.username.isEmpty, !credential.password.isEmpty,
+              !credential.username.contains(where: { $0 == "\n" || $0 == "\r" || $0 == "\0" }),
+              !credential.password.contains(where: { $0 == "\n" || $0 == "\r" || $0 == "\0" }) else {
+            throw VersionControlError.invalidData("SVN 用户名和密码不能为空，且不能包含换行或空字符。")
+        }
+        await credentials.store(credential, for: remoteURL)
+    }
+
+    private func normalizedRemoteAddress(_ raw: String) throws -> String {
+        guard !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              var components = URLComponents(string: raw),
+              let scheme = components.scheme?.lowercased(),
+              ["http", "https", "svn", "svn+ssh", "file"].contains(scheme),
+              components.user == nil, components.password == nil,
+              components.query == nil, components.fragment == nil else {
+            throw VersionControlError.invalidRepository("SVN 远端地址无效。")
+        }
+        if scheme == "file" {
+            guard components.host == nil || components.host?.isEmpty == true else {
+                throw VersionControlError.invalidRepository("仅支持本机 file:// SVN 地址。")
+            }
+        } else if components.host?.isEmpty != false {
+            throw VersionControlError.invalidRepository("SVN 远端地址缺少主机名。")
+        }
+        let forbidden = CharacterSet(charactersIn: "/")
+        let segments = components.percentEncodedPath.split(separator: "/", omittingEmptySubsequences: true)
+        let normalized = try segments.map { rawSegment -> String in
+            guard let decoded = String(rawSegment).removingPercentEncoding,
+                  !decoded.isEmpty, decoded != ".", decoded != "..", !decoded.contains("\0"),
+                  decoded.rangeOfCharacter(from: forbidden) == nil else {
+                throw VersionControlError.invalidRepository("SVN 远端地址包含无效路径。")
+            }
+            return encodeRemotePathSegment(decoded)
+        }
+        components.percentEncodedPath = "/" + normalized.joined(separator: "/")
+        guard let url = components.url else { throw VersionControlError.invalidRepository("无法构造 SVN 远端地址。") }
+        return trimTrailingSlashes(url.absoluteString)
+    }
+
+    private func remoteChildURL(parent: String, name: String) throws -> String {
+        guard !name.isEmpty, name != ".", name != "..", !name.contains("\0"), !name.contains("/") else {
+            throw VersionControlError.invalidData("SVN 返回了无效目录名称。")
+        }
+        return trimTrailingSlashes(parent) + "/" + encodeRemotePathSegment(name)
+    }
+
+    private func encodeRemotePathSegment(_ value: String) -> String {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/%@")
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+    }
+
+    /// SVN 会把最后一个 `@` 解释为 peg revision 分隔符。添加空 peg 可让路径本身包含 `@`。
+    private func svnRemoteTarget(_ address: String) -> String { address + "@" }
+
+    private func trimTrailingSlashes(_ value: String) -> String {
+        var value = value
+        while value.hasSuffix("/") && !value.hasSuffix("://") { value.removeLast() }
+        return value
     }
 
     /// `svn update` 是写操作：先以 `svn info` 只读探测 TLS 模式，再只执行一次更新命令。
@@ -368,16 +563,14 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryProvide
         guard let remoteURL = binding.remoteURL, !remoteURL.isEmpty else {
             return .modern
         }
-        let probeCommand = ["--non-interactive", "--no-auth-cache", "info", "--xml", remoteURL]
-        let executor = commandExecutor
-        let runner = runner
+        let probeCommand = ["--non-interactive", "--no-auth-cache", "info", "--xml", svnRemoteTarget(remoteURL)]
         let probe = try await tlsFallback.probe(
             remoteURL: remoteURL,
-            modern: { try await executor(probeCommand, binding.root, nil) },
+            modern: { try await runRemoteCommand(probeCommand, directory: binding.root, remoteURL: remoteURL, configuration: nil) },
             legacy: {
                 try await SVNOpenSSLRuntime.shared.requireOpenSSL3(using: runner)
                 return try await SVNTLSConfiguration.withLegacyCompatibleConfiguration { configuration in
-                    try await executor(probeCommand, binding.root, configuration)
+                    try await runRemoteCommand(probeCommand, directory: binding.root, remoteURL: remoteURL, configuration: configuration)
                 }
             }
         )
@@ -385,19 +578,18 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryProvide
         return probe.mode
     }
 
-    private func runUpdate(_ arguments: [String], directory: URL, tlsMode: SVNAutomaticTLSFallback.Mode) async throws -> CommandResult {
+    private func runUpdate(
+        _ arguments: [String], directory: URL, remoteURL: String?, tlsMode: SVNAutomaticTLSFallback.Mode
+    ) async throws -> CommandResult {
         switch tlsMode {
         case .modern:
-            return try await runner.run(executable: "svn", arguments: arguments, directory: directory, timeout: 120)
+            return try await runRemoteCommand(arguments, directory: directory, remoteURL: remoteURL, configuration: nil, timeout: 120)
         case .legacyCompatible:
             try await SVNOpenSSLRuntime.shared.requireOpenSSL3(using: runner)
             return try await SVNTLSConfiguration.withLegacyCompatibleConfiguration { configuration in
-                try await runner.run(
-                    executable: "svn",
-                    arguments: arguments,
-                    directory: directory,
-                    timeout: 120,
-                    opensslConfiguration: configuration
+                try await runRemoteCommand(
+                    arguments, directory: directory, remoteURL: remoteURL,
+                    configuration: configuration, timeout: 120
                 )
             }
         }
@@ -693,8 +885,26 @@ private struct SynchronizationLayout {
     let reason: String?
 }
 
+/// 只保存当前应用进程中、明确输入过的凭据。一个作用域只可用于该 URL 及其子路径，
+/// 不会因同主机的其他仓库路径而泄漏。
+private actor SVNSessionCredentialStore {
+    private var values: [String: RepositoryCredentials] = [:]
+
+    func store(_ credential: RepositoryCredentials, for remoteURL: String) {
+        values[remoteURL] = credential
+    }
+
+    func credential(for remoteURL: String) -> RepositoryCredentials? {
+        values
+            .filter { remoteURL == $0.key || remoteURL.hasPrefix($0.key + "/") }
+            .max { $0.key.count < $1.key.count }?
+            .value
+    }
+}
+
 private final class SVNXMLDocument: NSObject, XMLParserDelegate {
     struct InfoEntry {
+        var kind: String?
         var url: String?
         var repositoryRoot: String?
         var workingCopyRoot: String?
@@ -722,12 +932,20 @@ private final class SVNXMLDocument: NSObject, XMLParserDelegate {
         var changedPaths: [ChangedPath] = []
     }
 
+    struct ListEntry {
+        let name: String
+        let isDirectory: Bool
+    }
+
     private(set) var infoEntry: InfoEntry?
     private(set) var statusEntries: [StatusEntry] = []
     private(set) var logEntries: [LogEntry] = []
+    private(set) var listEntries: [ListEntry] = []
     private var currentStatus: StatusEntry?
     private var currentLog: LogEntry?
     private var currentPathAction: String?
+    private var currentListKind: String?
+    private var currentListName: String?
     private var elementStack: [String] = []
     private var text = ""
 
@@ -745,7 +963,7 @@ private final class SVNXMLDocument: NSObject, XMLParserDelegate {
         text = ""
         switch elementName {
         case "entry" where elementStack.contains("info"):
-            infoEntry = InfoEntry(revision: attributeDict["revision"])
+            infoEntry = InfoEntry(kind: attributeDict["kind"], revision: attributeDict["revision"])
         case "entry" where elementStack.contains("status"):
             if let path = attributeDict["path"] { currentStatus = StatusEntry(path: path) }
         case "wc-status":
@@ -754,6 +972,9 @@ private final class SVNXMLDocument: NSObject, XMLParserDelegate {
             currentStatus?.treeConflicted = ["true", "yes"].contains(attributeDict["tree-conflicted"]?.lowercased())
         case "logentry":
             currentLog = LogEntry(revision: attributeDict["revision"] ?? "")
+        case "entry" where elementStack.contains("list"):
+            currentListKind = attributeDict["kind"]
+            currentListName = nil
         case "path" where currentLog != nil:
             currentPathAction = attributeDict["action"] ?? ""
         default:
@@ -774,6 +995,8 @@ private final class SVNXMLDocument: NSObject, XMLParserDelegate {
         if elementName == "author" { currentLog?.author = value }
         if elementName == "date" { currentLog?.date = value }
         if elementName == "msg" { currentLog?.message = value }
+        // list 的 <name> 允许前后空格；这里不能沿用普通 XML 字段的 trim 后值。
+        if elementName == "name", currentListKind != nil { currentListName = text }
         if elementName == "path", let action = currentPathAction {
             currentLog?.changedPaths.append(ChangedPath(path: value, action: action))
             currentPathAction = nil
@@ -785,6 +1008,11 @@ private final class SVNXMLDocument: NSObject, XMLParserDelegate {
         if elementName == "logentry", let log = currentLog {
             logEntries.append(log)
             currentLog = nil
+        }
+        if elementName == "entry", let kind = currentListKind, let name = currentListName {
+            listEntries.append(ListEntry(name: name, isDirectory: kind == "dir"))
+            currentListKind = nil
+            currentListName = nil
         }
         _ = elementStack.popLast()
         text = ""

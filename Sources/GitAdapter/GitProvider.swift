@@ -3,7 +3,7 @@ import ToolExecution
 import VersionControlCore
 
 /// Git 适配器。读取与受限的获取／快进更新均通过参数数组执行，不经过 shell。
-public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryProvider, @unchecked Sendable {
+public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryProvider, RepositoryAcquisitionProvider, @unchecked Sendable {
     public let id: ProviderID = .git
     public let displayName = "Git"
 
@@ -13,6 +13,60 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPr
     public init(runner: CommandRunner = CommandRunner(), fileManager: FileManager = .default) {
         self.runner = runner
         self.fileManager = fileManager
+    }
+
+    public let acquisitionOption = RepositoryAcquisitionOption(
+        providerID: .git,
+        title: "Git",
+        actionTitle: "克隆",
+        supportsBrowsing: false,
+        supportsCredentials: false
+    )
+
+    /// 克隆到由上层预留的全新目录。认证仍交由用户现有的 Git 凭据助手或 SSH Agent，
+    /// 因而不把密码放入 URL、参数或应用配置。
+    public func acquire(
+        _ location: RemoteRepositoryLocation,
+        to destination: URL,
+        progress: @escaping RepositoryOperationProgressHandler
+    ) async throws {
+        guard location.credentials == nil else {
+            throw VersionControlError.unsupported("Git 克隆使用系统凭据助手或 SSH Agent，不在 RepHub 中保存账号密码。")
+        }
+        let remote = try validatedCloneLocation(location.url)
+        try validateCloneDestination(destination)
+
+        await progress(RepositoryOperationProgress("正在连接 Git 远端…"))
+        let result = try await git(
+            // 先只下载对象，禁止在尚未检查属性前写出工作区文件。
+            ["clone", "--no-checkout", "--no-recurse-submodules", "--", remote, destination.path],
+            in: destination.deletingLastPathComponent(),
+            timeout: 600,
+            restrictRemoteProtocols: true
+        )
+        _ = try requireSuccess(result, tool: "git")
+
+        await progress(RepositoryOperationProgress("正在检查检出配置…"))
+        guard try findGitMetadata(above: destination) != nil else {
+            throw VersionControlError.executionFailed("Git 克隆完成后未找到有效的工作副本。")
+        }
+        // 全局/本地 filter 和上游 .gitattributes 均可能启动外部程序。沿用更新前的
+        // 保守策略：只要发现相关配置或属性，就保留未检出的临时副本并拒绝继续执行。
+        if try await hasHead(destination), try await containsCheckoutFilter(inTree: "HEAD", directory: destination) {
+            throw VersionControlError.unsupported("该 Git 仓库配置了工作区过滤器，RepHub 不会执行其外部过滤程序。")
+        }
+        if try await hasHead(destination) {
+            let checkout = try await git(
+                ["reset", "--hard", "--recurse-submodules=no", "HEAD"],
+                in: destination,
+                timeout: 600
+            )
+            _ = try requireSuccess(checkout, tool: "git")
+        }
+
+        await progress(RepositoryOperationProgress("正在确认工作副本…"))
+        _ = try await detect(at: destination)
+        await progress(RepositoryOperationProgress("Git 工作副本已就绪。"))
     }
 
     public func detect(at directory: URL) async throws -> RepositoryBinding? {
@@ -716,16 +770,82 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPr
         return states
     }
 
+    private func validatedCloneLocation(_ value: String) throws -> String {
+        let location = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !location.isEmpty, location == value else {
+            throw VersionControlError.invalidRepository("请填写完整的 Git 远端地址。")
+        }
+        guard !location.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+            throw VersionControlError.invalidRepository("Git 远端地址不能包含控制字符。")
+        }
+        guard !location.hasPrefix("-") else {
+            throw VersionControlError.invalidRepository("Git 远端地址格式无效。")
+        }
+        // `ext::` 及其他 helper 形式可让 Git 调起外部程序；本客户端不接受这类远端。
+        guard !location.contains("::") else {
+            throw VersionControlError.unsupported("不支持 Git remote helper 地址。")
+        }
+
+        if location.hasPrefix("/") {
+            return location
+        }
+
+        if let components = URLComponents(string: location), let scheme = components.scheme?.lowercased() {
+            guard ["https", "http", "ssh", "file"].contains(scheme) else {
+                throw VersionControlError.unsupported("仅支持 HTTPS、HTTP、SSH 与本地 file Git 地址。")
+            }
+            if scheme == "file" {
+                guard components.host == nil || components.host?.isEmpty == true,
+                      components.path.hasPrefix("/") else {
+                    throw VersionControlError.invalidRepository("本地 Git 地址必须是 file:///绝对路径。")
+                }
+            } else {
+                guard components.host?.isEmpty == false else {
+                    throw VersionControlError.invalidRepository("Git 远端地址缺少服务器地址。")
+                }
+            }
+            guard components.password == nil else {
+                throw VersionControlError.invalidRepository("Git 远端地址不能包含密码。")
+            }
+            guard components.query == nil, components.fragment == nil else {
+                throw VersionControlError.invalidRepository("Git 远端地址不能包含查询参数或片段。")
+            }
+            return location
+        }
+
+        // Git 的 SCP 写法，例如 git@example.com:group/project.git。
+        let scpPattern = "^[^@/:\\s]+@[^@/:\\s]+:[^\\s]+$"
+        if location.range(of: scpPattern, options: .regularExpression) != nil {
+            return location
+        }
+        throw VersionControlError.invalidRepository("Git 远端地址格式无效。")
+    }
+
+    private func validateCloneDestination(_ destination: URL) throws {
+        let parent = destination.deletingLastPathComponent()
+        var parentIsDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: parent.path, isDirectory: &parentIsDirectory), parentIsDirectory.boolValue else {
+            throw VersionControlError.executionFailed("克隆位置的父文件夹不存在：\(parent.path)")
+        }
+        // attributesOfItem 可识别断开的符号链接；不能因 fileExists 返回 false 而误覆盖它。
+        if (try? fileManager.attributesOfItem(atPath: destination.path)) != nil {
+            throw VersionControlError.executionFailed("目标文件夹已存在，不能覆盖：\(destination.path)")
+        }
+    }
+
     private func git(
         _ command: [String],
         in directory: URL,
-        timeout: TimeInterval = 20
+        timeout: TimeInterval = 20,
+        restrictRemoteProtocols: Bool = false
     ) async throws -> CommandResult {
-        try await runner.run(
+        let safeguards = ["--no-optional-locks", "-c", "core.pager=cat", "-c", "pager.branch=false", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "submodule.recurse=false", "-c", "fetch.recurseSubmodules=false"]
+        let protocolRestrictions = ["-c", "protocol.allow=never", "-c", "protocol.file.allow=always", "-c", "protocol.http.allow=always", "-c", "protocol.https.allow=always", "-c", "protocol.ssh.allow=always"]
+        return try await runner.run(
             executable: "git",
             // hooks 可由仓库配置执行任意脚本；本客户端的更新不执行它们。
             // 禁止递归 submodule，避免一次操作继续写入子工作区。
-            arguments: ["--no-optional-locks", "-c", "core.pager=cat", "-c", "pager.branch=false", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "submodule.recurse=false", "-c", "fetch.recurseSubmodules=false"]
+            arguments: safeguards + (restrictRemoteProtocols ? protocolRestrictions : [])
                 + command,
             directory: directory,
             timeout: timeout

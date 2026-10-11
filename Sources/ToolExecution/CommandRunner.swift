@@ -49,7 +49,8 @@ public struct CommandRunner: Sendable {
         arguments: [String],
         directory: URL? = nil,
         timeout: TimeInterval = 20,
-        opensslConfiguration: URL? = nil
+        opensslConfiguration: URL? = nil,
+        standardInput: Data? = nil
     ) async throws -> CommandResult {
         guard let executablePath = ToolLocator.find(executable) else { throw VersionControlError.toolUnavailable(executable) }
         let control = ProcessControl()
@@ -62,6 +63,7 @@ public struct CommandRunner: Sendable {
                     directory: directory,
                     timeout: timeout,
                     opensslConfiguration: opensslConfiguration,
+                    standardInput: standardInput,
                     isolatedHome: isolatedHome
                 )
             }.value
@@ -88,6 +90,7 @@ private final class ProcessControl: @unchecked Sendable {
         directory: URL?,
         timeout: TimeInterval,
         opensslConfiguration: URL?,
+        standardInput: Data?,
         isolatedHome: URL?
     ) throws -> CommandResult {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("rephub-command-\(UUID().uuidString)")
@@ -103,7 +106,11 @@ private final class ProcessControl: @unchecked Sendable {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: executable)
         task.arguments = arguments; task.currentDirectoryURL = directory
-        task.standardInput = FileHandle.nullDevice; task.standardOutput = out; task.standardError = err
+        // 凭据等敏感输入只通过内存管道交给子进程；不进入参数、环境变量或临时文件。
+        // 数据在启动前写入并关闭写端，既保证子进程能收到 EOF，也避开启动后写入的 SIGPIPE 竞争。
+        let inputPipe = try standardInput.map(StandardInputPipe.init)
+        task.standardInput = inputPipe?.readHandle ?? FileHandle.nullDevice
+        task.standardOutput = out; task.standardError = err
         let inherited = ProcessInfo.processInfo.environment
         let allowedKeys = ["HOME", "PATH", "TMPDIR", "USER", "LOGNAME", "SSH_AUTH_SOCK", "SSH_AGENT_PID", "LANG", "http_proxy", "https_proxy", "all_proxy", "no_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"]
         var env = inherited.filter { allowedKeys.contains($0.key) }
@@ -129,6 +136,8 @@ private final class ProcessControl: @unchecked Sendable {
         if cancelled { lock.unlock(); throw CancellationError() }
         process = task
         do { try task.run() } catch { process = nil; lock.unlock(); throw error }
+        // 子进程已继承读端；关闭父进程副本，避免它影响 EOF 语义。
+        try? inputPipe?.readHandle.close()
         lock.unlock()
         let deadline = ProcessInfo.processInfo.systemUptime + max(timeout, 0.05)
         var failure: (any Error)?
@@ -155,5 +164,54 @@ private final class ProcessControl: @unchecked Sendable {
 
     private func fileSize(_ url: URL) -> UInt64 {
         ((try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? NSNumber)?.uint64Value ?? 0
+    }
+}
+
+/// 仅供一次子进程启动使用的标准输入管道。
+///
+/// 写端在创建时已写完并关闭，因此不会把敏感内容保存到文件，也不会在子进程提前退出时
+/// 发生启动后的写入竞争。限制为 4 KiB，并额外以系统报告的 `PIPE_BUF` 作为上限。
+private struct StandardInputPipe {
+    private static let maximumInputSize = 4 * 1024
+    let readHandle: FileHandle
+
+    init(_ data: Data) throws {
+        guard data.count <= Self.maximumInputSize else {
+            throw VersionControlError.executionFailed("标准输入超过 4 KiB 安全上限。")
+        }
+
+        var descriptors: [Int32] = [0, 0]
+        guard Darwin.pipe(&descriptors) == 0 else {
+            throw VersionControlError.executionFailed("无法建立受控标准输入通道。")
+        }
+        let readDescriptor = descriptors[0]
+        let writeDescriptor = descriptors[1]
+        var shouldCloseRead = true
+        var shouldCloseWrite = true
+        defer {
+            if shouldCloseRead { Darwin.close(readDescriptor) }
+        }
+        defer {
+            if shouldCloseWrite { Darwin.close(writeDescriptor) }
+        }
+
+        let pipeBufferSize = fpathconf(writeDescriptor, _PC_PIPE_BUF)
+        guard pipeBufferSize > 0, data.count <= Int(pipeBufferSize) else {
+            throw VersionControlError.executionFailed("标准输入超过当前系统管道的安全写入上限。")
+        }
+
+        let written = data.withUnsafeBytes { buffer in
+            Darwin.write(writeDescriptor, buffer.baseAddress, buffer.count)
+        }
+        guard written == data.count else {
+            throw VersionControlError.executionFailed("无法写入受控标准输入通道。")
+        }
+        guard Darwin.close(writeDescriptor) == 0 else {
+            throw VersionControlError.executionFailed("无法关闭受控标准输入通道。")
+        }
+        shouldCloseWrite = false
+
+        self.readHandle = FileHandle(fileDescriptor: readDescriptor, closeOnDealloc: true)
+        shouldCloseRead = false
     }
 }
