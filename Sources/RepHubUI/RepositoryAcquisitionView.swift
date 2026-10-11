@@ -71,6 +71,7 @@ struct RepositoryAcquisitionView: View {
                     openLocalFolder()
                 }
                 .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
+                Spacer()
             }
         }
         .padding(22).frame(minHeight: 205, alignment: .topLeading)
