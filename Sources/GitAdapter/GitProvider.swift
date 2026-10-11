@@ -3,7 +3,7 @@ import ToolExecution
 import VersionControlCore
 
 /// Git 适配器。读取与受限的获取／快进更新均通过参数数组执行，不经过 shell。
-public final class GitProvider: RepositoryOperationProvider, @unchecked Sendable {
+public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryProvider, @unchecked Sendable {
     public let id: ProviderID = .git
     public let displayName = "Git"
 
@@ -44,7 +44,7 @@ public final class GitProvider: RepositoryOperationProvider, @unchecked Sendable
             root: root,
             currentBranch: branch,
             remoteURL: remote?.isEmpty == false ? remote : nil,
-            capabilities: [.status, .diff, .history, .branches, .commitGraph, .fetch, .update]
+            capabilities: [.status, .diff, .history, .branches, .commitGraph, .fetch, .update, .fileHistory, .synchronization]
         )
     }
 
@@ -90,6 +90,133 @@ public final class GitProvider: RepositoryOperationProvider, @unchecked Sendable
             _ = try requireSuccess(result, tool: "git")
         }
         return try parseHistory(result.data)
+    }
+
+    /// 以 Git 的重命名追溯读取单个文件的提交历史。命令和路径均以参数数组传递，
+    /// `--literal-pathspecs` 防止以冒号开头的文件名被解释为路径规格语法。
+    public func fileHistory(
+        in binding: RepositoryBinding,
+        path: String,
+        limit: Int,
+        reference: String?
+    ) async throws -> [FileHistoryEntry] {
+        try ensureGit(binding)
+        guard !path.isEmpty else { throw VersionControlError.invalidData("未提供文件路径。") }
+        guard limit > 0 else { return [] }
+        guard limit <= 500 else {
+            throw VersionControlError.unsupported("单文件历史一次最多读取 500 条；请缩小范围后重试。")
+        }
+
+        let start = reference?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let revision = (start?.isEmpty == false) ? start! : "HEAD"
+        let result = try await git(
+            [
+                "--literal-pathspecs", "log", "--follow", "-M", "--name-status", "-z", "--topo-order", "--date=iso-strict",
+                "--max-count=\(limit)",
+                "--format=%x1e%H%x00%an%x00%aI%x00%P%x00%D%x00%B%x00",
+                "--end-of-options", revision, "--", path
+            ],
+            in: binding.root
+        )
+        if result.exitCode != 0 {
+            if try await isEmptyRepository(binding.root) { return [] }
+            _ = try requireSuccess(result, tool: "git")
+        }
+        return try parseFileHistory(result.data, newestPath: path)
+    }
+
+    /// 使用历史记录中该修订对应的路径，确保重命名前的提交不会错误地按当前文件名取差异。
+    public func fileHistoryDiff(in binding: RepositoryBinding, entry: FileHistoryEntry) async throws -> RepositoryPatch {
+        try ensureGit(binding)
+        guard !entry.path.isEmpty else { throw VersionControlError.invalidData("历史文件路径为空。") }
+        let revision = entry.pegRevision?.isEmpty == false ? entry.pegRevision! : entry.revision.id
+        let result = try await git(
+            [
+                "--literal-pathspecs", "-c", "core.quotepath=false", "show", "--format=", "--first-parent", "--patch", "--no-ext-diff", "--no-textconv",
+                "--end-of-options", revision, "--", entry.path
+            ],
+            in: binding.root
+        )
+        return RepositoryPatch(text: try requireSuccess(result, tool: "git").output)
+    }
+
+    /// 同步状态只比较当前 HEAD 与实际配置的上游引用；不会把其他本地分支的提交计算为待推送。
+    /// 远端引用只读取本机已有内容，调用方应先获取远端以刷新这一判断。
+    public func synchronization(
+        in binding: RepositoryBinding,
+        revisions: [Revision],
+        path: String?
+    ) async throws -> RepositorySyncStatus {
+        try ensureGit(binding)
+        _ = path // Git 的 ahead/behind 定义为分支拓扑，不能按单文件缩小计数。
+
+        let branchResult = try await git(["symbolic-ref", "--quiet", "--short", "HEAD"], in: binding.root)
+        guard branchResult.exitCode == 0 else {
+            if branchResult.exitCode == 1 {
+                return unknownSynchronization("当前处于游离 HEAD，无法确定上游同步状态。")
+            }
+            _ = try requireSuccess(branchResult, tool: "git")
+            return unknownSynchronization("无法确定当前 Git 分支。")
+        }
+        let branch = branchResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let remoteResult = try await git(["config", "--get", "branch.\(branch).remote"], in: binding.root)
+        if remoteResult.exitCode == 0,
+           remoteResult.output.trimmingCharacters(in: .whitespacesAndNewlines) == "." {
+            return unknownSynchronization("当前分支的上游是本地分支，不存在可判断的远端待推送状态。")
+        }
+
+        let upstreamResult = try await git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], in: binding.root)
+        guard upstreamResult.exitCode == 0 else {
+            return unknownSynchronization("当前分支未配置可用上游，无法判断待更新或待推送提交。")
+        }
+        let upstream = upstreamResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !upstream.isEmpty else {
+            return unknownSynchronization("当前分支未配置可用上游，无法判断待更新或待推送提交。")
+        }
+
+        // 同一轮读取固定两端提交，之后的计数与行状态都基于这对 SHA，避免并发 fetch 或切换分支造成前后不一致。
+        let endpointsResult = try await git(["rev-parse", "--revs-only", "--end-of-options", "HEAD", "@{upstream}"], in: binding.root)
+        guard endpointsResult.exitCode == 0 else {
+            return unknownSynchronization("本机缺少上游引用或引用已失效；请先获取远端后重试。")
+        }
+        let endpoints = endpointsResult.output.split(whereSeparator: \.isNewline).map(String.init)
+        guard endpoints.count == 2 else {
+            return unknownSynchronization("Git 未返回完整的当前提交与上游提交。")
+        }
+        let head = endpoints[0]
+        let upstreamRevision = endpoints[1]
+
+        let counts = try await git(["rev-list", "--left-right", "--count", "\(head)...\(upstreamRevision)"], in: binding.root)
+        guard counts.exitCode == 0 else {
+            return unknownSynchronization("本机缺少上游引用或引用已失效；请先获取远端后重试。")
+        }
+        let parts = counts.output.split(whereSeparator: \.isWhitespace)
+        guard parts.count == 2, let outgoing = Int(parts[0]), let incoming = Int(parts[1]) else {
+            return unknownSynchronization("Git 未返回可解析的上游提交计数。")
+        }
+
+        let states = try await synchronizationStates(
+            for: revisions.map(\.id),
+            head: head,
+            upstream: upstreamRevision,
+            in: binding.root
+        )
+        let summary: String
+        if incoming == 0 && outgoing == 0 {
+            summary = "当前分支与已获取的上游一致"
+        } else {
+            summary = "待更新 \(incoming) 个，待推送 \(outgoing) 个"
+        }
+        let rowLimitNote = states.values.contains(.uncertain)
+            ? " 个别列表提交超出 5,000 条行状态判断范围，已标记为需核对。"
+            : ""
+        return RepositorySyncStatus(
+            incomingCount: incoming,
+            outgoingCount: outgoing,
+            states: states,
+            summary: summary,
+            detail: "当前分支 \(branch) · 基于已获取的 \(upstream)；在“更新”中执行“获取远端”可刷新判断。" + rowLimitNote
+        )
     }
 
     public func branches(in binding: RepositoryBinding) async throws -> [BranchReference] {
@@ -530,6 +657,65 @@ public final class GitProvider: RepositoryOperationProvider, @unchecked Sendable
         return text.isEmpty ? "Git（退出码 \(result.exitCode)）未提供错误详情。" : String(text.prefix(2400))
     }
 
+    private func unknownSynchronization(_ detail: String) -> RepositorySyncStatus {
+        RepositorySyncStatus(
+            states: [:],
+            summary: "同步状态未知",
+            detail: detail + " 同步判断仅读取本机远端引用；可先获取远端后重试。"
+        )
+    }
+
+    /// 以有限的三个批量查询标记当前列表中的提交，避免为每条历史启动一个 Git 进程。
+    /// 计数本身由 `rev-list --count` 完整计算；行状态只保证最近 5,000 个拓扑记录，超出窗口则明确标为需核对。
+    private func synchronizationStates(
+        for revisionIDs: [String],
+        head: String,
+        upstream: String,
+        in directory: URL
+    ) async throws -> [String: RevisionSyncState] {
+        let wanted = Set(revisionIDs.filter { !$0.isEmpty })
+        guard !wanted.isEmpty else { return [:] }
+        let limit = 5_000
+        let probeLimit = limit + 1
+        async let divergentResult = git(
+            ["rev-list", "--left-right", "--max-count=\(probeLimit)", "\(head)...\(upstream)"],
+            in: directory
+        )
+        async let headResult = git(["rev-list", "--max-count=\(probeLimit)", head], in: directory)
+        async let upstreamResult = git(["rev-list", "--max-count=\(probeLimit)", upstream], in: directory)
+        let (divergent, head, upstreamHistory) = try await (divergentResult, headResult, upstreamResult)
+        let divergentOutput = try requireSuccess(divergent, tool: "git").output
+        let headOutput = try requireSuccess(head, tool: "git").output
+        let upstreamOutput = try requireSuccess(upstreamHistory, tool: "git").output
+
+        let divergentLines = divergentOutput.split(whereSeparator: \.isNewline)
+        let headLines = headOutput.split(whereSeparator: \.isNewline)
+        let upstreamLines = upstreamOutput.split(whereSeparator: \.isNewline)
+        let isTruncated = divergentLines.count > limit || headLines.count > limit || upstreamLines.count > limit
+
+        var states: [String: RevisionSyncState] = [:]
+        for line in divergentLines.prefix(limit) {
+            guard let marker = line.first else { continue }
+            let id = String(line.dropFirst()).trimmingCharacters(in: .whitespaces)
+            guard wanted.contains(id) else { continue }
+            switch marker {
+            case "<": states[id] = .outgoing
+            case ">": states[id] = .incoming
+            default: break
+            }
+        }
+        let common = Set(headLines.prefix(limit).map(String.init))
+            .intersection(Set(upstreamLines.prefix(limit).map(String.init)))
+        for id in wanted where states[id] == nil {
+            if common.contains(id) {
+                states[id] = .synchronized
+            } else if isTruncated {
+                states[id] = .uncertain
+            }
+        }
+        return states
+    }
+
     private func git(
         _ command: [String],
         in directory: URL,
@@ -637,6 +823,50 @@ private extension GitProvider {
             let message = String(decoding: fields[5], as: UTF8.self).trimmingCharacters(in: .newlines)
             return Revision(id: id, author: author, date: date, message: message, parents: parents, references: refs)
         }
+    }
+
+    /// `git log --name-status -z` 的每个提交由格式化记录分隔符开始；提交元数据后的 NUL 字段是文件状态及路径。
+    /// 从新到旧维护追溯路径，使重命名提交之前的记录保留当时的旧路径。
+    func parseFileHistory(_ data: Data, newestPath: String) throws -> [FileHistoryEntry] {
+        let formatter = ISO8601DateFormatter()
+        var trackedPath = newestPath
+        var entries: [FileHistoryEntry] = []
+        for record in data.split(separator: 0x1e, omittingEmptySubsequences: true) where hasNonWhitespaceByte(record) {
+            let fields = record.split(separator: 0, omittingEmptySubsequences: false)
+            guard fields.count >= 6 else { throw VersionControlError.invalidData("Git 单文件历史记录格式错误。") }
+            let id = String(decoding: fields[0], as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            let author = String(decoding: fields[1], as: UTF8.self).trimmingCharacters(in: .newlines)
+            let dateText = String(decoding: fields[2], as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !id.isEmpty, let date = formatter.date(from: dateText) else {
+                throw VersionControlError.invalidData("无法解析 Git 单文件历史提交。")
+            }
+            let parents = String(decoding: fields[3], as: UTF8.self).split(separator: " ").map(String.init)
+            let references = String(decoding: fields[4], as: UTF8.self).split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty && !$0.hasPrefix("HEAD ->") }
+            let message = String(decoding: fields[5], as: UTF8.self).trimmingCharacters(in: .newlines)
+            let revision = Revision(id: id, author: author, date: date, message: message, parents: parents, references: references)
+            entries.append(FileHistoryEntry(revision: revision, path: trackedPath, pegRevision: id))
+
+            var index = 6
+            while index < fields.count {
+                let status = String(decoding: fields[index], as: UTF8.self)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                index += 1
+                guard !status.isEmpty else { continue }
+                guard index < fields.count else { throw VersionControlError.invalidData("Git 单文件历史缺少文件路径。") }
+                let firstPath = String(decoding: fields[index], as: UTF8.self)
+                index += 1
+                if status.hasPrefix("R") || status.hasPrefix("C") {
+                    guard index < fields.count else { throw VersionControlError.invalidData("Git 单文件历史缺少重命名目标路径。") }
+                    let secondPath = String(decoding: fields[index], as: UTF8.self)
+                    index += 1
+                    // --follow 由新到旧追溯；遇到重命名后，下一个较旧提交使用旧路径。
+                    if secondPath == trackedPath { trackedPath = firstPath }
+                }
+            }
+        }
+        return entries
     }
 
     func changeKind(_ marker: Character) -> FileChangeKind {

@@ -19,8 +19,10 @@ public struct BindingSnapshot: Sendable {
     public let revisions: [Revision]
     public let branches: [BranchReference]
     public let issues: [String]
-    public init(binding: RepositoryBinding, changes: [FileChange] = [], revisions: [Revision] = [], branches: [BranchReference] = [], issues: [String] = []) {
+    public let syncStatus: RepositorySyncStatus?
+    public init(binding: RepositoryBinding, changes: [FileChange] = [], revisions: [Revision] = [], branches: [BranchReference] = [], issues: [String] = [], syncStatus: RepositorySyncStatus? = nil) {
         self.binding = binding; self.changes = changes; self.revisions = revisions; self.branches = branches; self.issues = issues
+        self.syncStatus = syncStatus
     }
 }
 
@@ -56,14 +58,60 @@ public actor RepositoryService {
         do { changes = try await provider.status(in: binding) }
         catch { issues.append("文件状态：\(error.localizedDescription)") }
         if Task.isCancelled { return BindingSnapshot(binding: binding, changes: changes, issues: issues) }
-        do { revisions = try await provider.history(in: binding, limit: 150, reference: reference) }
+        var historyLoaded = false
+        do {
+            revisions = try await provider.history(in: binding, limit: 150, reference: reference)
+            historyLoaded = true
+        }
         catch { issues.append("提交历史：\(error.localizedDescription)") }
         if Task.isCancelled { return BindingSnapshot(binding: binding, changes: changes, revisions: revisions, issues: issues) }
         if binding.capabilities.contains(.branches) {
             do { branches = try await provider.branches(in: binding) }
             catch { issues.append("分支：\(error.localizedDescription)") }
         }
-        return BindingSnapshot(binding: binding, changes: changes, revisions: revisions, branches: branches, issues: issues)
+        var syncStatus: RepositorySyncStatus?
+        if !Task.isCancelled, historyLoaded, binding.capabilities.contains(.synchronization),
+           let historyProvider = provider as? any RepositoryHistoryProvider {
+            do { syncStatus = try await historyProvider.synchronization(in: binding, revisions: revisions, path: nil) }
+            catch { issues.append("同步状态：\(RepositoryDisplaySanitizer.redact(error.localizedDescription))") }
+        }
+        return BindingSnapshot(binding: binding, changes: changes, revisions: revisions, branches: branches, issues: issues, syncStatus: syncStatus)
+    }
+
+    /// 单文件历史直接查询适配器，不筛选已加载的仓库最近提交。
+    public func fileHistory(in binding: RepositoryBinding, path: String, reference: String? = nil) async throws -> FileHistorySnapshot {
+        try validateRelativeFilePath(path)
+        guard binding.capabilities.contains(.fileHistory),
+              let provider = try provider(for: binding) as? any RepositoryHistoryProvider else {
+            throw VersionControlError.unsupported("当前版本控制来源不支持文件历史。")
+        }
+        try Task.checkCancellation()
+        let entries = try await provider.fileHistory(in: binding, path: path, limit: 150, reference: reference)
+        try Task.checkCancellation()
+        var syncStatus: RepositorySyncStatus?
+        var issues: [String] = []
+        if binding.capabilities.contains(.synchronization) {
+            do { syncStatus = try await provider.synchronization(in: binding, revisions: entries.map(\.revision), path: path) }
+            catch is CancellationError { throw CancellationError() }
+            catch { issues.append("同步状态：\(RepositoryDisplaySanitizer.redact(error.localizedDescription))") }
+        }
+        try Task.checkCancellation()
+        return FileHistorySnapshot(path: path, entries: entries, syncStatus: syncStatus, issues: issues)
+    }
+
+    public func fileHistoryDiff(in binding: RepositoryBinding, entry: FileHistoryEntry) async throws -> RepositoryPatch {
+        try validateRelativeFilePath(entry.path)
+        guard let provider = try provider(for: binding) as? any RepositoryHistoryProvider else {
+            throw VersionControlError.unsupported("当前版本控制来源不支持文件历史差异。")
+        }
+        return try await provider.fileHistoryDiff(in: binding, entry: entry)
+    }
+
+    private func validateRelativeFilePath(_ path: String) throws {
+        guard !path.isEmpty, !path.hasPrefix("/"), !path.contains("\0"),
+              path.split(separator: "/", omittingEmptySubsequences: false).allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
+            throw VersionControlError.invalidRepository("文件路径必须位于当前工作副本内。")
+        }
     }
 
     public func diff(in binding: RepositoryBinding, path: String?, revision: String?) async throws -> RepositoryPatch {
