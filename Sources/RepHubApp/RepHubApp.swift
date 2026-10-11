@@ -72,6 +72,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var workspace: WorkspaceModel?
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.regular)
+        // 本地应用包原地重建时，Dock 可能继续使用首次注册的占位图标。
+        // 直接从当前包加载，确保运行中的图标与本次打包资源一致。
+        if let iconURL = Bundle.main.url(forResource: "RepHub", withExtension: "icns"),
+           let icon = NSImage(contentsOf: iconURL), icon.isValid {
+            NSApplication.shared.applicationIconImage = icon
+        }
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
