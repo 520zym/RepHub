@@ -79,6 +79,18 @@
 
 实窗截图（仅本地构建产物）：`svn-root-eu-working.png`、`svn-admin-eu-clean.png`、`dual-message-svn-collapsed.png`、`dual-tv-svn-working.png`、`dual-tv-git-history.png`、`fixture-svn-history.png`、`fixture-svn-compact-expanded.png`、`fixture-dual-compact-git.png`、`fixture-dual-compact-svn.png`，均位于 `build/verification/`。
 
+## 旧 SVN TLS 兼容修复
+
+上述 SSL 失败已在本轮定位并修复：`192.168.131.32:8443` 实测协商 TLS 1.0，同时需要 OpenSSL 的旧服务器连接选项。兼容配置限定到明确保存的 HTTPS 主机与端口，仅通过单次 SVN 子进程使用，保留现有证书验证及信任记录。
+
+- 原生应用重新打开 TV 双仓库，SVN 150 条历史成功，`r15730` 的 `VersionService.java` 文件及并排差异成功；状态由“部分读取失败”恢复“就绪”。
+- 原生应用重新打开 EU ROOT 纯 SVN 仓库，150 条历史成功，`r15263` 的 `ReceiptFileUtils.java` 文件及并排差异成功。修订列表、详情和代码区未出现错位。
+- 设置中增加“SVN 连接”页，显示保存的端点规则；与原有外观设置并列。重启应用后规则生效。
+- 定向自动验证共 11 个不同测试通过：SVN 适配器 1、TLS 握手矩阵 1、TLS 策略 2、命令环境 1、连接规则 4、真实本地集成 2；无失败、无跳过。四种 TLS 版本均使用生产配置完成本地握手，并分别拒绝错误主机名及不受信任证书。运行时识别新增后单独验证策略 2 项通过。
+- 编译、打包及签名通过。业务目录只读取，未更新或提交。当前真实服务端验证范围为同一旧服务器的 TV 与 EU ROOT，其他服务器未据此宣称通过。
+
+详细配置、依赖与证据见 [SVN TLS 兼容](svn-tls-compatibility.md)。截图：`build/verification/tls-tv-svn-history.png`、`tls-eu-svn-history.png`、`tls-svn-settings.png`。
+
 ## 尚未覆盖
 
-业务 SVN 远端已尝试读取但 SSL 通信失败，旧 TLS、认证、证书及网络代理兼容尚未通过；未执行业务目录写入。当前没有更新、初始化、提交、推送或 AI 的执行能力。不同目录关联、后台监控、完整语法高亮及历史分页也属于后续阶段。
+尚未验证所有旧 SVN 密码套件、其他 SSL 运行时、网络代理及全新的凭据/证书信任流程；认证沿用现有本机配置。未执行业务目录写入。当前没有更新、初始化、提交、推送或 AI 的执行能力。不同目录关联、后台监控、完整语法高亮及历史分页也属于后续阶段。

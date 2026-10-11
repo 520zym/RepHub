@@ -8,9 +8,14 @@ import VersionControlCore
 /// 仅通过 Subversion 命令行读取工作副本；不保存认证信息，也不修改工作副本。
 public struct SVNProvider: VersionControlProvider {
     public let runner: CommandRunner
+    private let tlsMode: @Sendable (String?) async -> RepositoryTLSMode
 
-    public init(runner: CommandRunner = CommandRunner()) {
+    public init(
+        runner: CommandRunner = CommandRunner(),
+        tlsMode: @escaping @Sendable (String?) async -> RepositoryTLSMode = { _ in .modern }
+    ) {
         self.runner = runner
+        self.tlsMode = tlsMode
     }
 
     public let id: ProviderID = .svn
@@ -68,7 +73,7 @@ public struct SVNProvider: VersionControlProvider {
             // 工作副本默认只查询 BASE；显式范围可在尚未 update 时读取仓库最新修订。
             arguments += ["-r", "HEAD:1"]
         }
-        let result = try await svn(arguments, directory: binding.root)
+        let result = try await svn(arguments, directory: binding.root, remoteURL: binding.remoteURL)
         let document = try SVNXMLDocument(data: result.data)
         return document.logEntries.map { entry in
             Revision(
@@ -88,7 +93,11 @@ public struct SVNProvider: VersionControlProvider {
         guard !revision.isEmpty else {
             throw VersionControlError.invalidData("缺少 Subversion 修订号。")
         }
-        let result = try await svn(["log", "--xml", "-v", "-r", normalizedRevision(revision)], directory: binding.root)
+        let result = try await svn(
+            ["log", "--xml", "-v", "-r", normalizedRevision(revision)],
+            directory: binding.root,
+            remoteURL: binding.remoteURL
+        )
         let document = try SVNXMLDocument(data: result.data)
         let prefix = try await workingCopyRepositoryPath(in: binding)
 
@@ -109,7 +118,9 @@ public struct SVNProvider: VersionControlProvider {
             }
             arguments += ["--", svnTargetPath(path)]
         }
-        let result = try await svn(arguments, directory: binding.root)
+        // 本地工作区差异不访问远端，不能因旧 TLS 兼容设置而要求 OpenSSL 3。
+        let remoteURL = revision == nil ? nil : binding.remoteURL
+        let result = try await svn(arguments, directory: binding.root, remoteURL: remoteURL)
         var text = result.output
         if revision == nil, path == nil {
             let untracked = try await unversionedPaths(in: binding)
@@ -121,14 +132,34 @@ public struct SVNProvider: VersionControlProvider {
         return RepositoryPatch(text: text)
     }
 
-    private func svn(_ arguments: [String], directory: URL) async throws -> CommandResult {
+    private func svn(_ arguments: [String], directory: URL, remoteURL: String? = nil) async throws -> CommandResult {
         // --non-interactive 防止凭据提示阻塞 UI；不接受或绕过 TLS 证书错误。
-        let result = try await runner.run(
-            executable: "svn",
-            arguments: ["--non-interactive", "--no-auth-cache"] + arguments,
-            directory: directory
-        )
+        let command = ["--non-interactive", "--no-auth-cache"] + arguments
+        let mode = await tlsMode(remoteURL)
+        let result: CommandResult
+        if mode == .legacyCompatible, usesHTTPS(remoteURL) {
+            try await SVNOpenSSLRuntime.shared.requireOpenSSL3(using: runner)
+            let runner = runner
+            result = try await SVNTLSConfiguration.withLegacyCompatibleConfiguration { configuration in
+                try await runner.run(
+                    executable: "svn",
+                    arguments: command,
+                    directory: directory,
+                    opensslConfiguration: configuration
+                )
+            }
+        } else {
+            result = try await runner.run(executable: "svn", arguments: command, directory: directory)
+        }
         return try requireSuccess(result, tool: "svn")
+    }
+
+    private func usesHTTPS(_ remoteURL: String?) -> Bool {
+        guard let remoteURL, let components = URLComponents(string: remoteURL) else { return false }
+        return components.scheme?.lowercased() == "https"
+            && components.host?.isEmpty == false
+            && components.user == nil
+            && components.password == nil
     }
 
     private func workingCopyRepositoryPath(in binding: RepositoryBinding) async throws -> String {

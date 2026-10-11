@@ -36,13 +36,27 @@ public enum ToolLocator {
 /// Executes argument arrays without a shell. Files, rather than pipes, avoid blocking on large output.
 public struct CommandRunner: Sendable {
     public init() {}
-    public func run(executable: String, arguments: [String], directory: URL? = nil, timeout: TimeInterval = 20) async throws -> CommandResult {
+    /// `opensslConfiguration` 只为本次子进程设置 `OPENSSL_CONF`。
+    /// 不提供通用环境变量入口，避免调用方覆盖 HOME、PATH 或动态链接器相关变量。
+    public func run(
+        executable: String,
+        arguments: [String],
+        directory: URL? = nil,
+        timeout: TimeInterval = 20,
+        opensslConfiguration: URL? = nil
+    ) async throws -> CommandResult {
         guard let executablePath = ToolLocator.find(executable) else { throw VersionControlError.toolUnavailable(executable) }
         let control = ProcessControl()
         return try await withTaskCancellationHandler {
             try Task.checkCancellation()
             return try await Task.detached(priority: .userInitiated) {
-                try control.execute(executable: executablePath, arguments: arguments, directory: directory, timeout: timeout)
+                try control.execute(
+                    executable: executablePath,
+                    arguments: arguments,
+                    directory: directory,
+                    timeout: timeout,
+                    opensslConfiguration: opensslConfiguration
+                )
             }.value
         } onCancel: { control.cancel() }
     }
@@ -61,7 +75,13 @@ private final class ProcessControl: @unchecked Sendable {
     }
     private var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
 
-    func execute(executable: String, arguments: [String], directory: URL?, timeout: TimeInterval) throws -> CommandResult {
+    func execute(
+        executable: String,
+        arguments: [String],
+        directory: URL?,
+        timeout: TimeInterval,
+        opensslConfiguration: URL?
+    ) throws -> CommandResult {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("rephub-command-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -81,6 +101,9 @@ private final class ProcessControl: @unchecked Sendable {
         var env = inherited.filter { allowedKeys.contains($0.key) }
         env["GIT_TERMINAL_PROMPT"] = "0"; env["GIT_OPTIONAL_LOCKS"] = "0"; env["GIT_PAGER"] = "cat"
         env["LC_ALL"] = "en_US.UTF-8"
+        if let opensslConfiguration {
+            env["OPENSSL_CONF"] = opensslConfiguration.standardizedFileURL.path
+        }
         task.environment = env
         lock.lock()
         if cancelled { lock.unlock(); throw CancellationError() }
