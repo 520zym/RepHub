@@ -631,19 +631,7 @@ private struct HistoryRevisionInspector: View {
     @ViewBuilder
     private func referenceLabels(_ references: [String]) -> some View {
         if !references.isEmpty {
-            ScrollView(.horizontal) {
-                HStack(spacing: 5) {
-                    ForEach(references, id: \.self) { reference in
-                        Text(reference).font(.caption2).lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: false)
-                            .padding(.horizontal, 6).padding(.vertical, 3)
-                            .background(palette.selection, in: Capsule())
-                            .help(reference)
-                    }
-                }
-            }
-            .scrollIndicators(.hidden)
-            .frame(height: 24)
+            RevisionReferenceLabels(references: references, visibleLimit: isCompact ? 1 : 2, palette: palette)
         }
     }
 

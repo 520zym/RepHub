@@ -151,6 +151,12 @@
 
 最终定向测试仍为 31 项全部通过，应用构建、打包和临时签名成功。未进行正式帧率测量，也未使用业务规模仓库作性能压测。实窗截图位于 `build/verification/trees-git-history.png`、`trees-svn-history.png`、`trees-svn-workspace.png`、`trees-long-line.png`、`trees-large-diff-last.png`，仅作本地验证产物。
 
+## 分支标签布局修正
+
+提交详情的引用标签改用 24 pt 等高、6 pt 圆角的单行标签，按可用宽度整块换行；单个超长名字中间省略，悬停保留完整名称。主历史先显示 2 个、底部紧凑详情先显示 1 个，其余通过“+数量”浮层查看完整列表，避免多个标签挤压或产生横向滚动条。
+
+`scripts/build-app.sh` 编译、打包及临时签名通过。在隔离 `git-tree` 样本核对 7 个引用、270 pt 最窄详情栏、超长分支名、完整引用浮层及底部紧凑详情；标签、作者和文件列表没有重叠。此轮为局部视觉修改，未新增或重跑自动化测试，未使用业务仓库。截图：`build/verification/reference-tags-history.png`、`reference-tags-long-name.png`、`reference-tags-all.png`、`reference-tags-compact.png`。
+
 ## 尚未覆盖
 
 尚未验证旧 HTTPS SVN 服务端的实际更新写入、所有旧 SVN 密码套件、其他 SSL 运行时、网络代理及全新的凭据/证书信任流程；认证沿用现有本机配置。没有使用业务仓库执行写操作。本轮原生窗口未模拟长网络传输中的取消，取消后的状态恢复由针对性测试覆盖。当前没有克隆、检出、初始化、提交、推送或 AI 的执行能力。Git 子模块、文件过滤器和 SVN externals 更新明确不在本轮范围。不同目录关联、后台监控、完整语法高亮及历史分页也属于后续阶段。
