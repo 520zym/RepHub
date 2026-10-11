@@ -10,8 +10,11 @@ fi
 swift build -c "$configuration"
 binary_dir="$(swift build -c "$configuration" --show-bin-path)"
 bundle="$PWD/build/RepHub.app"
+scripts/generate-app-icon.sh
 mkdir -p "$bundle/Contents/MacOS"
 cp "$binary_dir/RepHub" "$bundle/Contents/MacOS/RepHub"
 cp Resources/Info.plist "$bundle/Contents/Info.plist"
+mkdir -p "$bundle/Contents/Resources"
+cp Resources/RepHub.icns "$bundle/Contents/Resources/RepHub.icns"
 codesign --force --sign - "$bundle"
 print "已生成：$bundle"

@@ -5,6 +5,7 @@
     <key>CFBundleName</key><string>RepHub</string>
     <key>CFBundleDisplayName</key><string>RepHub</string>
     <key>CFBundleIdentifier</key><string>com.zym.RepHub</string>
+    <key>CFBundleIconFile</key><string>RepHub.icns</string>
     <key>CFBundleExecutable</key><string>RepHub</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>0.1.0</string>
