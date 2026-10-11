@@ -45,8 +45,11 @@ public final class WorkspaceModel {
     public private(set) var operationProgressMessage = ""
     public private(set) var operationResult: RepositoryOperationResult?
     public private(set) var isOperationCancelling = false
+    public var showsRepositoryAcquisition = false
 
     private let service: RepositoryService
+    /// 远程克隆／检出独立于已有工作副本的更新状态；认证信息仅在本次应用会话中使用。
+    public let repositoryAcquisition: RepositoryAcquisitionModel
     private var workTask: Task<Void, Never>?
     private var operationTask: Task<Void, Never>?
     private var requestToken = 0
@@ -66,6 +69,7 @@ public final class WorkspaceModel {
 
     public init(service: RepositoryService) {
         self.service = service
+        self.repositoryAcquisition = RepositoryAcquisitionModel(service: service)
     }
 
     isolated deinit {
@@ -76,8 +80,8 @@ public final class WorkspaceModel {
     /// 版本控制写操作期间，所有会改变所选工作区或读取范围的入口均应保持锁定。
     public var isOperationInProgress: Bool { operationKind != nil && operationResult == nil }
     /// 供应用退出保护使用；操作后的状态核对同样属于进行中状态。
-    public var isOperating: Bool { isOperationInProgress }
-    public var isInteractionLocked: Bool { isOperationInProgress }
+    public var isOperating: Bool { isOperationInProgress || repositoryAcquisition.isAcquiring }
+    public var isInteractionLocked: Bool { isOperationInProgress || repositoryAcquisition.isAcquiring }
     public var operationRefreshIssues: [String] {
         var seen = Set<String>()
         return ((workspace?.issues ?? []) + snapshots.values.flatMap(\.issues)).filter { seen.insert($0).inserted }
@@ -98,6 +102,17 @@ public final class WorkspaceModel {
         panel.canCreateDirectories = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
         open(url)
+    }
+
+    public func showRepositoryAcquisition() {
+        guard !isInteractionLocked else { return }
+        showsRepositoryAcquisition = true
+        repositoryAcquisition.prepare()
+    }
+
+    public func dismissRepositoryAcquisition() {
+        guard !repositoryAcquisition.isBusy else { return }
+        showsRepositoryAcquisition = false
     }
 
     public func open(_ url: URL) {
@@ -482,6 +497,10 @@ public final class WorkspaceModel {
 
     /// 取消并不回滚已由 Git/SVN 落地的步骤；仍等待服务层刷新真实状态。
     public func cancelOperation() {
+        if repositoryAcquisition.isAcquiring {
+            repositoryAcquisition.cancel()
+            return
+        }
         guard isOperationInProgress, !isOperationCancelling else { return }
         isOperationCancelling = true
         operationProgressMessage = "正在取消并核对工作区状态…"

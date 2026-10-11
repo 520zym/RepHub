@@ -24,12 +24,12 @@ struct RepHubApp: App {
         .defaultSize(width: 1440, height: 980)
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button("打开本地文件夹…", action: workspace.chooseFolder)
+                Button("打开仓库…", action: workspace.showRepositoryAcquisition)
                     .keyboardShortcut("o")
                     .disabled(workspace.isOperating)
             }
             CommandMenu("项目") {
-                Button("打开仓库…", action: workspace.chooseFolder)
+                Button("打开仓库…", action: workspace.showRepositoryAcquisition)
                     .disabled(workspace.isOperating)
                 Divider()
                 Button("刷新仓库", action: workspace.refresh)

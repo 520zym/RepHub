@@ -168,3 +168,20 @@
 ## 尚未覆盖
 
 尚未验证旧 HTTPS SVN 服务端的实际更新写入、所有旧 SVN 密码套件、其他 SSL 运行时、网络代理及全新的凭据/证书信任流程；认证沿用现有本机配置。没有使用业务仓库执行写操作。本轮原生窗口未模拟长网络传输中的取消，取消后的状态恢复由针对性测试覆盖。当前没有克隆、检出、初始化、提交、推送或 AI 的执行能力。Git 子模块、文件过滤器和 SVN externals 更新明确不在本轮范围。不同目录关联、后台监控、完整语法高亮及历史分页也属于后续阶段。
+
+## 2026-10-11：统一打开仓库、Git 克隆与 SVN 子目录检出
+
+- 原生“打开仓库”入口统一提供本地文件夹和远程仓库，菜单、工具栏、欢迎页及 ⌘O 使用同一流程。远程按适配器能力展示 Git 克隆或 SVN 目录浏览／检出，成功后自动识别并打开工作副本。
+- 获取契约独立于已有工作副本更新；服务层共享写互斥、校验单层目录名称及父目录、拒绝已有目标和悬空链接。先在同父级独立暂存目录内完成获取，再移动到指定新目录；取消／失败保留已下载部分并展示位置。
+- SVN 单层惰性浏览、目录／文件区分、中文／空格／`@` 转义，检出前只读确认目录与 TLS 模式，实际 checkout 仅执行一次且忽略 externals。账号密码可在本次应用会话使用，密码走有大小限制的内存 stdin 管道；无密码参数、环境变量或凭据文件。认证测试使用专属本机 svnserve 测试账户，成功覆盖浏览、检出及后续历史／更新。
+- Git 使用既有凭据助手或 SSH Agent；先 clone --no-checkout，确认无外部 checkout filter 再生成工作区；不递归子模块，不运行 hooks。带密码 URL、remote helper 形式等输入被拒绝。当前 LFS／自定义过滤器检出仍未支持，遇到这类仓库会说明原因并保留暂存内容。
+
+本轮验证：
+
+- `swift test --filter 'RepositoryAcquisitionTests|CommandInputTests|GitAcquisitionTests|SVNAcquisitionTests|RepositoryAcquisitionModelTests|RepositoryOperationTests|SVNAutomaticTLS|SVNProviderTests'`：实际执行 21 项通过（包含新增的 17 项；`SVNAutomaticTLS` 没有匹配项，另以下一项回归覆盖）。
+- `swift test --filter 'SVNTLSPolicyTests|SVNUpdateTests|CommandEnvironmentTests'`：15 项通过。合计 36 项，未运行全量测试。
+- `scripts/build-app.sh`：编译成功并生成 ad-hoc 签名的 `build/RepHub.app`。
+- 原生界面实际使用全新临时 `RepHub-TreeFixtures`：克隆本地裸 Git 仓库后自动打开并显示 2 条历史；展开 SVN `docs` 后仅选择 `manual` 检出，工作副本只显示该目录的 `Guide.md`，历史与 BASE r2 状态正确；通过统一本地入口重新打开该 SVN 工作副本也正常。
+- 视觉检查修正了“新文件夹”标签换行，压缩 Git 表单多余高度；SVN 显示选定检出 URL 并提供完整路径提示，树展开按钮增加明确辅助功能名称。
+- 所有克隆、检出、更新和提交夹具准备均只写临时测试仓库，未写入用户正式工作副本或正式远端。
+- 新版原生界面另外只读浏览了用户指定的旧 SVN HTTPS 服务，根目录正常显示，自动 TLS 兼容无需用户配置；该真实服务未执行 checkout、update、commit 或其他写操作。

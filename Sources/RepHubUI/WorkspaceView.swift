@@ -62,6 +62,15 @@ public struct WorkspaceView: View {
             }
             .interactiveDismissDisabled(model.isOperationInProgress)
         }
+        .sheet(isPresented: $model.showsRepositoryAcquisition) {
+            RepositoryAcquisitionView(
+                model: model.repositoryAcquisition,
+                palette: palette,
+                dismiss: model.dismissRepositoryAcquisition,
+                openLocalFolder: model.chooseFolder,
+                openAcquiredFolder: model.open
+            )
+        }
     }
 
     private func workingCopy(size: CGSize, palette: AppPalette) -> some View {
@@ -97,7 +106,7 @@ public struct WorkspaceView: View {
         ToolbarItem(placement: .navigation) {
             HStack(spacing: 12) {
                 Menu {
-                    Button("打开本地文件夹…", action: model.chooseFolder)
+                    Button("打开仓库…", action: model.showRepositoryAcquisition)
                     if let workspace = model.workspace {
                         Divider()
                         Text(workspace.directory.path)
@@ -229,7 +238,7 @@ public struct WorkspaceView: View {
         } description: {
             Text(model.errorMessage ?? (model.workspace?.isUnmanaged == true ? "未识别到 Git 或 Subversion 工作副本。初始化功能尚未接入。" : "从「项目」菜单打开本地 Git 或 Subversion 仓库。"))
         } actions: {
-            Button("打开本地文件夹…", action: model.chooseFolder).buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
+            Button("打开仓库…", action: model.showRepositoryAcquisition).buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
         }
     }
 }
