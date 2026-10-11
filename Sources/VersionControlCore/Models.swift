@@ -15,6 +15,8 @@ public struct RepositoryCapabilities: OptionSet, Hashable, Sendable {
     public static let history = Self(rawValue: 1 << 2)
     public static let branches = Self(rawValue: 1 << 3)
     public static let commitGraph = Self(rawValue: 1 << 4)
+    public static let fetch = Self(rawValue: 1 << 5)
+    public static let update = Self(rawValue: 1 << 6)
 }
 
 public struct RepositoryBinding: Identifiable, Hashable, Sendable {
@@ -110,7 +112,7 @@ public enum VersionControlError: Error, LocalizedError, Sendable {
         case .toolUnavailable(let name): "未找到 \(name) 工具，请安装或检查工具路径。"
         case .invalidRepository(let detail): "无法识别工作副本：\(detail)"
         case .executionFailed(let detail): detail
-        case .timedOut(let name): "\(name) 读取超时，请检查服务连接后重试。"
+        case .timedOut(let name): "\(name) 操作超时，请检查服务连接及工作区实际状态。"
         case .unsupported(let detail): detail
         case .invalidData(let detail): "无法解析版本控制数据：\(detail)"
         case .outputTooLarge: "工具输出超过读取上限，请缩小查询范围。"

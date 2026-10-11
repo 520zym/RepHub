@@ -7,6 +7,11 @@ import VersionControlCore
 actor SVNAutomaticTLSFallback {
     typealias Command = @Sendable () async throws -> CommandResult
 
+    enum Mode: Sendable {
+        case modern
+        case legacyCompatible
+    }
+
     private let now: @Sendable () -> Date
     private let cacheLifetime: TimeInterval
     private var legacyUntil: [RepositoryEndpointPolicy: Date] = [:]
@@ -20,9 +25,16 @@ actor SVNAutomaticTLSFallback {
     }
 
     func execute(remoteURL: String?, modern: @escaping Command, legacy: @escaping Command) async throws -> CommandResult {
+        let selection = try await probe(remoteURL: remoteURL, modern: modern, legacy: legacy)
+        return selection.result
+    }
+
+    /// 为只读请求选择本次连接的 TLS 模式。调用方可将返回的模式用于紧随其后的写操作，
+    /// 从而确保写命令绝不会因 TLS 兼容逻辑而自动重放。
+    func probe(remoteURL: String?, modern: @escaping Command, legacy: @escaping Command) async throws -> (result: CommandResult, mode: Mode) {
         try Task.checkCancellation()
         guard let endpoint = endpoint(for: remoteURL) else {
-            return try await modern()
+            return (try await modern(), .modern)
         }
 
         if let expiry = legacyUntil[endpoint], expiry > now() {
@@ -34,7 +46,7 @@ actor SVNAutomaticTLSFallback {
                 if result.exitCode != 0 {
                     legacyUntil.removeValue(forKey: endpoint)
                 }
-                return result
+                return (result, .legacyCompatible)
             } catch {
                 legacyUntil.removeValue(forKey: endpoint)
                 throw error
@@ -44,7 +56,7 @@ actor SVNAutomaticTLSFallback {
 
         let modernResult = try await modern()
         guard modernResult.exitCode != 0, Self.isProtocolHandshakeFailure(modernResult) else {
-            return modernResult
+            return (modernResult, .modern)
         }
 
         try Task.checkCancellation()
@@ -54,11 +66,11 @@ actor SVNAutomaticTLSFallback {
         } catch let error as VersionControlError {
             // 同时保留原始握手诊断与运行时限制，交由 requireSuccess 统一脱敏。
             if case .unsupported(let reason) = error {
-                return CommandResult(
+                return (CommandResult(
                     data: modernResult.data,
                     errorData: Data((modernResult.error + "\n自动 TLS 兼容不可用：" + reason).utf8),
                     exitCode: modernResult.exitCode
-                )
+                ), .modern)
             }
             throw error
         }
@@ -66,7 +78,7 @@ actor SVNAutomaticTLSFallback {
         if legacyResult.exitCode == 0 {
             legacyUntil[endpoint] = now().addingTimeInterval(cacheLifetime)
         }
-        return legacyResult
+        return (legacyResult, .legacyCompatible)
     }
 
     private func endpoint(for remoteURL: String?) -> RepositoryEndpointPolicy? {

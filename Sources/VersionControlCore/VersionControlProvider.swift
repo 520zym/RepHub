@@ -1,6 +1,6 @@
 import Foundation
 
-/// 第一轮只公开真实读取能力。写操作将在具备执行及恢复策略后增加独立契约。
+/// 读取能力契约；更新等写能力通过 RepositoryOperationProvider 单独提供。
 public protocol VersionControlProvider: Sendable {
     var id: ProviderID { get }
     var displayName: String { get }

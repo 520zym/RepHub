@@ -14,11 +14,12 @@ let package = Package(
         .target(name: "DesignSystem"),
         .target(name: "RepHubUI", dependencies: ["VersionControlCore", "RepositoryApplication", "DesignSystem"]),
         .executableTarget(name: "RepHubApp", dependencies: ["RepHubUI", "DesignSystem", "RepositoryApplication", "GitAdapter", "SVNAdapter"]),
-        .testTarget(name: "CoreTests", dependencies: ["VersionControlCore", "RepositoryApplication", "ToolExecution"]),
-        .testTarget(name: "GitAdapterTests", dependencies: ["GitAdapter", "ToolExecution"]),
-        .testTarget(name: "SVNAdapterTests", dependencies: ["SVNAdapter", "ToolExecution"]),
+        .target(name: "TestSupport", dependencies: ["VersionControlCore", "ToolExecution"], path: "Tests/TestSupport"),
+        .testTarget(name: "CoreTests", dependencies: ["VersionControlCore", "RepositoryApplication", "ToolExecution", "TestSupport"]),
+        .testTarget(name: "GitAdapterTests", dependencies: ["GitAdapter", "ToolExecution", "TestSupport", "VersionControlCore"]),
+        .testTarget(name: "SVNAdapterTests", dependencies: ["SVNAdapter", "ToolExecution", "TestSupport"]),
         .testTarget(name: "DesignSystemTests", dependencies: ["DesignSystem"]),
         .testTarget(name: "RepHubUITests", dependencies: ["RepHubUI", "RepositoryApplication", "VersionControlCore"]),
-        .testTarget(name: "IntegrationTests", dependencies: ["RepositoryApplication", "GitAdapter", "SVNAdapter", "ToolExecution"]),
+        .testTarget(name: "IntegrationTests", dependencies: ["RepositoryApplication", "GitAdapter", "SVNAdapter", "ToolExecution", "TestSupport"]),
     ]
 )

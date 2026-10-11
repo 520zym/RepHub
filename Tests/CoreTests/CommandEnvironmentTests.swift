@@ -27,6 +27,31 @@ struct CommandEnvironmentTests {
         #expect(!configuredEnvironment.output.contains("DYLD_"))
     }
 
+    @Test("隔离运行器只为测试子进程替换工具配置目录")
+    func isolatesHomeAndGitConfiguration() async throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RepHub-UpdateFixture-Environment-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+
+        let result = try await CommandRunner(isolatedHome: home).run(executable: "/usr/bin/env", arguments: [])
+        #expect(environmentValue("HOME", in: result.output) == home.standardizedFileURL.path)
+        #expect(environmentValue("XDG_CONFIG_HOME", in: result.output) == home.appendingPathComponent(".config").path)
+        #expect(environmentValue("GIT_CONFIG_NOSYSTEM", in: result.output) == "1")
+        #expect(environmentValue("GIT_CONFIG_GLOBAL", in: result.output) == home.appendingPathComponent(".gitconfig").path)
+        #expect(environmentValue("GIT_TERMINAL_PROMPT", in: result.output) == "0")
+        #expect(environmentValue("SSH_AUTH_SOCK", in: result.output) == nil)
+        #expect(environmentValue("SSH_AGENT_PID", in: result.output) == nil)
+        #expect(environmentValue("http_proxy", in: result.output) == nil)
+        #expect(environmentValue("https_proxy", in: result.output) == nil)
+        #expect(environmentValue("HTTP_PROXY", in: result.output) == nil)
+        #expect(environmentValue("HTTPS_PROXY", in: result.output) == nil)
+        #expect(environmentValue("all_proxy", in: result.output) == nil)
+        #expect(environmentValue("no_proxy", in: result.output) == nil)
+        #expect(environmentValue("ALL_PROXY", in: result.output) == nil)
+        #expect(environmentValue("NO_PROXY", in: result.output) == nil)
+    }
+
     private func environmentValue(_ name: String, in output: String) -> String? {
         output.split(separator: "\n", omittingEmptySubsequences: true)
             .first { $0.hasPrefix("\(name)=") }

@@ -35,7 +35,13 @@ public enum ToolLocator {
 
 /// Executes argument arrays without a shell. Files, rather than pipes, avoid blocking on large output.
 public struct CommandRunner: Sendable {
-    public init() {}
+    private let isolatedHome: URL?
+
+    /// 为测试或受控的沙箱操作提供独立的工具配置目录。
+    /// 未指定时保持系统进程环境的既有行为。
+    public init(isolatedHome: URL? = nil) {
+        self.isolatedHome = isolatedHome?.standardizedFileURL
+    }
     /// `opensslConfiguration` 只为本次子进程设置 `OPENSSL_CONF`。
     /// 不提供通用环境变量入口，避免调用方覆盖 HOME、PATH 或动态链接器相关变量。
     public func run(
@@ -55,7 +61,8 @@ public struct CommandRunner: Sendable {
                     arguments: arguments,
                     directory: directory,
                     timeout: timeout,
-                    opensslConfiguration: opensslConfiguration
+                    opensslConfiguration: opensslConfiguration,
+                    isolatedHome: isolatedHome
                 )
             }.value
         } onCancel: { control.cancel() }
@@ -80,7 +87,8 @@ private final class ProcessControl: @unchecked Sendable {
         arguments: [String],
         directory: URL?,
         timeout: TimeInterval,
-        opensslConfiguration: URL?
+        opensslConfiguration: URL?,
+        isolatedHome: URL?
     ) throws -> CommandResult {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("rephub-command-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -101,6 +109,18 @@ private final class ProcessControl: @unchecked Sendable {
         var env = inherited.filter { allowedKeys.contains($0.key) }
         env["GIT_TERMINAL_PROMPT"] = "0"; env["GIT_OPTIONAL_LOCKS"] = "0"; env["GIT_PAGER"] = "cat"
         env["LC_ALL"] = "en_US.UTF-8"
+        if let isolatedHome {
+            let home = isolatedHome.standardizedFileURL.path
+            // 隔离测试不应复用用户的 SSH Agent 或代理网络路径。
+            ["SSH_AUTH_SOCK", "SSH_AGENT_PID", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+             "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"].forEach { env.removeValue(forKey: $0) }
+            env["HOME"] = home
+            env["XDG_CONFIG_HOME"] = isolatedHome.appendingPathComponent(".config", isDirectory: true).path
+            env["GIT_CONFIG_NOSYSTEM"] = "1"
+            env["GIT_CONFIG_GLOBAL"] = isolatedHome.appendingPathComponent(".gitconfig").path
+            env["GIT_ASKPASS"] = "/usr/bin/false"
+            env["SSH_ASKPASS"] = "/usr/bin/false"
+        }
         if let opensslConfiguration {
             env["OPENSSL_CONF"] = opensslConfiguration.standardizedFileURL.path
         }

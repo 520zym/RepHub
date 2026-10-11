@@ -27,6 +27,7 @@ public struct BindingSnapshot: Sendable {
 /// Orchestrates provider contracts only. No Git/SVN implementation dependency is allowed in this module.
 public actor RepositoryService {
     private let providers: [any VersionControlProvider]
+    private var isPerformingOperation = false
     public init(providers: [any VersionControlProvider]) { self.providers = providers }
 
     public func open(directory: URL) async throws -> Workspace {
@@ -71,6 +72,73 @@ public actor RepositoryService {
     public func changedFiles(in binding: RepositoryBinding, revision: String) async throws -> [FileChange] {
         try await provider(for: binding).changedFiles(in: binding, revision: revision)
     }
+
+    /// 同一服务实例串行写入；只执行一个已识别的目标，完成后刷新全部绑定。
+    public func perform(_ operation: RepositoryOperationKind, bindingID: String, in workspace: Workspace,
+                        progress: @escaping RepositoryOperationProgressHandler) async throws -> WorkspaceOperationResult {
+        guard !isPerformingOperation else {
+            throw VersionControlError.unsupported("已有仓库操作正在执行，请等待完成或取消后的状态核对结束。")
+        }
+        guard let requested = workspace.bindings.first(where: { $0.id == bindingID }),
+              requested.capabilities.contains(operation.capability),
+              let provider = try provider(for: requested) as? any RepositoryOperationProvider else {
+            throw VersionControlError.unsupported("所选版本控制来源不支持此操作。")
+        }
+        isPerformingOperation = true
+        defer { isPerformingOperation = false }
+
+        let result: RepositoryOperationResult
+        do {
+            try Task.checkCancellation()
+            await progress(RepositoryOperationProgress("正在检查工作区与操作目标…"))
+            guard let current = try await provider.detect(at: requested.root),
+                  current.id == requested.id,
+                  current.currentBranch == requested.currentBranch,
+                  current.remoteURL == requested.remoteURL else {
+                throw VersionControlError.invalidRepository("仓库位置、分支或远端已经改变，请刷新后重新选择更新目标。")
+            }
+            try Task.checkCancellation()
+            let performed = try await provider.perform(operation, in: current, progress: progress)
+            result = RepositoryOperationResult(
+                kind: operation, bindingID: bindingID, outcome: performed.outcome,
+                summary: RepositoryDisplaySanitizer.redact(performed.summary),
+                details: RepositoryDisplaySanitizer.redact(performed.details), changedFiles: performed.changedFiles
+            )
+        } catch is CancellationError {
+            result = RepositoryOperationResult(kind: operation, bindingID: bindingID, outcome: .cancelled,
+                summary: "操作已取消。", details: "取消不会自动回滚已经获取的远端信息或已经更新的文件，请核对重新读取的工作区状态。")
+        } catch {
+            result = RepositoryOperationResult(kind: operation, bindingID: bindingID, outcome: .failed,
+                summary: "操作未完成。", details: RepositoryDisplaySanitizer.redact(error.localizedDescription))
+        }
+
+        await progress(RepositoryOperationProgress("正在重新检查所有版本控制来源…"))
+        // 原操作可能已取消；核对必须独立完成，不能沿用已取消的任务上下文。
+        let refreshed = await Task.detached { [self] in
+            await refreshAfterOperation(workspace)
+        }.value
+        let refreshIssues = refreshed.0.issues + refreshed.1.flatMap { snapshot in
+            snapshot.issues.map { "\(snapshot.binding.providerName)：\($0)" }
+        }
+        let finalResult = RepositoryOperationResult(kind: result.kind, bindingID: result.bindingID,
+            outcome: result.outcome, summary: result.summary,
+            details: result.details + (refreshIssues.isEmpty ? "" : "\n\n操作后刷新提示：\n" + RepositoryDisplaySanitizer.redact(refreshIssues.joined(separator: "\n"))),
+            changedFiles: result.changedFiles)
+        return WorkspaceOperationResult(result: finalResult, workspace: refreshed.0, snapshots: refreshed.1)
+    }
+
+    private func refreshAfterOperation(_ previous: Workspace) async -> (Workspace, [BindingSnapshot]) {
+        let refreshed: Workspace
+        do { refreshed = try await open(directory: previous.directory) }
+        catch {
+            refreshed = Workspace(directory: previous.directory, bindings: previous.bindings,
+                issues: ["操作后无法重新识别工作区：\(RepositoryDisplaySanitizer.redact(error.localizedDescription))"])
+        }
+        var snapshots: [BindingSnapshot] = []
+        for binding in refreshed.bindings { snapshots.append(await load(binding)) }
+        return (refreshed, snapshots)
+    }
+
     private func provider(for binding: RepositoryBinding) throws -> any VersionControlProvider {
         guard let provider = providers.first(where: { $0.id == binding.providerID }) else {
             throw VersionControlError.unsupported("未注册对应的版本控制适配器。")

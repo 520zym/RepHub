@@ -2,8 +2,8 @@ import Foundation
 import ToolExecution
 import VersionControlCore
 
-/// Git 的真实只读实现。所有命令均以参数数组传递，不经过 shell。
-public final class GitProvider: VersionControlProvider, @unchecked Sendable {
+/// Git 适配器。读取与受限的获取／快进更新均通过参数数组执行，不经过 shell。
+public final class GitProvider: RepositoryOperationProvider, @unchecked Sendable {
     public let id: ProviderID = .git
     public let displayName = "Git"
 
@@ -41,8 +41,26 @@ public final class GitProvider: VersionControlProvider, @unchecked Sendable {
             root: root,
             currentBranch: branch,
             remoteURL: remote?.isEmpty == false ? remote : nil,
-            capabilities: [.status, .diff, .history, .branches, .commitGraph]
+            capabilities: [.status, .diff, .history, .branches, .commitGraph, .fetch, .update]
         )
+    }
+
+    /// 只执行对当前绑定明确配置的上游的获取或快进更新。
+    ///
+    /// 更新前拒绝任何已跟踪的本地修改、进行中的合并/变基、游离 HEAD 与分叉状态；
+    /// 因而不会为完成更新而 stash、reset、clean 或 rebase。
+    public func perform(
+        _ operation: RepositoryOperationKind,
+        in binding: RepositoryBinding,
+        progress: @escaping RepositoryOperationProgressHandler
+    ) async throws -> RepositoryOperationResult {
+        try ensureGit(binding)
+        switch operation {
+        case .fetch:
+            return try await fetch(in: binding, progress: progress)
+        case .update:
+            return try await update(in: binding, progress: progress)
+        }
     }
 
     public func status(in binding: RepositoryBinding) async throws -> [FileChange] {
@@ -134,11 +152,383 @@ public final class GitProvider: VersionControlProvider, @unchecked Sendable {
         return RepositoryPatch(text: fragments.filter { !$0.isEmpty }.joined(separator: fragments.count > 1 ? "\n" : ""))
     }
 
-    private func git(_ command: [String], in directory: URL) async throws -> CommandResult {
+    private func fetch(
+        in binding: RepositoryBinding,
+        progress: @escaping RepositoryOperationProgressHandler
+    ) async throws -> RepositoryOperationResult {
+        await progress(RepositoryOperationProgress("正在检查当前分支的上游配置…"))
+        let upstream = try await configuredUpstream(in: binding.root)
+        try Task.checkCancellation()
+
+        await progress(RepositoryOperationProgress("正在从 \(upstream.remote) 获取远端引用…"))
+        try await fetch(remote: upstream.remote, in: binding.root)
+        try Task.checkCancellation()
+
+        return RepositoryOperationResult(
+            kind: .fetch,
+            bindingID: binding.id,
+            outcome: .succeeded,
+            summary: "已获取 \(upstream.remote) 的远端引用。",
+            details: "当前分支：\(upstream.branch)；未修改工作区文件。"
+        )
+    }
+
+    private func update(
+        in binding: RepositoryBinding,
+        progress: @escaping RepositoryOperationProgressHandler
+    ) async throws -> RepositoryOperationResult {
+        await progress(RepositoryOperationProgress("正在检查当前分支及上游配置…"))
+        let upstream = try await configuredUpstream(in: binding.root)
+        guard try await hasHead(binding.root) else {
+            return rejectedUpdate(binding, "当前分支尚无提交，无法执行快进更新。")
+        }
+        if try await hasInProgressOperation(in: binding.root) {
+            return rejectedUpdate(binding, "工作区正处于合并或变基过程中；请先在 Git 中完成或中止该操作。")
+        }
+        if try await hasTrackedChanges(in: binding.root) {
+            return rejectedUpdate(binding, "检测到已跟踪文件的本地修改；为保护修改，未更新工作区。")
+        }
+        try Task.checkCancellation()
+
+        await progress(RepositoryOperationProgress("正在从 \(upstream.remote) 获取远端引用…"))
+        try await fetch(remote: upstream.remote, in: binding.root)
+        try Task.checkCancellation()
+
+        // fetch 不应改动工作文件，但其他客户端可能并发修改，因此在真正写入前再次确认。
+        await progress(RepositoryOperationProgress("正在比较本地与上游提交…"))
+        guard !(try await hasInProgressOperation(in: binding.root)) else {
+            return rejectedUpdate(binding, "工作区在获取期间进入合并或变基状态；未继续更新。")
+        }
+        guard !(try await hasTrackedChanges(in: binding.root)) else {
+            return rejectedUpdate(binding, "获取期间出现已跟踪文件的本地修改；未继续更新。")
+        }
+
+        let current = try await currentHead(in: binding.root)
+        let remote = try await resolvedUpstream(in: binding.root)
+        if current == remote {
+            return RepositoryOperationResult(
+                kind: .update,
+                bindingID: binding.id,
+                outcome: .succeeded,
+                summary: "当前分支已是最新。",
+                details: "当前分支：\(upstream.branch)。"
+            )
+        }
+
+        if try await isAncestor(remote, of: current, in: binding.root) {
+            return RepositoryOperationResult(
+                kind: .update,
+                bindingID: binding.id,
+                outcome: .succeeded,
+                summary: "本地分支领先上游，无需更新。",
+                details: "当前分支：\(upstream.branch)；不会覆盖或推送本地提交。"
+            )
+        }
+        guard try await isAncestor(current, of: remote, in: binding.root) else {
+            return rejectedUpdate(binding, "本地分支与上游已经分叉；为保护提交历史，未执行合并或变基。")
+        }
+
+        if try await containsSubmodule(inTree: remote, directory: binding.root) {
+            return rejectedUpdate(binding, "该上游版本包含子模块；当前版本不会递归写入子工作区，未执行更新。")
+        }
+        if try await containsCheckoutFilter(inTree: remote, directory: binding.root) {
+            return rejectedUpdate(binding, "该上游版本使用 Git 文件过滤器；当前版本为避免执行外部过滤器，未执行更新。")
+        }
+
+        let untrackedConflicts = try await localPathsConflictingWithIncomingTree(
+            upstream: remote,
+            in: binding.root
+        )
+        guard untrackedConflicts.isEmpty else {
+            return rejectedUpdate(
+                binding,
+                "未跟踪文件可能被上游文件占用：\(untrackedConflicts.prefix(3).joined(separator: "、"))；未更新工作区。"
+            )
+        }
+
+        let before = current
+        // fetch 期间可能有其他 Git 客户端切分支或更新引用。真正写入前必须核对原目标仍有效。
+        let beforeWriteUpstream = try await configuredUpstream(in: binding.root)
+        guard beforeWriteUpstream.branch == upstream.branch, beforeWriteUpstream.remote == upstream.remote,
+              try await currentHead(in: binding.root) == before,
+              try await resolvedUpstream(in: binding.root) == remote else {
+            return rejectedUpdate(binding, "获取期间当前分支、提交或上游引用已经改变；请刷新后重新选择更新目标。")
+        }
+
+        await progress(RepositoryOperationProgress("正在以快进方式更新工作区…"))
+        let merge = try await git(
+            ["merge", "--ff-only", "--no-autostash", "--no-overwrite-ignore", "--no-edit", "--no-verify", "--no-stat", remote],
+            in: binding.root,
+            timeout: 90
+        )
+        if merge.exitCode != 0 {
+            // 这里不尝试任何恢复命令。merge --ff-only 失败后读取状态，让上层展示事实。
+            let state = try await status(in: binding)
+            let hasConflicts = state.contains { $0.kind == .conflicted }
+            return RepositoryOperationResult(
+                kind: .update,
+                bindingID: binding.id,
+                outcome: hasConflicts ? .conflicts : .failed,
+                summary: hasConflicts ? "快进更新产生冲突，请在 Git 中处理。" : "Git 未完成快进更新。",
+                details: sanitizedGitFailure(merge),
+                changedFiles: state
+            )
+        }
+        try Task.checkCancellation()
+        let after = try await currentHead(in: binding.root)
+        let changed = try await changedFiles(from: before, to: after, in: binding.root)
+        return RepositoryOperationResult(
+            kind: .update,
+            bindingID: binding.id,
+            outcome: .succeeded,
+            summary: "已快进更新 \(changed.count) 个文件。",
+            details: "当前分支：\(upstream.branch)。",
+            changedFiles: changed
+        )
+    }
+
+    private func rejectedUpdate(_ binding: RepositoryBinding, _ detail: String) -> RepositoryOperationResult {
+        RepositoryOperationResult(
+            kind: .update,
+            bindingID: binding.id,
+            outcome: .failed,
+            summary: "为保护本地工作区，未执行更新。",
+            details: detail
+        )
+    }
+
+    private struct ConfiguredUpstream {
+        let branch: String
+        let remote: String
+    }
+
+    /// 只允许当前分支在 branch.<name>.remote 中显式配置的真实远端。
+    /// 不以 origin 作为静默兜底，避免错误地从另一个远端获取内容。
+    private func configuredUpstream(in directory: URL) async throws -> ConfiguredUpstream {
+        let branchResult = try await git(["symbolic-ref", "--quiet", "--short", "HEAD"], in: directory)
+        guard branchResult.exitCode == 0 else {
+            if branchResult.exitCode == 1 {
+                throw VersionControlError.unsupported("当前 Git 工作区处于游离 HEAD，不能确定用于更新的分支。")
+            }
+            _ = try requireSuccess(branchResult, tool: "git")
+            throw VersionControlError.invalidData("Git 未返回当前分支。")
+        }
+        let branch = branchResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !branch.isEmpty else { throw VersionControlError.invalidData("Git 未返回当前分支。") }
+
+        let remoteResult = try await git(["config", "--get", "branch.\(branch).remote"], in: directory)
+        guard remoteResult.exitCode == 0 else {
+            if remoteResult.exitCode == 1 {
+                throw VersionControlError.unsupported("当前分支未配置上游远端；请先在 Git 中设置跟踪分支。")
+            }
+            _ = try requireSuccess(remoteResult, tool: "git")
+            throw VersionControlError.invalidData("无法读取 Git 上游远端。")
+        }
+        let remote = remoteResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !remote.isEmpty, remote != "." else {
+            throw VersionControlError.unsupported("当前分支未配置可获取的远端上游。")
+        }
+        let mergeResult = try await git(["config", "--get", "branch.\(branch).merge"], in: directory)
+        guard mergeResult.exitCode == 0,
+              mergeResult.output.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("refs/heads/") else {
+            throw VersionControlError.unsupported("当前分支的上游引用配置不完整。")
+        }
+        let remoteURL = try await git(["remote", "get-url", "--all", remote], in: directory)
+        guard remoteURL.exitCode == 0,
+              !remoteURL.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw VersionControlError.unsupported("当前分支配置的远端 \(remote) 不可用。")
+        }
+        guard try await hasSafeRemoteTrackingRefspec(remote: remote, in: directory) else {
+            throw VersionControlError.unsupported("当前远端的 fetch refspec 可能写入本地分支；仅支持写入该远端的远端跟踪引用。")
+        }
+        return ConfiguredUpstream(branch: branch, remote: remote)
+    }
+
+    /// fetch 只允许写入 refs/remotes/<remote>/；拒绝可写 refs/heads 等本地引用的自定义 refspec。
+    private func hasSafeRemoteTrackingRefspec(remote: String, in directory: URL) async throws -> Bool {
+        let result = try await git(["config", "--get-all", "remote.\(remote).fetch"], in: directory)
+        if result.exitCode == 1 { return false }
+        let values = try requireSuccess(result, tool: "git").output
+            .split(whereSeparator: \.isNewline)
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard values.contains(where: { !$0.hasPrefix("^") }) else { return false }
+        let expectedPrefix = "refs/remotes/\(remote)/"
+        return values.allSatisfy { refspec in
+            if refspec.hasPrefix("^") { return true }
+            guard let separator = refspec.firstIndex(of: ":") else { return false }
+            let destination = refspec[refspec.index(after: separator)...]
+            return destination.hasPrefix(expectedPrefix)
+        }
+    }
+
+    private func fetch(remote: String, in directory: URL) async throws {
+        let result = try await git(
+            ["fetch", "--no-write-fetch-head", "--no-tags", "--no-recurse-submodules", "--", remote],
+            in: directory,
+            timeout: 90
+        )
+        _ = try requireSuccess(result, tool: "git")
+    }
+
+    private func currentHead(in directory: URL) async throws -> String {
+        let result = try await git(["rev-parse", "--verify", "HEAD"], in: directory)
+        let output = try requireSuccess(result, tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !output.isEmpty else { throw VersionControlError.invalidData("Git 未返回当前提交。") }
+        return output
+    }
+
+    private func resolvedUpstream(in directory: URL) async throws -> String {
+        let result = try await git(["rev-parse", "--verify", "@{upstream}"], in: directory)
+        let output = try requireSuccess(result, tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !output.isEmpty else { throw VersionControlError.invalidData("Git 未返回上游提交。") }
+        return output
+    }
+
+    private func isAncestor(_ ancestor: String, of descendant: String, in directory: URL) async throws -> Bool {
+        let result = try await git(["merge-base", "--is-ancestor", ancestor, descendant], in: directory)
+        if result.exitCode == 0 { return true }
+        if result.exitCode == 1 { return false }
+        _ = try requireSuccess(result, tool: "git")
+        return false
+    }
+
+    private func hasTrackedChanges(in directory: URL) async throws -> Bool {
+        let result = try await git(["status", "--porcelain=v1", "-z", "--untracked-files=no"], in: directory)
+        return !(try requireSuccess(result, tool: "git").data.isEmpty)
+    }
+
+    private func hasInProgressOperation(in directory: URL) async throws -> Bool {
+        let mergeHead = try await git(["rev-parse", "--verify", "--quiet", "MERGE_HEAD"], in: directory)
+        if mergeHead.exitCode == 0 { return true }
+        if mergeHead.exitCode != 1 { _ = try requireSuccess(mergeHead, tool: "git") }
+        let rebaseApply = try await git(["rev-parse", "--git-path", "rebase-apply"], in: directory)
+        let rebaseMerge = try await git(["rev-parse", "--git-path", "rebase-merge"], in: directory)
+        let paths = [rebaseApply, rebaseMerge].compactMap { result -> String? in
+            guard result.exitCode == 0 else { return nil }
+            let path = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            return path.isEmpty ? nil : path
+        }
+        return paths.contains { path in
+            let location = path.hasPrefix("/") ? URL(fileURLWithPath: path) : directory.appendingPathComponent(path)
+            return FileManager.default.fileExists(atPath: location.standardizedFileURL.path)
+        }
+    }
+
+    /// Git 默认可覆盖 ignored 文件；这里在写入前把未跟踪和忽略路径一并与目标树核对。
+    /// .svn 元数据作为普通未跟踪路径参与比较，但不会与合法 Git 路径冲突。
+    private func localPathsConflictingWithIncomingTree(upstream: String, in directory: URL) async throws -> [String] {
+        let statusResult = try await git(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching"], in: directory)
+        let fields = try requireSuccess(statusResult, tool: "git").data
+            .split(separator: 0, omittingEmptySubsequences: true)
+        let local = fields.compactMap { field -> String? in
+            guard field.count >= 4 else { return nil }
+            let state = String(decoding: field.prefix(2), as: UTF8.self)
+            guard state == "??" || state == "!!" else { return nil }
+            return String(decoding: field.dropFirst(3), as: UTF8.self)
+        }
+        guard !local.isEmpty else { return [] }
+        let tree = try await git(["ls-tree", "-r", "-z", "--name-only", upstream], in: directory)
+        let remote = try requireSuccess(tree, tool: "git").data
+            .split(separator: 0, omittingEmptySubsequences: true)
+            .map { String(decoding: $0, as: UTF8.self) }
+        return local.filter { path in
+            remote.contains { candidate in
+                candidate == path || candidate.hasPrefix(path + "/") || path.hasPrefix(candidate + "/")
+            }
+        }
+    }
+
+    /// 对于更新目标中的 .gitattributes，只要声明了 filter= 即拒绝更新。
+    /// 这样不会为了“兼容”而执行仓库配置的外部过滤器，也不会留下 LFS 指针等不完整内容。
+    private func containsCheckoutFilter(inTree revision: String, directory: URL) async throws -> Bool {
+        if try await hasConfiguredFilterDriver(in: directory) { return true }
+        if try await hasFilterAttributeInLocalSources(in: directory) { return true }
+        let listing = try await git(["ls-tree", "-r", "-z", revision], in: directory)
+        let records = try requireSuccess(listing, tool: "git").data.split(separator: 0, omittingEmptySubsequences: true)
+        for record in records {
+            let pieces = record.split(separator: 9, maxSplits: 1, omittingEmptySubsequences: false)
+            guard pieces.count == 2,
+                  String(decoding: pieces[1], as: UTF8.self).hasSuffix(".gitattributes") else { continue }
+            let metadata = String(decoding: pieces[0], as: UTF8.self).split(separator: " ")
+            guard metadata.count >= 3 else { throw VersionControlError.invalidData("Git 树对象格式错误。") }
+            let attributeFile = try await git(["cat-file", "blob", String(metadata[2])], in: directory)
+            let text = try requireSuccess(attributeFile, tool: "git").output
+            if hasFilterAttribute(in: text) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// 配置了 filter 驱动即保守拒绝；此版本不判断其是否刚好命中某个新文件，避免误执行外部程序。
+    private func hasConfiguredFilterDriver(in directory: URL) async throws -> Bool {
+        let result = try await git(["config", "--get-regexp", "^filter\\..*\\.(clean|smudge|process|required)$"], in: directory)
+        if result.exitCode == 1 { return false }
+        return !(try requireSuccess(result, tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+
+    /// .git/info/attributes 与 core.attributesFile 可在上游 .gitattributes 之外引入过滤器。
+    private func hasFilterAttributeInLocalSources(in directory: URL) async throws -> Bool {
+        let gitPath = try await git(["rev-parse", "--git-path", "info/attributes"], in: directory)
+        let localPath = try requireSuccess(gitPath, tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if hasFilterAttribute(at: resolvedPath(localPath, relativeTo: directory)) { return true }
+
+        let configured = try await git(["config", "--get", "core.attributesFile"], in: directory)
+        if configured.exitCode == 1 { return false }
+        let configuredPath = try requireSuccess(configured, tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return hasFilterAttribute(at: resolvedPath(configuredPath, relativeTo: directory))
+    }
+
+    private func resolvedPath(_ path: String, relativeTo directory: URL) -> URL {
+        let expanded = (path as NSString).expandingTildeInPath
+        if expanded.hasPrefix("/") { return URL(fileURLWithPath: expanded) }
+        return directory.appendingPathComponent(expanded)
+    }
+
+    private func hasFilterAttribute(at url: URL) -> Bool {
+        guard let data = FileManager.default.contents(atPath: url.standardizedFileURL.path) else { return false }
+        return hasFilterAttribute(in: String(decoding: data, as: UTF8.self))
+    }
+
+    private func hasFilterAttribute(in text: String) -> Bool {
+        text.split(whereSeparator: \.isNewline).contains { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            return !trimmed.hasPrefix("#") && (trimmed.contains("filter=") || trimmed.split(whereSeparator: \.isWhitespace).contains("filter"))
+        }
+    }
+
+    private func containsSubmodule(inTree revision: String, directory: URL) async throws -> Bool {
+        let result = try await git(["ls-tree", "-r", "-z", revision], in: directory)
+        return try requireSuccess(result, tool: "git").data
+            .split(separator: 0, omittingEmptySubsequences: true)
+            .contains { $0.starts(with: Data("160000 ".utf8)) }
+    }
+
+    private func changedFiles(from before: String, to after: String, in directory: URL) async throws -> [FileChange] {
+        guard before != after else { return [] }
+        let result = try await git(["diff", "--name-status", "-z", "-M", "-C", before, after, "--"], in: directory)
+        return try parseNameStatus(try requireSuccess(result, tool: "git").data)
+    }
+
+    private func sanitizedGitFailure(_ result: CommandResult) -> String {
+        let text = result.error.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? "Git（退出码 \(result.exitCode)）未提供错误详情。" : String(text.prefix(2400))
+    }
+
+    private func git(
+        _ command: [String],
+        in directory: URL,
+        timeout: TimeInterval = 20
+    ) async throws -> CommandResult {
         try await runner.run(
             executable: "git",
-            arguments: ["--no-optional-locks", "-c", "core.pager=cat", "-c", "pager.branch=false", "-c", "core.fsmonitor=false"] + command,
-            directory: directory
+            // hooks 可由仓库配置执行任意脚本；本客户端的更新不执行它们。
+            // 禁止递归 submodule，避免一次操作继续写入子工作区。
+            arguments: ["--no-optional-locks", "-c", "core.pager=cat", "-c", "pager.branch=false", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "submodule.recurse=false", "-c", "fetch.recurseSubmodules=false"]
+                + command,
+            directory: directory,
+            timeout: timeout
         )
     }
 
