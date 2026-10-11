@@ -12,6 +12,7 @@ public struct WorkspaceView: View {
     @State private var commitMessage = ""
     @State private var commitTargets: Set<String> = []
     @State private var showsOperationSheet = false
+    @State private var showsCommitSheet = false
     @FocusState private var commitMessageFocused: Bool
 
     public init(model: WorkspaceModel, appearance: AppearanceStore) {
@@ -61,6 +62,27 @@ public struct WorkspaceView: View {
                 showsOperationSheet = false
             }
             .interactiveDismissDisabled(model.isOperationInProgress)
+        }
+        .sheet(isPresented: $showsCommitSheet, onDismiss: {
+            if !model.repositoryCommit.isBusy { model.repositoryCommit.dismiss() }
+        }) {
+            RepositoryCommitView(
+                model: model.repositoryCommit,
+                palette: palette,
+                appearance: appearance,
+                workspace: model.workspace,
+                dismiss: {
+                    guard !model.repositoryCommit.isBusy else { return }
+                    model.repositoryCommit.dismiss()
+                    showsCommitSheet = false
+                },
+                committed: model.applyCommitResponse,
+                viewHistory: { bindingID, revisionID in
+                    model.repositoryCommit.dismiss()
+                    showsCommitSheet = false
+                    model.showCommittedRevision(bindingID: bindingID, revisionID: revisionID)
+                }
+            )
         }
         .sheet(isPresented: $model.showsRepositoryAcquisition) {
             RepositoryAcquisitionView(
@@ -191,12 +213,21 @@ public struct WorkspaceView: View {
             }
             Button {} label: { Label("AI 生成", systemImage: "sparkles") }
                 .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet)).disabled(true).help("AI 生成提交说明尚未接入")
-            Button("提交") {}.buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
-                .disabled(true).help("提交功能尚未接入")
+            Button("提交") {
+                model.prepareCommit(initialTargets: commitTargets, initialMessage: commitMessage)
+                showsCommitSheet = true
+            }
+            .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
+            .disabled(model.isInteractionLocked || !hasCommitTarget)
+            .help(hasCommitTarget ? "选择提交文件并确认每个目标的说明" : "当前工作区没有支持提交的版本控制来源")
         }
         .padding(.horizontal, 12).frame(height: 56)
         .background(palette.sidebar.opacity(0.45))
         .background(palette.surface)
+    }
+
+    private var hasCommitTarget: Bool {
+        (model.workspace?.bindings ?? []).contains { $0.capabilities.contains(.commit) }
     }
 
     private func statusBar(palette: AppPalette) -> some View {
@@ -222,6 +253,7 @@ public struct WorkspaceView: View {
     }
 
     private func statusText(hasError: Bool) -> String {
+        if model.repositoryCommit.isBusy { return model.repositoryCommit.phase == .committing ? "正在提交代码…" : "正在准备提交…" }
         if model.isOperationInProgress { return model.operationProgressMessage.isEmpty ? "正在执行版本控制操作…" : model.operationProgressMessage }
         if let result = model.operationResult { return result.summary }
         if model.isLoading { return "正在读取仓库…" }

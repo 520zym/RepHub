@@ -66,8 +66,12 @@ public struct CommandRunner: Sendable {
         timeout: TimeInterval = 20,
         opensslConfiguration: URL? = nil,
         standardInput: Data? = nil,
+        gitIndexFile: URL? = nil,
         onOutput: CommandOutputHandler? = nil
     ) async throws -> CommandResult {
+        if let gitIndexFile, !gitIndexFile.isFileURL || gitIndexFile.path.contains("\0") {
+            throw VersionControlError.invalidRepository("临时 Git 索引必须是有效的本地文件路径。")
+        }
         guard let executablePath = ToolLocator.find(executable) else { throw VersionControlError.toolUnavailable(executable) }
         let control = ProcessControl()
         let relay: CommandOutputRelay?
@@ -99,6 +103,7 @@ public struct CommandRunner: Sendable {
                     timeout: timeout,
                     opensslConfiguration: opensslConfiguration,
                     standardInput: standardInput,
+                    gitIndexFile: gitIndexFile,
                     isolatedHome: isolatedHome,
                     outputSink: relay?.yield
                     )
@@ -153,6 +158,7 @@ private final class ProcessControl: @unchecked Sendable {
         timeout: TimeInterval,
         opensslConfiguration: URL?,
         standardInput: Data?,
+        gitIndexFile: URL?,
         isolatedHome: URL?,
         outputSink: (@Sendable ([CommandOutputLine]) -> Void)?
     ) throws -> CommandResult {
@@ -198,6 +204,8 @@ private final class ProcessControl: @unchecked Sendable {
         if let opensslConfiguration {
             env["OPENSSL_CONF"] = opensslConfiguration.standardizedFileURL.path
         }
+        // 仅为调用方明确创建的临时索引设置，不继承用户环境中的任意 GIT_* 覆盖。
+        if let gitIndexFile { env["GIT_INDEX_FILE"] = gitIndexFile.standardizedFileURL.path }
         task.environment = env
         lock.lock()
         if cancelled { lock.unlock(); throw CancellationError() }

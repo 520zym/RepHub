@@ -19,6 +19,7 @@ public struct RepositoryCapabilities: OptionSet, Hashable, Sendable {
     public static let update = Self(rawValue: 1 << 6)
     public static let fileHistory = Self(rawValue: 1 << 7)
     public static let synchronization = Self(rawValue: 1 << 8)
+    public static let commit = Self(rawValue: 1 << 9)
 }
 
 public struct RepositoryBinding: Identifiable, Hashable, Sendable {

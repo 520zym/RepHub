@@ -12,6 +12,7 @@ struct RepositoryTransferProgressView: View {
     let isCancelling: Bool
     let cancelTitle: String
     let cancel: (() -> Void)?
+    var showsFileRecords = true
 
     @State private var followsLatest = true
 
@@ -20,7 +21,7 @@ struct RepositoryTransferProgressView: View {
             if let source { summaryRow(title: "来源", value: source) }
             if let destination { summaryRow(title: "保存到", value: destination) }
             phaseStatus
-            recordList
+            if showsFileRecords { recordList }
             HStack {
                 if progress.isActive {
                     activityStatus

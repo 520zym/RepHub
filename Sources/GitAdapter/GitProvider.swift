@@ -1,9 +1,10 @@
+import Darwin
 import Foundation
 import ToolExecution
 import VersionControlCore
 
 /// Git 适配器。读取与受限的获取／快进更新均通过参数数组执行，不经过 shell。
-public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryProvider, RepositoryAcquisitionProvider, @unchecked Sendable {
+public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryProvider, RepositoryAcquisitionProvider, RepositoryCommitProvider, @unchecked Sendable {
     public let id: ProviderID = .git
     public let displayName = "Git"
 
@@ -104,7 +105,7 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPr
             root: root,
             currentBranch: branch,
             remoteURL: remote?.isEmpty == false ? remote : nil,
-            capabilities: [.status, .diff, .history, .branches, .commitGraph, .fetch, .update, .fileHistory, .synchronization]
+            capabilities: [.status, .diff, .history, .branches, .commitGraph, .fetch, .update, .fileHistory, .synchronization, .commit]
         )
     }
 
@@ -340,6 +341,155 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPr
             fragments.append(text)
         }
         return RepositoryPatch(text: fragments.filter { !$0.isEmpty }.joined(separator: fragments.count > 1 ? "\n" : ""))
+    }
+
+    /// Git 提交始终以工作区当前内容构造一个独立的临时索引。这样既不会把用户未选择的
+    /// 暂存内容带入提交，也不会用 `git add` 改写用户的真实索引。
+    public func prepareCommit(in binding: RepositoryBinding) async throws -> RepositoryCommitPreparation {
+        try ensureGit(binding)
+        let baseRevision = try await optionalHead(in: binding.root)
+        // Git+SVN 共管目录会把 `.svn` 当作普通未跟踪文件；版本管理元数据从不进入提交候选，
+        // 也不应因快照校验而阻断其余 Git 文件的准备。
+        let changes = try await status(in: binding).filter { change in
+            !isVersionControlMetadataPath(change.path)
+                && !(change.originalPath.map(isVersionControlMetadataPath) ?? false)
+        }
+        var files: [RepositoryCommitFile] = []
+        for change in changes {
+            let restriction: String?
+            if change.kind == .conflicted {
+                restriction = "存在未解决冲突"
+            } else if change.kind == .typeChanged {
+                restriction = "文件类型变化需在 Git 中确认"
+            } else if try await containsSelectedSubmodule(paths: [change.path], in: binding.root) {
+                restriction = "Git 子模块引用需在 Git 中确认"
+            } else {
+                restriction = nil
+            }
+            files.append(RepositoryCommitFile(change: change, fingerprint: try await commitFingerprint(for: change, in: binding.root), restriction: restriction))
+        }
+        let blockingReason: String?
+        if try await hasInProgressOperation(in: binding.root) {
+            blockingReason = "Git 工作区正处于合并或变基过程中；请先在 Git 中完成或中止该操作。"
+        } else if files.contains(where: { $0.change.kind == .conflicted }) {
+            blockingReason = "存在未解决的 Git 冲突；请先处理冲突后再提交。"
+        } else if try await commitUsesUnsafeFilter(in: binding.root) {
+            blockingReason = "该 Git 工作区配置了文件过滤器；RepHub 不会执行可能启动外部程序的过滤器。"
+        } else {
+            blockingReason = nil
+        }
+        return RepositoryCommitPreparation(
+            binding: binding,
+            baseRevision: baseRevision,
+            files: files,
+            notice: "Git 会以所选文件当前的工作区版本创建本地提交；未选文件的暂存内容会被保留，提交不会推送远端。",
+            blockingReason: blockingReason
+        )
+    }
+
+    public func commitDiff(in binding: RepositoryBinding, file: RepositoryCommitFile) async throws -> RepositoryPatch {
+        try ensureGit(binding)
+        try await verifyCommitFile(file, in: binding.root)
+        let paths = try commitPaths(for: [file], root: binding.root)
+        if file.change.kind == .untracked {
+            return try await untrackedCommitDiff(path: file.change.path, root: binding.root)
+        }
+        if try await hasHead(binding.root) {
+            let result = try await git(
+                ["--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "HEAD", "--"] + paths,
+                in: binding.root
+            )
+            return RepositoryPatch(text: try requireSuccess(result, tool: "git").output)
+        }
+        // 无初始提交时，临时索引尚不存在；以 /dev/null 对比当前文件就是将写入首个提交的新增内容。
+        return try await untrackedCommitDiff(path: paths[0], root: binding.root)
+    }
+
+    public func commit(
+        _ request: RepositoryCommitRequest,
+        in binding: RepositoryBinding,
+        progress: @escaping RepositoryOperationProgressHandler
+    ) async throws -> RepositoryCommitResult {
+        try ensureGit(binding)
+        guard request.bindingID == binding.id else {
+            throw VersionControlError.invalidRepository("提交请求与当前 Git 工作区不一致。")
+        }
+        let message = request.message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty else {
+            return RepositoryCommitResult(bindingID: binding.id, outcome: .notStarted, summary: "未填写提交说明，未创建 Git 提交。")
+        }
+        guard !request.files.isEmpty else {
+            return RepositoryCommitResult(bindingID: binding.id, outcome: .notStarted, summary: "未选择要提交的文件。")
+        }
+        var context: PreparedGitCommit?
+        var handoffPreparedResources = false
+        do {
+            guard !(try await hasInProgressOperation(in: binding.root)) else {
+                return RepositoryCommitResult(bindingID: binding.id, outcome: .notStarted, summary: "Git 正处于合并或变基中，未创建提交。")
+            }
+            guard !request.files.contains(where: { $0.change.kind == .conflicted }) else {
+                return RepositoryCommitResult(bindingID: binding.id, outcome: .notStarted, summary: "所选文件包含未解决冲突，未创建提交。")
+            }
+            guard !request.files.contains(where: { $0.change.kind == .typeChanged }) else {
+                return RepositoryCommitResult(bindingID: binding.id, outcome: .notStarted, summary: "所选文件包含类型变化，RepHub 不会自动提交该类型变更。")
+            }
+            guard !(try await commitUsesUnsafeFilter(in: binding.root)) else {
+                return RepositoryCommitResult(bindingID: binding.id, outcome: .notStarted, summary: "Git 文件过滤器可能执行外部程序，RepHub 未创建提交。")
+            }
+            let before = try await optionalHead(in: binding.root)
+            guard before == request.baseRevision else {
+                return RepositoryCommitResult(bindingID: binding.id, outcome: .notStarted, summary: "当前 Git 提交已变化，请刷新后重新选择文件。")
+            }
+            let paths = try commitPaths(for: request.files, root: binding.root)
+            guard !(try await containsSelectedSubmodule(paths: paths, in: binding.root)) else {
+                return RepositoryCommitResult(bindingID: binding.id, outcome: .notStarted, summary: "所选内容包含 Git 子模块，RepHub 不会自动更新子模块引用。")
+            }
+            for file in request.files { try await verifyCommitFile(file, in: binding.root) }
+            try Task.checkCancellation()
+            let index = try await gitIndexLocation(in: binding.root)
+            let lock = try GitIndexLock(index: index)
+            let originalIndex = try indexSnapshot(at: index)
+            let temporaryDirectory = index.deletingLastPathComponent()
+            let temporaryIndex = temporaryDirectory.appendingPathComponent("rephub-commit-index-\(UUID().uuidString)")
+            let publishedIndex = temporaryDirectory.appendingPathComponent("rephub-publish-index-\(UUID().uuidString)")
+            let prepared = PreparedGitCommit(before: before, paths: paths, index: index, lock: lock, originalIndex: originalIndex, temporaryIndex: temporaryIndex, publishedIndex: publishedIndex)
+            context = prepared
+            defer {
+                if !handoffPreparedResources { cleanupPreparedCommit(prepared) }
+            }
+            await progress(RepositoryOperationProgress("正在准备所选 Git 文件…"))
+            if let before {
+                _ = try requireSuccess(try await git(["read-tree", before], in: binding.root, gitIndexFile: temporaryIndex), tool: "git")
+            } else {
+                _ = try requireSuccess(try await git(["read-tree", "--empty"], in: binding.root, gitIndexFile: temporaryIndex), tool: "git")
+            }
+            _ = try requireSuccess(try await git(["--literal-pathspecs", "add", "-A", "--"] + paths, in: binding.root, gitIndexFile: temporaryIndex), tool: "git")
+            for file in request.files { try await verifyCommitFile(file, in: binding.root) }
+            try Task.checkCancellation()
+            handoffPreparedResources = true
+        } catch {
+            return preCommitFailure(bindingID: binding.id, error: error)
+        }
+        guard let context else {
+            return RepositoryCommitResult(bindingID: binding.id, outcome: .failed, summary: "Git 未开始创建提交。", details: "无法准备临时 Git 暂存区。")
+        }
+        defer {
+            cleanupPreparedCommit(context)
+        }
+
+        await progress(RepositoryOperationProgress("正在创建本地 Git 提交…"))
+        do {
+            let result = try await git(["commit", "--no-verify", "--no-gpg-sign", "--no-status", "--cleanup=verbatim", "-m", message], in: binding.root, timeout: 90, gitIndexFile: context.temporaryIndex)
+            return await completeCommitAttemptDetached(
+                binding: binding, request: request, message: message, recovery: CommitRecoveryContext(context),
+                commandDetail: result.exitCode == 0 ? nil : sanitizedGitFailure(result), cancelled: false, progress: progress
+            )
+        } catch {
+            return await completeCommitAttemptDetached(
+                binding: binding, request: request, message: message, recovery: CommitRecoveryContext(context),
+                commandDetail: error.localizedDescription, cancelled: error is CancellationError, progress: progress
+            )
+        }
     }
 
     private func fetch(
@@ -850,6 +1000,7 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPr
         in directory: URL,
         timeout: TimeInterval = 20,
         restrictRemoteProtocols: Bool = false,
+        gitIndexFile: URL? = nil,
         onOutput: CommandOutputHandler? = nil
     ) async throws -> CommandResult {
         let safeguards = ["--no-optional-locks", "-c", "core.pager=cat", "-c", "pager.branch=false", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "submodule.recurse=false", "-c", "fetch.recurseSubmodules=false"]
@@ -862,8 +1013,223 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPr
                 + command,
             directory: directory,
             timeout: timeout,
+            gitIndexFile: gitIndexFile,
             onOutput: onOutput
         )
+    }
+
+    private func optionalHead(in directory: URL) async throws -> String? {
+        let result = try await git(["rev-parse", "--verify", "--quiet", "HEAD"], in: directory)
+        if result.exitCode == 1 { return nil }
+        let value = try requireSuccess(result, tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+
+    private func commitUsesUnsafeFilter(in directory: URL) async throws -> Bool {
+        if try await hasConfiguredFilterDriver(in: directory) { return true }
+        return try await hasFilterAttributeInLocalSources(in: directory)
+    }
+
+    private func isVersionControlMetadataPath(_ path: String) -> Bool {
+        path.split(separator: "/", omittingEmptySubsequences: false)
+            .contains { [".git", ".svn"].contains($0.lowercased()) }
+    }
+
+    /// 路径既会交给 Git，也会用于工作区快照，因此先由共享的快照模块拒绝元数据、越界和父级符号链接。
+    private func commitPaths(for files: [RepositoryCommitFile], root: URL) throws -> [String] {
+        var paths: [String] = []
+        for file in files {
+            for path in [file.change.originalPath, file.change.path].compactMap({ $0 }) where !paths.contains(path) {
+                _ = try CommitFileSnapshot.validatedURL(root: root, path: path)
+                paths.append(path)
+            }
+        }
+        guard !paths.isEmpty else { throw VersionControlError.invalidRepository("未提供有效的提交路径。") }
+        return paths
+    }
+
+    private func commitFingerprint(for change: FileChange, in directory: URL) async throws -> String {
+        _ = try CommitFileSnapshot.validatedURL(root: directory, path: change.path)
+        if let original = change.originalPath { _ = try CommitFileSnapshot.validatedURL(root: directory, path: original) }
+        let status = try await statusRecord(for: change, in: directory)
+        let current = try CommitFileSnapshot.fingerprint(root: directory, path: change.path)
+        let original = try change.originalPath.map { try CommitFileSnapshot.fingerprint(root: directory, path: $0) } ?? ""
+        return current + ":" + original + ":" + status.base64EncodedString()
+    }
+
+    private func verifyCommitFile(_ file: RepositoryCommitFile, in directory: URL) async throws {
+        let current = try await commitFingerprint(for: file.change, in: directory)
+        guard current == file.fingerprint else {
+            throw VersionControlError.invalidRepository("文件 \(file.change.path) 或其暂存状态已经变化，请刷新后重新选择提交内容。")
+        }
+    }
+
+    private func statusRecord(for change: FileChange, in directory: URL) async throws -> Data {
+        let paths = [change.originalPath, change.path].compactMap { $0 }
+        let result = try await git(
+            ["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--"] + paths,
+            in: directory
+        )
+        return try requireSuccess(result, tool: "git").data
+    }
+
+    private func gitIndexLocation(in directory: URL) async throws -> URL {
+        let result = try await git(["rev-parse", "--git-path", "index"], in: directory)
+        let path = try requireSuccess(result, tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty else { throw VersionControlError.invalidData("Git 未返回索引路径。") }
+        return path.hasPrefix("/") ? URL(fileURLWithPath: path) : directory.appendingPathComponent(path)
+    }
+
+    private func indexSnapshot(at index: URL) throws -> Data? {
+        guard fileManager.fileExists(atPath: index.path) else { return nil }
+        return try Data(contentsOf: index)
+    }
+
+    private func publishSelectedPathsFromNewHead(
+        originalIndex: Data?,
+        originalIndexURL: URL,
+        publishIndexURL: URL,
+        paths: [String],
+        in directory: URL
+    ) async throws {
+        if let originalIndex {
+            try originalIndex.write(to: publishIndexURL, options: .atomic)
+        } else {
+            // `git reset` needs a readable index file when the pre-commit repository had none.
+            _ = try requireSuccess(try await git(["read-tree", "--empty"], in: directory, gitIndexFile: publishIndexURL), tool: "git")
+        }
+        _ = try requireSuccess(try await git(
+            ["--literal-pathspecs", "reset", "--mixed", "--quiet", "HEAD", "--"] + paths,
+            in: directory,
+            gitIndexFile: publishIndexURL
+        ), tool: "git")
+        _ = originalIndexURL // documents that publishIndex is derived from the captured real index, never from a later read.
+    }
+
+    private func replaceIndexAtomically(from source: URL, to destination: URL) throws {
+        guard rename(source.path, destination.path) == 0 else {
+            throw VersionControlError.executionFailed("无法发布已更新的 Git 暂存区：\(String(cString: strerror(errno)))")
+        }
+    }
+
+    /// 命令在取消或异常后只有同时匹配父提交、树和消息时，才认定 HEAD 的变化来自本次提交。
+    private func confirmsStartedCommit(
+        after: String?,
+        before: String?,
+        message: String,
+        temporaryIndex: URL,
+        in directory: URL
+    ) async throws -> Bool {
+        guard let after, after != before else { return false }
+        let parents = try requireSuccess(try await git(["rev-list", "--parents", "-n", "1", after], in: directory), tool: "git").output
+            .split(whereSeparator: \.isWhitespace).map(String.init)
+        guard parents.first == after,
+              (before == nil ? parents.count == 1 : parents.count == 2 && parents[1] == before) else { return false }
+        let actualTree = try requireSuccess(try await git(["rev-parse", "\(after)^{tree}"], in: directory), tool: "git").output
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let intendedTree = try requireSuccess(try await git(["write-tree"], in: directory, gitIndexFile: temporaryIndex), tool: "git").output
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard actualTree == intendedTree else { return false }
+        let actualMessage = try requireSuccess(try await git(["log", "-1", "--format=%B", after], in: directory), tool: "git").output
+            .trimmingCharacters(in: .newlines)
+        return actualMessage == message
+    }
+
+    private func completeCommitAttemptDetached(
+        binding: RepositoryBinding,
+        request: RepositoryCommitRequest,
+        message: String,
+        recovery: CommitRecoveryContext,
+        commandDetail: String?,
+        cancelled: Bool,
+        progress: @escaping RepositoryOperationProgressHandler
+    ) async -> RepositoryCommitResult {
+        await Task.detached { [self] in
+            await self.completeCommitAttempt(
+                binding: binding, request: request, message: message, recovery: recovery,
+                commandDetail: commandDetail, cancelled: cancelled, progress: progress
+            )
+        }.value
+    }
+
+    private func completeCommitAttempt(
+        binding: RepositoryBinding,
+        request: RepositoryCommitRequest,
+        message: String,
+        recovery: CommitRecoveryContext,
+        commandDetail: String?,
+        cancelled: Bool,
+        progress: @escaping RepositoryOperationProgressHandler
+    ) async -> RepositoryCommitResult {
+        do {
+            let after = try await optionalHead(in: binding.root)
+            guard try await confirmsStartedCommit(after: after, before: recovery.before, message: message, temporaryIndex: recovery.temporaryIndex, in: binding.root), let revisionID = after else {
+                if after != recovery.before {
+                    return RepositoryCommitResult(bindingID: binding.id, outcome: .unknown, revisionID: after, summary: "Git 提交结果无法确认。", details: "HEAD 已变化但不匹配本次提交；请刷新历史后核对。")
+                }
+                if cancelled { return RepositoryCommitResult(bindingID: binding.id, outcome: .cancelled, summary: "已取消 Git 提交。") }
+                return RepositoryCommitResult(bindingID: binding.id, outcome: .failed, summary: "Git 未创建提交。", details: commandDetail ?? "Git 未提供错误详情。")
+            }
+            // 已确认本次提交，即使命令返回异常也必须完成原 index 的受控收尾，避免已提交文件在真实索引中留下反向暂存差异。
+            guard try indexSnapshot(at: recovery.index) == recovery.originalIndex else {
+                return RepositoryCommitResult(bindingID: binding.id, outcome: .unknown, revisionID: revisionID, summary: "已创建 Git 提交，但暂存区在提交期间发生变化。", details: "RepHub 未覆盖当前暂存区；请刷新后核对。")
+            }
+            try await publishSelectedPathsFromNewHead(
+                originalIndex: recovery.originalIndex,
+                originalIndexURL: recovery.index,
+                publishIndexURL: recovery.publishedIndex,
+                paths: recovery.paths,
+                in: binding.root
+            )
+            guard try indexSnapshot(at: recovery.index) == recovery.originalIndex else {
+                return RepositoryCommitResult(bindingID: binding.id, outcome: .unknown, revisionID: revisionID, summary: "已创建 Git 提交，但暂存区在提交期间发生变化。", details: "RepHub 未覆盖当前暂存区；请刷新后核对。")
+            }
+            try replaceIndexAtomically(from: recovery.publishedIndex, to: recovery.index)
+            await progress(RepositoryOperationProgress("Git 本地提交已创建。"))
+            return RepositoryCommitResult(
+                bindingID: binding.id,
+                outcome: .succeeded,
+                revisionID: revisionID,
+                summary: "已创建 Git 本地提交。",
+                details: "未推送远端；未选文件的暂存内容已保留。",
+                committedFiles: request.files.map(\.change)
+            )
+        } catch {
+            let revision = try? await optionalHead(in: binding.root)
+            return RepositoryCommitResult(bindingID: binding.id, outcome: .unknown, revisionID: revision ?? nil, summary: "Git 提交可能已创建，但暂存区收尾未完成。", details: "RepHub 未重试；请刷新历史与暂存区后核对。")
+        }
+    }
+
+    private func preCommitFailure(bindingID: String, error: Error) -> RepositoryCommitResult {
+        if error is CancellationError {
+            return RepositoryCommitResult(bindingID: bindingID, outcome: .cancelled, summary: "已取消 Git 提交。")
+        }
+        return RepositoryCommitResult(bindingID: bindingID, outcome: .failed, summary: "Git 未开始创建提交。", details: error.localizedDescription)
+    }
+
+    private func cleanupPreparedCommit(_ context: PreparedGitCommit) {
+        context.lock.release()
+        try? fileManager.removeItem(at: context.temporaryIndex)
+        try? fileManager.removeItem(at: context.publishedIndex)
+    }
+
+    private func containsSelectedSubmodule(paths: [String], in directory: URL) async throws -> Bool {
+        let result = try await git(["--literal-pathspecs", "ls-files", "--stage", "-z", "--"] + paths, in: directory)
+        return try requireSuccess(result, tool: "git").data
+            .split(separator: 0, omittingEmptySubsequences: true)
+            .contains { $0.starts(with: Data("160000 ".utf8)) }
+    }
+
+    private func untrackedCommitDiff(path: String, root: URL) async throws -> RepositoryPatch {
+        let url = try CommitFileSnapshot.validatedURL(root: root, path: path)
+        let attributes = try fileManager.attributesOfItem(atPath: url.path)
+        if attributes[.type] as? FileAttributeType == .typeSymbolicLink {
+            let target = try fileManager.destinationOfSymbolicLink(atPath: url.path)
+            return RepositoryPatch(text: "新增符号链接：\(path) → \(target)\n")
+        }
+        let result = try await git(["--literal-pathspecs", "diff", "--no-index", "--no-ext-diff", "--no-textconv", "--", "/dev/null", path], in: root)
+        guard result.exitCode == 0 || result.exitCode == 1 else { _ = try requireSuccess(result, tool: "git"); fatalError() }
+        return RepositoryPatch(text: result.output)
     }
 
     private func ensureGit(_ binding: RepositoryBinding) throws {
@@ -891,6 +1257,62 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPr
     }
 
     private func isEmptyRepository(_ directory: URL) async throws -> Bool { !(try await hasHead(directory)) }
+}
+
+/// 占有真实 index 的标准 lock 文件。提交过程只操作临时 index；此锁仅用于阻止其他遵守 Git
+/// 锁协议的进程在原 index 上并发写入，并在发布前发现绕过锁的外部修改。
+private struct PreparedGitCommit {
+    let before: String?
+    let paths: [String]
+    let index: URL
+    let lock: GitIndexLock
+    let originalIndex: Data?
+    let temporaryIndex: URL
+    let publishedIndex: URL
+}
+
+private struct CommitRecoveryContext: Sendable {
+    let before: String?
+    let paths: [String]
+    let index: URL
+    let originalIndex: Data?
+    let temporaryIndex: URL
+    let publishedIndex: URL
+
+    init(_ prepared: PreparedGitCommit) {
+        before = prepared.before
+        paths = prepared.paths
+        index = prepared.index
+        originalIndex = prepared.originalIndex
+        temporaryIndex = prepared.temporaryIndex
+        publishedIndex = prepared.publishedIndex
+    }
+}
+
+private final class GitIndexLock {
+    private let url: URL
+    private var held = false
+
+    init(index: URL) throws {
+        url = URL(fileURLWithPath: index.path + ".lock")
+        let descriptor = open(url.path, O_WRONLY | O_CREAT | O_EXCL, mode_t(0o600))
+        guard descriptor >= 0 else {
+            if errno == EEXIST {
+                throw VersionControlError.executionFailed("Git 暂存区正被其他操作使用，请稍后重试。")
+            }
+            throw VersionControlError.executionFailed("无法锁定 Git 暂存区：\(String(cString: strerror(errno)))")
+        }
+        close(descriptor)
+        held = true
+    }
+
+    func release() {
+        guard held else { return }
+        try? FileManager.default.removeItem(at: url)
+        held = false
+    }
+
+    deinit { release() }
 }
 
 /// Git 传输并不逐个下载工作区文件：clone/fetch 先接收 pack 对象，再在本地检出。

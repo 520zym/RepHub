@@ -51,6 +51,8 @@ public final class WorkspaceModel {
     private let service: RepositoryService
     /// 远程克隆／检出独立于已有工作副本的更新状态；认证信息仅在本次应用会话中使用。
     public let repositoryAcquisition: RepositoryAcquisitionModel
+    /// 提交窗口拥有本次选择与结果；工作区只负责在完成后接收服务层已刷新的快照。
+    public let repositoryCommit: RepositoryCommitModel
     private var workTask: Task<Void, Never>?
     private var operationTask: Task<Void, Never>?
     private var requestToken = 0
@@ -71,6 +73,7 @@ public final class WorkspaceModel {
     public init(service: RepositoryService) {
         self.service = service
         self.repositoryAcquisition = RepositoryAcquisitionModel(service: service)
+        self.repositoryCommit = RepositoryCommitModel(service: service)
     }
 
     isolated deinit {
@@ -81,8 +84,8 @@ public final class WorkspaceModel {
     /// 版本控制写操作期间，所有会改变所选工作区或读取范围的入口均应保持锁定。
     public var isOperationInProgress: Bool { operationKind != nil && operationResult == nil }
     /// 供应用退出保护使用；操作后的状态核对同样属于进行中状态。
-    public var isOperating: Bool { isOperationInProgress || repositoryAcquisition.isAcquiring }
-    public var isInteractionLocked: Bool { isOperationInProgress || repositoryAcquisition.isAcquiring }
+    public var isOperating: Bool { isOperationInProgress || repositoryAcquisition.isAcquiring || repositoryCommit.isBusy }
+    public var isInteractionLocked: Bool { isOperationInProgress || repositoryAcquisition.isAcquiring || repositoryCommit.isBusy }
     public var operationRefreshIssues: [String] {
         var seen = Set<String>()
         return ((workspace?.issues ?? []) + snapshots.values.flatMap(\.issues)).filter { seen.insert($0).inserted }
@@ -109,6 +112,67 @@ public final class WorkspaceModel {
         guard !isInteractionLocked else { return }
         showsRepositoryAcquisition = true
         repositoryAcquisition.prepare()
+    }
+
+    public func prepareCommit(initialTargets: Set<String>, initialMessage: String) {
+        guard !isInteractionLocked, let workspace, !workspace.isUnmanaged else { return }
+        repositoryCommit.prepare(in: workspace, initialTargets: initialTargets, initialMessage: initialMessage)
+    }
+
+    /// 服务层提交结束后始终返回全工作区新快照，界面不自行猜测哪些文件已写入。
+    public func applyCommitResponse(_ response: WorkspaceCommitResult) {
+        // 提交前的工作区/历史差异读取可能仍在外部工具中执行。先增加读取令牌，
+        // 防止其迟到结果覆盖服务层已经核对并返回的新快照。
+        cancelReading()
+        errorMessage = nil
+        workspace = response.workspace
+        snapshots = Dictionary(uniqueKeysWithValues: response.snapshots.map { ($0.binding.id, $0) })
+        fileBrowser.refresh()
+        invalidateReadingCache()
+        historyReference = nil
+        clearFileHistoryState()
+        isHistoryVisible = false
+        selectedRevisionID = nil
+        revisionFiles = []
+        patch = nil
+        filePreview = nil
+        if let binding = workspace?.bindings.first(where: { $0.id == selectedBindingID }) ?? workspace?.bindings.first {
+            selectedBindingID = binding.id
+            fileBrowser.setRoot(binding.root)
+            let preferred = preferredFile(in: snapshots[binding.id]?.changes ?? [])
+            selectedPath = preferred?.path
+            if preferred == nil {
+                selectedPath = nil
+            } else {
+                // 与常规工作区选择完全相同的读取与令牌路径，避免另起裸任务。
+                loadPatch()
+            }
+        }
+    }
+
+    /// 从提交结果跳到对应来源的历史；新提交不在当前读取窗口时仍打开历史页并保留提示，而不会伪造定位成功。
+    public func showCommittedRevision(bindingID: String, revisionID: String) {
+        guard !isInteractionLocked, let binding = workspace?.bindings.first(where: { $0.id == bindingID }) else { return }
+        historyPresentationRequest += 1
+        clearFileHistoryState()
+        historyReference = nil
+        isHistoryVisible = true
+        if selectedBindingID != binding.id {
+            selectedBindingID = binding.id
+            fileBrowser.setRoot(binding.root)
+        }
+        guard let revision = snapshots[binding.id]?.revisions.first(where: { $0.id == revisionID }) else {
+            errorMessage = "已刷新工作区，但最新历史窗口中尚未找到该提交（\(revisionID)）。"
+            return
+        }
+        selectedRevisionID = revision.id
+        selectedPath = nil
+        revisionFiles = []
+        patch = nil
+        start { [weak self] token in
+            guard let self else { return }
+            try await self.loadRevision(revision, binding: binding, token: token)
+        }
     }
 
     public func dismissRepositoryAcquisition() {

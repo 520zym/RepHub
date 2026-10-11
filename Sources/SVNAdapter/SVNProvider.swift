@@ -7,7 +7,7 @@ import VersionControlCore
 
 /// 通过 Subversion 命令行读取工作副本，并执行受限的更新、远端浏览和检出操作。
 /// 用户输入的认证信息只保留在当前进程内存中，不写入 SVN 认证缓存。
-public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryProvider, RepositoryAcquisitionProvider {
+public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryProvider, RepositoryAcquisitionProvider, RepositoryCommitProvider {
     public let runner: CommandRunner
     private let tlsFallback: SVNAutomaticTLSFallback
     private let commandExecutor: @Sendable ([String], URL, URL?) async throws -> CommandResult
@@ -126,7 +126,7 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryProvide
                     providerName: displayName,
                     root: root,
                     remoteURL: entry.url,
-                    capabilities: [.status, .diff, .history, .update, .fileHistory, .synchronization]
+                    capabilities: [.status, .diff, .history, .update, .fileHistory, .synchronization, .commit]
                 )
             }
 
@@ -348,6 +348,354 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryProvide
             }
         }
         return RepositoryPatch(text: text)
+    }
+
+    public func prepareCommit(in binding: RepositoryBinding) async throws -> RepositoryCommitPreparation {
+        let baseRevision = try await workingCopyRevision(in: binding)
+        let changes = try await expandedCommitChanges(in: binding)
+        var files: [RepositoryCommitFile] = []
+        for change in changes {
+            files.append(try await commitFile(change: change, in: binding))
+        }
+        let restricted = files.filter { $0.restriction != nil }.count
+        return RepositoryCommitPreparation(
+            binding: binding,
+            baseRevision: baseRevision,
+            files: files,
+            notice: restricted == 0
+                ? "已按当前工作副本状态生成提交预览。"
+                : "其中 \(restricted) 个路径不能安全地按单文件范围提交。",
+            blockingReason: nil
+        )
+    }
+
+    private func expandedCommitChanges(in binding: RepositoryBinding) async throws -> [FileChange] {
+        let initial = try await status(in: binding)
+        var result: [FileChange] = []
+        for change in initial {
+            if change.path.split(separator: "/").contains(where: { $0.lowercased() == ".svn" || $0.lowercased() == ".git" }) {
+                continue
+            }
+            guard change.kind == .untracked else {
+                result.append(change)
+                continue
+            }
+            let url = binding.root.appendingPathComponent(change.path)
+            if let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+               attributes[.type] as? FileAttributeType == .typeSymbolicLink {
+                result.append(change)
+                continue
+            }
+            var directory = ObjCBool(false)
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &directory), directory.boolValue else {
+                result.append(change)
+                continue
+            }
+            // svn status 对未受控目录可能只显示根目录。提交预览展开为叶子文件，
+            // 让用户明确选择，而不会把整个目录递归交给 svn add。
+            result.append(contentsOf: try untrackedLeafFiles(in: url, root: binding.root))
+        }
+        var paths = Set<String>()
+        return result.filter { paths.insert($0.path).inserted }
+    }
+
+    private func untrackedLeafFiles(in directory: URL, root: URL) throws -> [FileChange] {
+        if let attributes = try? FileManager.default.attributesOfItem(atPath: directory.path),
+           attributes[.type] as? FileAttributeType == .typeSymbolicLink {
+            return [FileChange(path: relativePath(directory.path, root: root), kind: .untracked)]
+        }
+        let properties: Set<URLResourceKey> = [.isDirectoryKey, .isSymbolicLinkKey]
+        var enumerationError: Error?
+        guard let enumerator = FileManager.default.enumerator(
+            at: directory,
+            includingPropertiesForKeys: Array(properties),
+            options: [],
+            errorHandler: { _, error in enumerationError = error; return false }
+        ) else { return [] }
+        var files: [FileChange] = []
+        while let url = enumerator.nextObject() as? URL {
+            let relative = relativePath(url.path, root: root)
+            let parts = relative.split(separator: "/")
+            if parts.contains(where: { $0.lowercased() == ".svn" || $0.lowercased() == ".git" }) {
+                enumerator.skipDescendants()
+                continue
+            }
+            let values = try url.resourceValues(forKeys: properties)
+            if values.isDirectory == true, values.isSymbolicLink != true { continue }
+            files.append(FileChange(path: relative, kind: .untracked))
+        }
+        if let enumerationError { throw enumerationError }
+        return files
+    }
+
+    public func commitDiff(in binding: RepositoryBinding, file: RepositoryCommitFile) async throws -> RepositoryPatch {
+        let path = try validatedCommitPath(file.change.path, in: binding)
+        let current = try await commitFile(change: file.change, in: binding)
+        guard current.fingerprint == file.fingerprint else {
+            throw VersionControlError.invalidData("文件 \(path) 在提交预览后已变化，请重新查看提交内容。")
+        }
+        if file.change.kind == .untracked {
+            let url = binding.root.appendingPathComponent(path)
+            let prefix = "新增未受 SVN 管理的文件：\(path)\n\n"
+            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+            if attributes[.type] as? FileAttributeType == .typeSymbolicLink {
+                return RepositoryPatch(text: prefix + "符号链接 → \(try FileManager.default.destinationOfSymbolicLink(atPath: url.path))\n")
+            }
+            let size = (attributes[.size] as? NSNumber)?.intValue ?? 0
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            let data = try handle.read(upToCount: min(size, 1_048_576)) ?? Data()
+            if data.contains(0) { return RepositoryPatch(text: prefix + "二进制文件，大小 \(size) 字节。") }
+            let suffix = size > data.count ? "\n\n… 已截断，文件共 \(size) 字节。" : ""
+            return RepositoryPatch(text: prefix + String(decoding: data, as: UTF8.self) + suffix, isTruncated: size > data.count)
+        }
+        return try await diff(in: binding, path: path, revision: nil)
+    }
+
+    public func commit(
+        _ request: RepositoryCommitRequest,
+        in binding: RepositoryBinding,
+        progress: @escaping RepositoryOperationProgressHandler
+    ) async throws -> RepositoryCommitResult {
+        guard request.bindingID == binding.id else {
+            return RepositoryCommitResult(bindingID: binding.id, outcome: .failed, summary: "提交请求与当前 SVN 工作副本不匹配。")
+        }
+        let message = request.message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty else { return RepositoryCommitResult(bindingID: binding.id, outcome: .failed, summary: "提交说明不能为空。") }
+        guard !request.files.isEmpty else { return RepositoryCommitResult(bindingID: binding.id, outcome: .failed, summary: "请选择至少一个要提交的文件。") }
+
+        await progress(RepositoryOperationProgress("核对 SVN 提交范围…"))
+        let selected: [RepositoryCommitFile]
+        do {
+            let revision = try await workingCopyRevision(in: binding)
+            guard request.baseRevision == revision else {
+                return RepositoryCommitResult(bindingID: binding.id, outcome: .failed, summary: "工作副本 BASE 已变化，请重新查看提交内容。")
+            }
+            var verified: [RepositoryCommitFile] = []
+            var seen = Set<String>()
+            for file in request.files {
+                let path = try validatedCommitPath(file.change.path, in: binding)
+                guard seen.insert(path).inserted else { continue }
+                guard file.restriction == nil else { return RepositoryCommitResult(bindingID: binding.id, outcome: .failed, summary: file.restriction ?? "该路径不能安全地按当前范围提交。") }
+                let current = try await commitFile(change: file.change, in: binding)
+                guard current.restriction == nil else { return RepositoryCommitResult(bindingID: binding.id, outcome: .failed, summary: current.restriction ?? "该路径不能安全地按当前范围提交。") }
+                guard current.fingerprint == file.fingerprint else { return RepositoryCommitResult(bindingID: binding.id, outcome: .failed, summary: "文件 \(path) 在提交预览后已变化，请重新查看提交内容。") }
+                verified.append(current)
+            }
+            guard !verified.isEmpty else { return RepositoryCommitResult(bindingID: binding.id, outcome: .failed, summary: "未找到可提交的文件。") }
+            try Task.checkCancellation()
+            selected = verified
+        } catch is CancellationError {
+            return RepositoryCommitResult(bindingID: binding.id, outcome: .cancelled, summary: "SVN 提交在启动前已取消。")
+        } catch {
+            return RepositoryCommitResult(bindingID: binding.id, outcome: .failed, summary: "SVN 提交尚未启动。", details: sanitizedCommitDetails(error.localizedDescription))
+        }
+
+        let setup: (SVNAutomaticTLSFallback.Mode, [String], URL, [String])
+        do {
+            await progress(RepositoryOperationProgress("探测 SVN 提交连接…"))
+            let tlsMode = try await probeUpdateTLSMode(in: binding)
+            try Task.checkCancellation()
+            // 连接探测期间用户仍可能在编辑器修改文件，进入本地写阶段前再次核对。
+            for file in selected {
+                let current = try await commitFile(change: file.change, in: binding)
+                guard current.fingerprint == file.fingerprint else {
+                    throw VersionControlError.invalidData("连接检查期间文件已变化，请重新准备提交：\(file.change.path)")
+                }
+            }
+            // 对新增的嵌套文件，仅把必要父目录按 empty 深度加入，绝不递归 add 未选择的同级文件。
+            var implicitDirectories: [String] = []
+            for file in selected where file.change.kind == .untracked || file.change.kind == .added {
+                implicitDirectories += try await addUnversionedParents(of: file.change.path, in: binding)
+                if file.change.kind == .untracked {
+                    let result = try await svn(["add", "--depth", "empty", "--", svnTargetPath(file.change.path)], directory: binding.root)
+                    _ = try requireSuccess(result, tool: "svn")
+                }
+            }
+            let messageFile = try writeCommitMessage(message)
+            let paths = (implicitDirectories + selected.map(\.change.path)).reduce(into: [String]()) { paths, path in
+                if !paths.contains(path) { paths.append(path) }
+            }
+            setup = (tlsMode, implicitDirectories, messageFile, paths)
+        } catch is CancellationError {
+            return RepositoryCommitResult(bindingID: binding.id, outcome: .cancelled, summary: "SVN 提交在启动前已取消。")
+        } catch {
+            return RepositoryCommitResult(
+                bindingID: binding.id, outcome: .failed,
+                summary: "SVN 提交尚未启动。",
+                details: sanitizedCommitDetails(error.localizedDescription) + " 本地新增文件可能已被调度添加；请刷新工作副本状态确认。"
+            )
+        }
+        let (tlsMode, _, messageFile, paths) = setup
+        defer { try? FileManager.default.removeItem(at: messageFile) }
+        let command = ["--non-interactive", "--no-auth-cache", "commit", "--depth", "empty", "--file", messageFile.path, "--"] + paths.map(svnTargetPath)
+        await progress(RepositoryOperationProgress("正在提交到 SVN…", detail: "已限定为 \(paths.count) 个路径。"))
+        do {
+            let result = try await runCommit(command, directory: binding.root, remoteURL: binding.remoteURL, tlsMode: tlsMode)
+            let knownRevision = committedRevision(from: result.output)
+            if result.exitCode != 0, knownRevision == nil { _ = try requireSuccess(result, tool: "svn") }
+            guard let committedRevision = knownRevision else {
+                return RepositoryCommitResult(
+                    bindingID: binding.id, outcome: .unknown,
+                    summary: "SVN 命令已结束，但无法确认提交修订号。",
+                    details: sanitizedCommitDetails(result.output + "\n" + result.error),
+                    committedFiles: selected.map(\.change)
+                )
+            }
+            await progress(RepositoryOperationProgress("SVN 提交完成。"))
+            return RepositoryCommitResult(
+                bindingID: binding.id, outcome: .succeeded, revisionID: "r\(committedRevision)",
+                summary: "SVN 已提交 r\(committedRevision)。",
+                details: sanitizedCommitDetails(result.output + "\n" + result.error),
+                committedFiles: selected.map(\.change)
+            )
+        } catch is CancellationError {
+            return RepositoryCommitResult(
+                bindingID: binding.id, outcome: .unknown,
+                summary: "SVN 提交已启动后被取消，无法确认服务器是否已接收。",
+                details: "请刷新历史和工作副本状态后再决定是否重试。",
+                committedFiles: selected.map(\.change)
+            )
+        } catch {
+            return RepositoryCommitResult(
+                bindingID: binding.id, outcome: .unknown,
+                summary: "SVN 提交命令未能确认结果。",
+                details: sanitizedCommitDetails(error.localizedDescription) + " 请刷新历史和工作副本状态后再决定是否重试。",
+                committedFiles: selected.map(\.change)
+            )
+        }
+    }
+
+    private func commitFile(change: FileChange, in binding: RepositoryBinding) async throws -> RepositoryCommitFile {
+        let path = try validatedCommitPath(change.path, in: binding)
+        let restriction = try await commitRestriction(for: change, path: path, in: binding)
+        let snapshot = try await commitSnapshot(path: path, change: change, in: binding)
+        return RepositoryCommitFile(change: FileChange(path: path, kind: change.kind), fingerprint: snapshot, restriction: restriction)
+    }
+
+    private func validatedCommitPath(_ value: String, in binding: RepositoryBinding) throws -> String {
+        _ = try CommitFileSnapshot.validatedURL(root: binding.root, path: value)
+        return value
+    }
+
+    private func commitRestriction(for change: FileChange, path: String, in binding: RepositoryBinding) async throws -> String? {
+        if change.kind != .untracked {
+            let state = try await svn(["status", "--xml", "--verbose", "--depth", "empty", "--", svnTargetPath(path)], directory: binding.root)
+            if try SVNXMLDocument(data: state.data).statusEntries.contains(where: { $0.copied || $0.movedFrom != nil || $0.movedTo != nil }) {
+                return "SVN 复制或移动节点涉及关联路径，当前不支持提交该范围。"
+            }
+        }
+        let url = binding.root.appendingPathComponent(path)
+        var directory = ObjCBool(false)
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &directory), directory.boolValue {
+            return "目录提交可能包含未选择的子项；请逐个选择文件提交。"
+        }
+        switch change.kind {
+        case .renamed, .copied, .conflicted, .unknown, .typeChanged:
+            return "该 SVN 状态无法保证只影响所选路径，请先在其他工具中处理后再提交。"
+        case .deleted:
+            // 本地删除后用 BASE 节点判断它原本是否为目录；普通文件删除仍可安全地按单路径提交。
+            let baseInfo = try? await svn(["info", "--xml", "-r", "BASE", "--", svnTargetPath(path)], directory: binding.root)
+            guard let baseInfo, let document = try? SVNXMLDocument(data: baseInfo.data), let kind = document.infoEntry?.kind else {
+                return "无法确认删除节点类型，不能安全地按当前范围提交。"
+            }
+            if kind == "dir" {
+                return "删除目录会递归影响子项，无法保证只影响所选路径。"
+            }
+            return nil
+        case .added:
+            let state = try await svn(["status", "--xml", "--verbose", "--", svnTargetPath(path)], directory: binding.root)
+            if try SVNXMLDocument(data: state.data).statusEntries.contains(where: { $0.copied || $0.movedFrom != nil || $0.movedTo != nil }) {
+                return "SVN 复制或移动节点可能涉及原路径，无法保证只影响所选路径。"
+            }
+            return nil
+        default:
+            return nil
+        }
+    }
+
+    private func commitSnapshot(path: String, change: FileChange, in binding: RepositoryBinding) async throws -> String {
+        // 包含 SVN 状态、属性状态、BASE 信息和实际文件指纹；任一项变化都会拒绝提交。
+        let status = try await svn(["status", "--xml", "--verbose", "--", svnTargetPath(path)], directory: binding.root)
+        let local = try CommitFileSnapshot.fingerprint(root: binding.root, path: path)
+        if change.kind == .untracked {
+            return CommitFileSnapshot.fingerprint(data: Data(["path=\(path)", "kind=untracked", "status=\(try stableCommitXML(status.data))", "local=\(local)"].joined(separator: "\n").utf8))
+        }
+        let infoArguments = change.kind == .deleted
+            ? ["info", "--xml", "-r", "BASE", "--", svnTargetPath(path)]
+            : ["info", "--xml", "--", svnTargetPath(path)]
+        let info = try await svn(infoArguments, directory: binding.root)
+        let properties = try await svn(["diff", "--properties-only", "--depth", "empty", "--", svnTargetPath(path)], directory: binding.root)
+        let material = [
+            "path=\(path)", "kind=\(change.kind.rawValue)",
+            "status=\(try stableCommitXML(status.data))", "info=\(try stableCommitXML(info.data))",
+            "properties=\(properties.output)", "local=\(local)"
+        ].joined(separator: "\n")
+        return CommitFileSnapshot.fingerprint(data: Data(material.utf8))
+    }
+
+    /// SVN 的 XML 属性顺序受进程内哈希表影响；规范化后再比较，避免未修改文件被误判过期。
+    private func stableCommitXML(_ data: Data) throws -> String {
+        try XMLDocument(data: data, options: []).canonicalXMLStringPreservingComments(false)
+    }
+
+    private func addUnversionedParents(of path: String, in binding: RepositoryBinding) async throws -> [String] {
+        let components = path.split(separator: "/").map(String.init)
+        guard components.count > 1 else { return [] }
+        var parents: [String] = []
+        var current = ""
+        for part in components.dropLast() {
+            current = current.isEmpty ? part : current + "/" + part
+            let state = try await svn(["status", "--xml", "--", svnTargetPath(current)], directory: binding.root)
+            let statuses = try SVNXMLDocument(data: state.data).statusEntries
+            let currentStatus = statuses.first { relativePath($0.path, root: binding.root) == current }
+            if currentStatus?.item == "added" {
+                // 父目录之前可能因用户选择了另一个新文件而已调度添加；提交它时仍用 depth empty，
+                // 不会把该目录中的未选 sibling 一并递归提交。
+                parents.append(current)
+            } else if currentStatus?.item == "unversioned" {
+                let directory = binding.root.appendingPathComponent(current)
+                var isDirectory = ObjCBool(false)
+                guard FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+                    throw VersionControlError.invalidData("新增文件的父目录不存在：\(current)")
+                }
+                _ = try await svn(["add", "--depth", "empty", "--", svnTargetPath(current)], directory: binding.root)
+                parents.append(current)
+            }
+        }
+        return parents
+    }
+
+    private func writeCommitMessage(_ message: String) throws -> URL {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("rephub-svn-message-\(UUID().uuidString)")
+        try Data(message.utf8).write(to: file, options: [.atomic])
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        return file
+    }
+
+    private func runCommit(
+        _ arguments: [String], directory: URL, remoteURL: String?, tlsMode: SVNAutomaticTLSFallback.Mode
+    ) async throws -> CommandResult {
+        switch tlsMode {
+        case .modern:
+            return try await runRemoteCommand(arguments, directory: directory, remoteURL: remoteURL, configuration: nil, timeout: 120)
+        case .legacyCompatible:
+            try await SVNOpenSSLRuntime.shared.requireOpenSSL3(using: runner)
+            return try await SVNTLSConfiguration.withLegacyCompatibleConfiguration { configuration in
+                try await runRemoteCommand(arguments, directory: directory, remoteURL: remoteURL, configuration: configuration, timeout: 120)
+            }
+        }
+    }
+
+    private func committedRevision(from output: String) -> String? {
+        let expression = try? NSRegularExpression(pattern: #"Committed revision ([0-9]+)\."#)
+        let range = NSRange(output.startIndex..., in: output)
+        guard let match = expression?.firstMatch(in: output, range: range), match.numberOfRanges > 1 else { return nil }
+        return (output as NSString).substring(with: match.range(at: 1))
+    }
+
+    private func sanitizedCommitDetails(_ value: String) -> String {
+        RepositoryDisplaySanitizer.redact(value).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     public func perform(
@@ -949,6 +1297,9 @@ private final class SVNXMLDocument: NSObject, XMLParserDelegate {
         var item = ""
         var properties = ""
         var treeConflicted = false
+        var copied = false
+        var movedFrom: String?
+        var movedTo: String?
     }
 
     struct ChangedPath {
@@ -1002,6 +1353,9 @@ private final class SVNXMLDocument: NSObject, XMLParserDelegate {
             currentStatus?.item = attributeDict["item"] ?? ""
             currentStatus?.properties = attributeDict["props"] ?? ""
             currentStatus?.treeConflicted = ["true", "yes"].contains(attributeDict["tree-conflicted"]?.lowercased())
+            currentStatus?.copied = ["true", "yes"].contains(attributeDict["copied"]?.lowercased())
+            currentStatus?.movedFrom = attributeDict["moved-from"]
+            currentStatus?.movedTo = attributeDict["moved-to"]
         case "logentry":
             currentLog = LogEntry(revision: attributeDict["revision"] ?? "")
         case "entry" where elementStack.contains("list"):

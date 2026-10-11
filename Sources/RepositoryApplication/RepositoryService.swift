@@ -233,6 +233,172 @@ public actor RepositoryService {
         try await provider(for: binding).changedFiles(in: binding, revision: revision)
     }
 
+    public func prepareCommits(in workspace: Workspace) async throws -> [RepositoryCommitPreparation] {
+        guard !isPerformingOperation else { throw VersionControlError.unsupported("已有仓库操作正在执行。") }
+        var preparations: [RepositoryCommitPreparation] = []
+        for binding in commitOrderedBindings(workspace.bindings) where binding.capabilities.contains(.commit) {
+            try Task.checkCancellation()
+            do {
+                guard let adapter = try provider(for: binding) as? any RepositoryCommitProvider else { continue }
+                let current = try await checkedCommitBinding(binding, using: adapter)
+                let preparation = try await adapter.prepareCommit(in: current)
+                try validatePreparation(preparation, for: current)
+                preparations.append(preparation)
+            } catch is CancellationError { throw CancellationError() }
+            catch {
+                preparations.append(RepositoryCommitPreparation(binding: binding, baseRevision: nil, files: [],
+                    blockingReason: RepositoryDisplaySanitizer.redact(error.localizedDescription)))
+            }
+        }
+        return preparations
+    }
+
+    public func commitDiff(in binding: RepositoryBinding, file: RepositoryCommitFile) async throws -> RepositoryPatch {
+        try validateCommitPath(file.change.path)
+        if let original = file.change.originalPath { try validateCommitPath(original) }
+        guard let adapter = try provider(for: binding) as? any RepositoryCommitProvider else {
+            throw VersionControlError.unsupported("当前来源不支持提交预览。")
+        }
+        return try await adapter.commitDiff(in: binding, file: file)
+    }
+
+    /// 先复核全部目标，再依次执行 Git、本次其余来源；单个结果不能代表整个批次。
+    public func commit(_ requests: [RepositoryCommitRequest], in workspace: Workspace,
+                       progress: @escaping RepositoryCommitProgressHandler) async throws -> WorkspaceCommitResult {
+        guard !isPerformingOperation else { throw VersionControlError.unsupported("已有仓库操作正在执行，请等待完成。") }
+        guard !requests.isEmpty, Set(requests.map(\.bindingID)).count == requests.count else {
+            throw VersionControlError.invalidRepository("请选择至少一个提交目标，且每个来源只提交一次。")
+        }
+        for request in requests {
+            guard !request.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !request.message.contains("\0"), request.message.utf8.count <= 256 * 1024,
+                  !request.files.isEmpty, Set(request.files.map(\.id)).count == request.files.count else {
+                throw VersionControlError.invalidRepository("提交说明和文件范围不能为空，文件不能重复。")
+            }
+            for file in request.files {
+                try validateCommitPath(file.change.path)
+                if let original = file.change.originalPath { try validateCommitPath(original) }
+                guard file.restriction == nil, !file.fingerprint.isEmpty else {
+                    throw VersionControlError.unsupported(file.restriction ?? "文件快照无效，请重新准备提交。")
+                }
+            }
+            guard workspace.bindings.contains(where: { $0.id == request.bindingID && $0.capabilities.contains(.commit) }) else {
+                throw VersionControlError.invalidRepository("提交目标已不属于当前工作区。")
+            }
+        }
+        isPerformingOperation = true
+        defer { isPerformingOperation = false }
+        let byID = Dictionary(uniqueKeysWithValues: requests.map { ($0.bindingID, $0) })
+        let ordered = commitOrderedBindings(workspace.bindings).filter { byID[$0.id] != nil }
+        var targets: [(RepositoryBinding, any RepositoryCommitProvider, RepositoryCommitRequest)] = []
+        var results: [RepositoryCommitResult] = []
+        var preflightFailure: (String, String)?
+        // 全部预检均为只读；未通过前不对任一目标执行提交或暂存。
+        for binding in ordered {
+            do {
+                try Task.checkCancellation()
+                guard let adapter = try provider(for: binding) as? any RepositoryCommitProvider,
+                      let request = byID[binding.id] else {
+                    throw VersionControlError.unsupported("当前来源未接入提交功能。")
+                }
+                await progress(RepositoryCommitProgress(bindingID: binding.id,
+                    progress: RepositoryOperationProgress("正在核对提交范围…")))
+                let current = try await checkedCommitBinding(binding, using: adapter)
+                let fresh = try await adapter.prepareCommit(in: current)
+                try validatePreparation(fresh, for: current)
+                if let reason = fresh.blockingReason { throw VersionControlError.unsupported(reason) }
+                guard fresh.baseRevision == request.baseRevision else {
+                    throw VersionControlError.invalidRepository("提交基准已改变，请重新准备提交。")
+                }
+                for selected in request.files {
+                    guard let actual = fresh.files.first(where: { $0.id == selected.id }),
+                          actual == selected, actual.restriction == nil else {
+                        throw VersionControlError.invalidRepository("文件已变化或不再可提交，请重新核对：\(selected.id)")
+                    }
+                }
+                targets.append((current, adapter, request))
+            } catch {
+                preflightFailure = (binding.id, RepositoryDisplaySanitizer.redact(error.localizedDescription))
+                break
+            }
+        }
+        if let (failedID, detail) = preflightFailure {
+            results = ordered.map { binding in
+                RepositoryCommitResult(bindingID: binding.id,
+                    outcome: binding.id == failedID ? (Task.isCancelled ? .cancelled : .failed) : .notStarted,
+                    summary: binding.id == failedID ? "提交前检查未通过。" : "未执行提交。", details: detail)
+            }
+        } else {
+            var stopReason: String?
+            for (binding, adapter, request) in targets {
+                if let stopReason {
+                    results.append(RepositoryCommitResult(bindingID: binding.id, outcome: .notStarted,
+                        summary: "未执行提交。", details: stopReason))
+                    continue
+                }
+                if Task.isCancelled {
+                    stopReason = "操作已取消，后续目标未开始。"
+                    results.append(RepositoryCommitResult(bindingID: binding.id, outcome: .notStarted,
+                        summary: "未执行提交。", details: stopReason!))
+                    continue
+                }
+                let result: RepositoryCommitResult
+                do {
+                    result = try await adapter.commit(request, in: binding) { update in
+                        await progress(RepositoryCommitProgress(bindingID: binding.id, progress: Self.sanitizedProgress(update)))
+                    }
+                } catch {
+                    // 适配器进入写阶段后必须自行核实结果。无法获取其结果时不能声称“没有提交”。
+                    result = RepositoryCommitResult(bindingID: binding.id, outcome: .unknown,
+                        summary: "暂时无法确认提交结果。", details: error.localizedDescription)
+                }
+                results.append(RepositoryCommitResult(bindingID: binding.id, outcome: result.outcome,
+                    revisionID: result.revisionID, summary: RepositoryDisplaySanitizer.redact(result.summary),
+                    details: RepositoryDisplaySanitizer.redact(result.details), committedFiles: result.committedFiles))
+                if result.outcome == .unknown || result.outcome == .cancelled {
+                    stopReason = result.outcome == .unknown
+                        ? "前一个目标的提交结果需要核实，后续目标未开始；请勿重复提交。"
+                        : "操作已取消，后续目标未开始。"
+                }
+            }
+        }
+        let refreshed = await Task.detached { [self] in await refreshAfterOperation(workspace) }.value
+        return WorkspaceCommitResult(results: results, workspace: refreshed.0, snapshots: refreshed.1)
+    }
+
+    private func checkedCommitBinding(_ requested: RepositoryBinding,
+                                      using adapter: any RepositoryCommitProvider) async throws -> RepositoryBinding {
+        guard let current = try await adapter.detect(at: requested.root), current.id == requested.id,
+              current.currentBranch == requested.currentBranch, current.remoteURL == requested.remoteURL else {
+            throw VersionControlError.invalidRepository("仓库位置、分支或远端已改变，请刷新后重新准备提交。")
+        }
+        return current
+    }
+
+    private func validatePreparation(_ preparation: RepositoryCommitPreparation, for binding: RepositoryBinding) throws {
+        guard preparation.binding.id == binding.id,
+              preparation.binding.providerID == binding.providerID,
+              preparation.binding.root.standardizedFileURL == binding.root.standardizedFileURL else {
+            throw VersionControlError.invalidRepository("提交准备的来源与当前仓库不一致，请重新打开仓库。")
+        }
+    }
+
+    private func validateCommitPath(_ path: String) throws {
+        try validateRelativeFilePath(path)
+        guard !path.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+              !path.split(separator: "/").contains(where: { [".git", ".svn"].contains($0.lowercased()) }) else {
+            throw VersionControlError.invalidRepository("提交范围不能包含控制字符或版本管理元数据。")
+        }
+    }
+
+    private func commitOrderedBindings(_ bindings: [RepositoryBinding]) -> [RepositoryBinding] {
+        bindings.enumerated().sorted {
+            let lhs = $0.element.providerID == .git ? 0 : ($0.element.providerID == .svn ? 1 : 2)
+            let rhs = $1.element.providerID == .git ? 0 : ($1.element.providerID == .svn ? 1 : 2)
+            return lhs == rhs ? $0.offset < $1.offset : lhs < rhs
+        }.map(\.element)
+    }
+
     /// 同一服务实例串行写入；只执行一个已识别的目标，完成后刷新全部绑定。
     public func perform(_ operation: RepositoryOperationKind, bindingID: String, in workspace: Workspace,
                         progress: @escaping RepositoryOperationProgressHandler) async throws -> WorkspaceOperationResult {

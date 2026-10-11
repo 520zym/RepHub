@@ -4,6 +4,16 @@ import ToolExecution
 
 @Suite("命令进程环境")
 struct CommandEnvironmentTests {
+    @Test("Git 临时索引仅注入指定命令，不污染后续运行")
+    func isolatesExplicitGitIndex() async throws {
+        let runner = CommandRunner()
+        let index = FileManager.default.temporaryDirectory.appendingPathComponent("RepHub-index-\(UUID().uuidString)")
+        let scoped = try await runner.run(executable: "/usr/bin/env", arguments: [], gitIndexFile: index)
+        #expect(environmentValue("GIT_INDEX_FILE", in: scoped.output) == index.standardizedFileURL.path)
+        let normal = try await runner.run(executable: "/usr/bin/env", arguments: [])
+        #expect(environmentValue("GIT_INDEX_FILE", in: normal.output) == nil)
+    }
+
     @Test("OpenSSL 配置仅在明确指定的子进程中注入")
     func injectsOnlyExplicitOpenSSLConfiguration() async throws {
         let folder = FileManager.default.temporaryDirectory
