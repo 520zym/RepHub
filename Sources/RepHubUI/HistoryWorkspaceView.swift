@@ -573,9 +573,9 @@ private struct HistoryRevisionInspector: View {
                         }
                         .tint(palette.accent)
                     }
-                    Button { } label: { Label("审查此提交", systemImage: "sparkles") }
+                    Button { model.showAIReview(revision: revision.id) } label: { Label("审查此提交", systemImage: "sparkles") }
                         .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
-                        .disabled(true).help("AI 审查当前不可用")
+                        .disabled(model.aiReview == nil || model.isInteractionLocked).help("选择文件并审查此提交的差异")
                 }
                 HStack {
                     Text(model.historyFilePath == nil ? "变更的文件  \(model.revisionFiles.count)" : "历史文件")

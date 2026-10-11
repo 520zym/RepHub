@@ -5,14 +5,26 @@ import GitAdapter
 import RepositoryApplication
 import RepHubUI
 import SVNAdapter
+import AIApplication
+import AIAdapters
 
 @main
 struct RepHubApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @State private var appearance = AppearanceStore()
-    @State private var workspace = WorkspaceModel(service: RepositoryService(providers: [
-        GitProvider(), SVNProvider()
-    ]))
+    @State private var workspace: WorkspaceModel
+    @State private var aiSettings: AISettingsStore
+    private let aiService: AIService
+
+    init() {
+        let secrets = KeychainAISecretStore()
+        let settings = AISettingsStore(secrets: secrets)
+        let service = AIService(providers: [OpenAICompatibleProvider(), CLIProvider(kind: .codexCLI), CLIProvider(kind: .claudeCLI)], secrets: secrets)
+        self.aiService = service
+        _aiSettings = State(initialValue: settings)
+        _workspace = State(initialValue: WorkspaceModel(service: RepositoryService(providers: [GitProvider(), SVNProvider()]),
+                                                        aiSettings: settings, aiService: service))
+    }
 
     var body: some Scene {
         Window("RepHub", id: "workspace") {
@@ -39,8 +51,14 @@ struct RepHubApp: App {
         }
 
         Settings {
-            ThemeSettingsView(appearance: appearance)
-                .preferredColorScheme(appearance.preferredColorScheme)
+            TabView {
+                ThemeSettingsView(appearance: appearance)
+                    .tabItem { Label("外观", systemImage: "paintpalette") }
+                AISettingsView(store: aiSettings, service: aiService)
+                    .tabItem { Label("AI 与场景", systemImage: "sparkles") }
+            }
+            .frame(width: 760, height: 600)
+            .preferredColorScheme(appearance.preferredColorScheme)
         }
     }
 }

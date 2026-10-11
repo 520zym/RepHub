@@ -13,6 +13,9 @@ struct RepositoryCommitView: View {
     let committed: @MainActor @Sendable (WorkspaceCommitResult) -> Void
     let viewHistory: (String, String) -> Void
     @Environment(\.colorScheme) private var systemColorScheme
+    @State private var showsAI = false
+    @State private var aiBindingID: String?
+    @State private var aiSelectedPaths: Set<String> = []
 
     var body: some View {
         VStack(spacing: 0) {
@@ -37,6 +40,19 @@ struct RepositoryCommitView: View {
         .foregroundStyle(palette.text)
         .tint(palette.accent)
         .interactiveDismissDisabled(model.isBusy)
+        .sheet(isPresented: $showsAI) {
+            if let ai = model.ai {
+                AIRunView(model: ai, palette: palette, dismiss: { showsAI = false }, apply: { text in
+                    guard let id = aiBindingID, model.phase == .ready,
+                          model.enabledBindingIDs.contains(id), model.selectedFiles(for: id) == aiSelectedPaths else {
+                        ai.markStale()
+                        return
+                    }
+                    model.setMessage(text, for: id)
+                    showsAI = false
+                })
+            }
+        }
     }
 
     private var header: some View {
@@ -178,8 +194,20 @@ struct RepositoryCommitView: View {
         HStack(alignment: .bottom, spacing: 12) {
             if let preparation = model.selectedPreparation {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("\(preparation.binding.providerID == .svn ? "SVN" : preparation.binding.providerName) 提交说明")
-                        .font(.system(size: 11, weight: .medium)).foregroundStyle(palette.secondaryText)
+                    HStack {
+                        Text("\(preparation.binding.providerID == .svn ? "SVN" : preparation.binding.providerName) 提交说明")
+                            .font(.system(size: 11, weight: .medium)).foregroundStyle(palette.secondaryText)
+                        Spacer()
+                        Button {
+                            aiBindingID = preparation.binding.id
+                            aiSelectedPaths = model.selectedFiles(for: preparation.binding.id)
+                            model.prepareAI()
+                            showsAI = true
+                        } label: { Label("AI 生成", systemImage: "sparkles") }
+                        .font(.system(size: 11)).buttonStyle(.plain).foregroundStyle(palette.accent)
+                        .disabled(model.ai == nil || !model.enabledBindingIDs.contains(preparation.binding.id)
+                                  || model.selectedFiles(for: preparation.binding.id).isEmpty || preparation.blockingReason != nil)
+                    }
                     TextField("提交说明…", text: Binding(get: { model.message(for: preparation.binding.id) }, set: { model.setMessage($0, for: preparation.binding.id) }), axis: .vertical)
                         .textFieldStyle(.plain).lineLimit(2...4).padding(.horizontal, 10).padding(.vertical, 5).frame(minHeight: 42, maxHeight: 70)
                         .background(palette.sidebar.opacity(0.48), in: RoundedRectangle(cornerRadius: 7, style: .continuous))

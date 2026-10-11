@@ -2,6 +2,7 @@ import Foundation
 import Observation
 import RepositoryApplication
 import VersionControlCore
+import AICore
 
 /// 提交窗口的短生命周期状态。它只保存用户此次选择，不自行解释 Git 暂存区或 SVN 工作副本。
 @MainActor
@@ -24,6 +25,7 @@ public final class RepositoryCommitModel {
     public private(set) var activeBindingID: String?
     public private(set) var isCancelling = false
     public let transferProgress = TransferProgressState()
+    public let ai: AIRunModel?
 
     private let service: RepositoryService
     private var task: Task<Void, Never>?
@@ -31,7 +33,19 @@ public final class RepositoryCommitModel {
     private var requestID = 0
     private var previewRequestID = 0
 
-    public init(service: RepositoryService) { self.service = service }
+    public init(service: RepositoryService, ai: AIRunModel? = nil) { self.service = service; self.ai = ai }
+
+    public func prepareAI() {
+        guard phase == .ready, let preparation = selectedPreparation,
+              enabledBindingIDs.contains(preparation.binding.id), preparation.blockingReason == nil,
+              let ai else { return }
+        let selected = selectedFiles(for: preparation.binding.id)
+        let contexts = RepositoryAIContextService(service: service)
+        ai.prepare(kind: .commitMessage, sourceLabel: "\(preparation.binding.providerName) · 待提交改动",
+                   paths: preparation.files.filter { selected.contains($0.id) }.map(\.id), selectedPaths: selected) { paths in
+            try await contexts.commit(in: preparation, selectedPaths: paths)
+        }
+    }
 
     isolated deinit { task?.cancel(); previewTask?.cancel() }
 
@@ -96,6 +110,7 @@ public final class RepositoryCommitModel {
     }
 
     public func reset() {
+        ai?.reset()
         requestID += 1
         task?.cancel()
         previewTask?.cancel()

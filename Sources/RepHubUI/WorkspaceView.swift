@@ -93,6 +93,11 @@ public struct WorkspaceView: View {
                 openAcquiredFolder: model.open
             )
         }
+        .sheet(isPresented: $model.showsAIReview) {
+            if let ai = model.aiReview {
+                AIRunView(model: ai, palette: palette, dismiss: { model.showsAIReview = false })
+            }
+        }
     }
 
     private func workingCopy(size: CGSize, palette: AppPalette) -> some View {
@@ -186,10 +191,11 @@ public struct WorkspaceView: View {
                     .help(historyExpanded ? "收起底部提交历史" : "显示底部提交历史")
                     .disabled(model.isInteractionLocked)
                 }
-                Button {} label: { Label("AI 审查", systemImage: "sparkles").labelStyle(.titleAndIcon) }
+                Button { model.showAIReview(revision: section == .history ? model.selectedRevisionID : nil) } label: { Label("AI 审查", systemImage: "sparkles").labelStyle(.titleAndIcon) }
                     .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
                     .accessibilityLabel("AI 审查")
-                    .disabled(true).help("AI 审查尚未接入")
+                    .disabled(model.aiReview == nil || model.selectedBinding == nil || model.isInteractionLocked || (section == .history && model.selectedRevisionID == nil))
+                    .help("选择场景与文件，审查当前工作区或历史提交")
             }
         }
         .sharedBackgroundVisibility(.hidden)
@@ -211,8 +217,13 @@ public struct WorkspaceView: View {
                     set: { if $0 { commitTargets.insert(binding.id) } else { commitTargets.remove(binding.id) } }
                 )).toggleStyle(.checkbox).font(.system(size: 12)).fixedSize()
             }
-            Button {} label: { Label("AI 生成", systemImage: "sparkles") }
-                .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet)).disabled(true).help("AI 生成提交说明尚未接入")
+            Button {
+                model.prepareCommit(initialTargets: commitTargets, initialMessage: commitMessage)
+                showsCommitSheet = true
+            } label: { Label("AI 生成", systemImage: "sparkles") }
+                .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
+                .disabled(model.repositoryCommit.ai == nil || model.isInteractionLocked || !hasCommitTarget)
+                .help("先选择实际提交文件，再为每个目标生成说明")
             Button("提交") {
                 model.prepareCommit(initialTargets: commitTargets, initialMessage: commitMessage)
                 showsCommitSheet = true

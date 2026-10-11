@@ -3,6 +3,8 @@ import Foundation
 import Observation
 import RepositoryApplication
 import VersionControlCore
+import AICore
+import AIApplication
 
 /// 工作区界面的状态拥有者；版本控制命令始终由 RepositoryService 调度。
 @MainActor
@@ -47,6 +49,8 @@ public final class WorkspaceModel {
     public private(set) var operationResult: RepositoryOperationResult?
     public private(set) var isOperationCancelling = false
     public var showsRepositoryAcquisition = false
+    public var showsAIReview = false
+    public let aiReview: AIRunModel?
 
     private let service: RepositoryService
     /// 远程克隆／检出独立于已有工作副本的更新状态；认证信息仅在本次应用会话中使用。
@@ -70,10 +74,29 @@ public final class WorkspaceModel {
         let preview: WorkspaceFilePreview?
     }
 
-    public init(service: RepositoryService) {
+    public init(service: RepositoryService, aiSettings: AISettingsStore? = nil, aiService: AIService? = nil) {
         self.service = service
         self.repositoryAcquisition = RepositoryAcquisitionModel(service: service)
-        self.repositoryCommit = RepositoryCommitModel(service: service)
+        if let aiSettings, let aiService {
+            self.aiReview = AIRunModel(settings: aiSettings, service: aiService)
+            self.repositoryCommit = RepositoryCommitModel(service: service, ai: AIRunModel(settings: aiSettings, service: aiService))
+        } else {
+            self.aiReview = nil
+            self.repositoryCommit = RepositoryCommitModel(service: service)
+        }
+    }
+
+    public func showAIReview(revision: String? = nil) {
+        guard !isInteractionLocked, let binding = selectedBinding, let aiReview else { return }
+        let paths = revision == nil ? (snapshot?.changes.map(\.path) ?? []) : revisionFiles.map(\.path)
+        let contexts = RepositoryAIContextService(service: service)
+        aiReview.prepare(kind: .codeReview,
+                         sourceLabel: "\(binding.providerName) · \(revision.map { String($0.prefix(12)) } ?? "工作区改动")",
+                         paths: paths) { selected in
+            if let revision { return try await contexts.revision(in: binding, revision: revision, selectedPaths: selected) }
+            return try await contexts.workingCopy(in: binding, selectedPaths: selected)
+        }
+        showsAIReview = true
     }
 
     isolated deinit {

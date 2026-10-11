@@ -66,6 +66,7 @@ public struct CommandRunner: Sendable {
         timeout: TimeInterval = 20,
         opensslConfiguration: URL? = nil,
         standardInput: Data? = nil,
+        maximumStandardInputBytes: Int = 4 * 1024,
         gitIndexFile: URL? = nil,
         onOutput: CommandOutputHandler? = nil
     ) async throws -> CommandResult {
@@ -103,6 +104,7 @@ public struct CommandRunner: Sendable {
                     timeout: timeout,
                     opensslConfiguration: opensslConfiguration,
                     standardInput: standardInput,
+                    maximumStandardInputBytes: maximumStandardInputBytes,
                     gitIndexFile: gitIndexFile,
                     isolatedHome: isolatedHome,
                     outputSink: relay?.yield
@@ -158,6 +160,7 @@ private final class ProcessControl: @unchecked Sendable {
         timeout: TimeInterval,
         opensslConfiguration: URL?,
         standardInput: Data?,
+        maximumStandardInputBytes: Int,
         gitIndexFile: URL?,
         isolatedHome: URL?,
         outputSink: (@Sendable ([CommandOutputLine]) -> Void)?
@@ -179,9 +182,10 @@ private final class ProcessControl: @unchecked Sendable {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: executable)
         task.arguments = arguments; task.currentDirectoryURL = directory
-        // 凭据等敏感输入只通过内存管道交给子进程；不进入参数、环境变量或临时文件。
-        // 数据在启动前写入并关闭写端，既保证子进程能收到 EOF，也避开启动后写入的 SIGPIPE 竞争。
-        let inputPipe = try standardInput.map(StandardInputPipe.init)
+        // 凭据、提示词和差异等敏感输入只通过内存管道交给子进程；不进入参数、环境变量或临时文件。
+        // 小输入保持原有 4 KiB 限制。大输入必须由调用方显式提高上限，且只会在子进程启动后
+        // 以非阻塞方式泵入，避免启动前填满管道而死锁。
+        var inputPipe = try standardInput.map { try StandardInputPipe($0, maximumInputSize: maximumStandardInputBytes) }
         task.standardInput = inputPipe?.readHandle ?? FileHandle.nullDevice
         task.standardOutput = out; task.standardError = err
         let inherited = ProcessInfo.processInfo.environment
@@ -212,7 +216,7 @@ private final class ProcessControl: @unchecked Sendable {
         process = task
         do { try task.run() } catch { process = nil; lock.unlock(); throw error }
         // 子进程已继承读端；关闭父进程副本，避免它影响 EOF 语义。
-        try? inputPipe?.readHandle.close()
+        inputPipe?.closeReadHandle()
         lock.unlock()
         // 启动后的任何退出路径（包括末尾读取失败）都不能留下已结束进程的引用。
         defer {
@@ -253,6 +257,7 @@ private final class ProcessControl: @unchecked Sendable {
 
         while task.isRunning {
             do {
+                try inputPipe?.pump()
                 _ = try readOutput()
             } catch {
                 // 即使读取临时输出失败，也要先终止并等待已启动的子进程，不能遗留后台传输。
@@ -273,6 +278,7 @@ private final class ProcessControl: @unchecked Sendable {
             Thread.sleep(forTimeInterval: 0.02)
         }
         task.waitUntilExit()
+        inputPipe?.closeWriteHandle()
         // 即便因取消而结束，也先读取已经写入的末尾，随后再把取消结果交给上层。
         do {
             var outputDrained = false
@@ -410,15 +416,21 @@ private struct CommandOutputLineParser {
 
 /// 仅供一次子进程启动使用的标准输入管道。
 ///
-/// 写端在创建时已写完并关闭，因此不会把敏感内容保存到文件，也不会在子进程提前退出时
-/// 发生启动后的写入竞争。限制为 4 KiB，并额外以系统报告的 `PIPE_BUF` 作为上限。
+/// 输入只保存在内存中。写端使用非阻塞模式，由等待子进程的循环分批泵入；这样 AI 的较大
+/// prompt/diff 不会在启动前写满管道，也不会因子进程提前退出向本进程发送 SIGPIPE。
 private struct StandardInputPipe {
-    private static let maximumInputSize = 4 * 1024
+    private static let absoluteMaximumInputSize = 2 * 1024 * 1024
     let readHandle: FileHandle
+    private var writeDescriptor: Int32
+    private let data: Data
+    private var nextOffset = 0
 
-    init(_ data: Data) throws {
-        guard data.count <= Self.maximumInputSize else {
-            throw VersionControlError.executionFailed("标准输入超过 4 KiB 安全上限。")
+    init(_ data: Data, maximumInputSize: Int) throws {
+        guard maximumInputSize >= 0, maximumInputSize <= Self.absoluteMaximumInputSize else {
+            throw VersionControlError.executionFailed("标准输入上限必须介于 0 与 2 MiB 之间。")
+        }
+        guard data.count <= maximumInputSize else {
+            throw VersionControlError.executionFailed("标准输入超过 \(maximumInputSize / 1024) KiB 安全上限。")
         }
 
         var descriptors: [Int32] = [0, 0]
@@ -436,23 +448,59 @@ private struct StandardInputPipe {
             if shouldCloseWrite { Darwin.close(writeDescriptor) }
         }
 
-        let pipeBufferSize = fpathconf(writeDescriptor, _PC_PIPE_BUF)
-        guard pipeBufferSize > 0, data.count <= Int(pipeBufferSize) else {
-            throw VersionControlError.executionFailed("标准输入超过当前系统管道的安全写入上限。")
+        let currentFlags = fcntl(writeDescriptor, F_GETFL)
+        guard currentFlags >= 0,
+              fcntl(writeDescriptor, F_SETFL, currentFlags | O_NONBLOCK) == 0,
+              fcntl(writeDescriptor, F_SETNOSIGPIPE, 1) == 0 else {
+            throw VersionControlError.executionFailed("无法配置受控标准输入通道。")
         }
-
-        let written = data.withUnsafeBytes { buffer in
-            Darwin.write(writeDescriptor, buffer.baseAddress, buffer.count)
-        }
-        guard written == data.count else {
-            throw VersionControlError.executionFailed("无法写入受控标准输入通道。")
-        }
-        guard Darwin.close(writeDescriptor) == 0 else {
-            throw VersionControlError.executionFailed("无法关闭受控标准输入通道。")
-        }
-        shouldCloseWrite = false
-
         self.readHandle = FileHandle(fileDescriptor: readDescriptor, closeOnDealloc: true)
+        self.writeDescriptor = writeDescriptor
+        self.data = data
         shouldCloseRead = false
+        shouldCloseWrite = false
+    }
+
+    mutating func closeReadHandle() {
+        try? readHandle.close()
+    }
+
+    /// 分批写入，直到暂时没有管道容量、全部写完或子进程已关闭读端。
+    /// EPIPE 说明子进程不再需要输入，属于正常提前退出路径；关闭写端即可。
+    mutating func pump(maximumBytes: Int = 128 * 1024) throws {
+        guard writeDescriptor >= 0 else { return }
+        var remainingBudget = max(1, maximumBytes)
+        while nextOffset < data.count, remainingBudget > 0 {
+            let requested = min(64 * 1024, data.count - nextOffset, remainingBudget)
+            let written: Int
+            do {
+                written = try data.withUnsafeBytes { rawBuffer in
+                    guard let baseAddress = rawBuffer.baseAddress else { return 0 }
+                    let result = Darwin.write(writeDescriptor, baseAddress.advanced(by: nextOffset), requested)
+                    if result >= 0 { return Int(result) }
+                    let error = errno
+                    if error == EAGAIN || error == EWOULDBLOCK { return 0 }
+                    if error == EPIPE { return -1 }
+                    throw POSIXError(POSIXErrorCode(rawValue: error) ?? .EIO)
+                }
+            } catch {
+                closeWriteHandle()
+                throw VersionControlError.executionFailed("无法写入受控标准输入通道。")
+            }
+            if written < 0 {
+                closeWriteHandle()
+                return
+            }
+            guard written > 0 else { return }
+            nextOffset += written
+            remainingBudget -= written
+        }
+        if nextOffset == data.count { closeWriteHandle() }
+    }
+
+    mutating func closeWriteHandle() {
+        guard writeDescriptor >= 0 else { return }
+        Darwin.close(writeDescriptor)
+        writeDescriptor = -1
     }
 }
