@@ -57,17 +57,21 @@ struct PatchTextView: View {
                     HStack(spacing: 0) {
                         Text(line.oldLine.map(String.init) ?? "").foregroundStyle(palette.lineNumber).frame(width: 42, alignment: .trailing)
                         Text(line.newLine.map(String.init) ?? "").foregroundStyle(palette.lineNumber).frame(width: 42, alignment: .trailing).padding(.trailing, 12)
-                        Text(line.text).foregroundStyle(foreground(for: line.text[...])).frame(maxWidth: .infinity, alignment: .leading)
+                        Text(line.text).fixedSize(horizontal: true, vertical: false)
+                            .foregroundStyle(foreground(for: line.text[...]))
                     }
                     .font(.system(.body, design: .monospaced))
                     .textSelection(.enabled)
                     .padding(.vertical, 1)
                     .padding(.trailing, 20)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .background(background(for: line.text[...]))
                 }
             }
             .padding(.vertical, 10)
+            .fixedSize(horizontal: true, vertical: false)
         }
+        .defaultScrollAnchor(.topLeading)
         .background(palette.background)
     }
 
@@ -125,8 +129,9 @@ struct HistoryWorkspaceView: View {
                     ForEach(Array(snapshot.revisions.enumerated()), id: \.element.id) { index, revision in
                         HStack(spacing: 8) {
                             if supportsGraph { GitGraphLane(row: graphRows[index], accent: palette.accent) }
-                            RevisionRow(revision: revision, palette: palette).tag(Optional(revision.id))
+                            RevisionRow(revision: revision, palette: palette)
                         }
+                        .tag(Optional(revision.id))
                         .contentShape(Rectangle())
                         .onTapGesture { model.selectRevision(revision) }
                         .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))

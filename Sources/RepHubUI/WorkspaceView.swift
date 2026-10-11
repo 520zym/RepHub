@@ -28,10 +28,18 @@ public struct WorkspaceView: View {
                 workspaceContent(palette: palette)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(palette.background)
         .tint(palette.accent)
         .preferredColorScheme(appearance.preferredColorScheme)
         .toolbar { workspaceToolbar(palette: palette) }
+        .onChange(of: section) { _, newSection in
+            if newSection == .history {
+                model.selectRevision(model.snapshot?.revisions.first(where: { $0.id == model.selectedRevisionID }) ?? model.snapshot?.revisions.first)
+            } else if model.selectedRevisionID != nil {
+                model.selectChange(model.snapshot?.changes.first)
+            }
+        }
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: section)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: historyExpanded)
     }
@@ -48,7 +56,7 @@ public struct WorkspaceView: View {
             VSplitView {
                 HSplitView {
                     ChangeListView(model: model, palette: palette)
-                        .frame(minWidth: 230, idealWidth: 285, maxWidth: 390)
+                        .frame(minWidth: 230, idealWidth: 285, maxWidth: 320)
                     DiffView(model: model, appearance: appearance)
                         .frame(minWidth: 460)
                 }
@@ -76,7 +84,7 @@ public struct WorkspaceView: View {
         ToolbarItem(placement: .principal) {
             Picker("视图", selection: $section) {
                 ForEach(WorkspaceSection.allCases) { value in
-                    Label(value.title, systemImage: value.symbol).tag(value)
+                    Text(value.title).tag(value)
                 }
             }
             .pickerStyle(.segmented)
@@ -162,6 +170,7 @@ private struct ChangeListView: View {
                     }
                 }
                 .listStyle(.sidebar)
+                .scrollContentBackground(.hidden)
             } else if model.isLoading {
                 ProgressView("正在读取状态…").frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {

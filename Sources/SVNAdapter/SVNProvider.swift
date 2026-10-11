@@ -21,6 +21,7 @@ public struct SVNProvider: VersionControlProvider {
         var candidate = directory.standardizedFileURL
 
         while true {
+            try Task.checkCancellation()
             let metadata = candidate.appendingPathComponent(".svn", isDirectory: true)
             if fileManager.fileExists(atPath: metadata.path) {
                 let info = try await svn(["info", "--xml"], directory: candidate)
@@ -40,8 +41,9 @@ public struct SVNProvider: VersionControlProvider {
                 )
             }
 
-            let parent = candidate.deletingLastPathComponent()
-            if parent.path == candidate.path { break }
+            guard candidate.path != "/", !candidate.path.isEmpty else { break }
+            let parent = candidate.deletingLastPathComponent().standardizedFileURL
+            if parent.path.count >= candidate.path.count { break }
             candidate = parent
         }
 

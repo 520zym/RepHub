@@ -8,6 +8,18 @@ import VersionControlCore
 
 @Suite("Git 与 SVN 同目录集成")
 struct DualRepositoryTests {
+    @Test("未管控目录的检测在文件系统根目录处结束", .timeLimit(.minutes(1)))
+    func unmanagedDirectoryTerminates() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("rephub-unmanaged-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let service = RepositoryService(providers: [GitProvider(), SVNProvider()])
+        let workspace = try await service.open(directory: directory)
+        #expect(workspace.isUnmanaged)
+        let root = try await service.open(directory: URL(fileURLWithPath: "/", isDirectory: true))
+        #expect(root.isUnmanaged)
+    }
+
     @Test("RepositoryService 可识别同目录 Git 和 SVN，并读取两侧状态与差异")
     func readsDualRepositoryWorkingCopy() async throws {
         guard ToolLocator.find("svn") != nil,

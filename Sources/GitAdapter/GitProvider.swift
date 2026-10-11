@@ -16,7 +16,7 @@ public final class GitProvider: VersionControlProvider, @unchecked Sendable {
     }
 
     public func detect(at directory: URL) async throws -> RepositoryBinding? {
-        guard let metadataDirectory = findGitMetadata(above: directory) else { return nil }
+        guard let metadataDirectory = try findGitMetadata(above: directory) else { return nil }
 
         let result = try await git(["rev-parse", "--show-toplevel"], in: metadataDirectory)
         let rootResult = try requireSuccess(result, tool: "git")
@@ -146,15 +146,17 @@ public final class GitProvider: VersionControlProvider, @unchecked Sendable {
         guard binding.providerID == .git else { throw VersionControlError.invalidRepository("该绑定不是 Git 工作区。") }
     }
 
-    private func findGitMetadata(above directory: URL) -> URL? {
+    private func findGitMetadata(above directory: URL) throws -> URL? {
         var candidate = directory.standardizedFileURL
         var isDirectory: ObjCBool = false
         guard fileManager.fileExists(atPath: candidate.path, isDirectory: &isDirectory), isDirectory.boolValue else { return nil }
         while true {
+            try Task.checkCancellation()
             let metadata = candidate.appendingPathComponent(".git")
             if fileManager.fileExists(atPath: metadata.path) { return candidate }
-            let parent = candidate.deletingLastPathComponent()
-            guard parent.path != candidate.path else { return nil }
+            guard candidate.path != "/", !candidate.path.isEmpty else { return nil }
+            let parent = candidate.deletingLastPathComponent().standardizedFileURL
+            guard parent.path.count < candidate.path.count else { return nil }
             candidate = parent
         }
     }
