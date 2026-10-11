@@ -1,16 +1,38 @@
 import SwiftUI
 import DesignSystem
 
-/// 详情栏只展示少量引用，标签按可用宽度排列，完整列表在浮层中阅读。
+/// 详情栏先显示少量引用，其余标签原地展开；过多标签在原区域滚动，保留文件列表空间。
 struct RevisionReferenceLabels: View {
     let references: [String]
     let visibleLimit: Int
+    let maximumExpandedHeight: CGFloat
     let palette: AppPalette
     @State private var showsAllReferences = false
+    @State private var expandedContentHeight: CGFloat = 24
 
     var body: some View {
+        Group {
+            if showsAllReferences {
+                ScrollView(.vertical) {
+                    tags
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { expandedContentHeight = $0 }
+                }
+                .frame(height: min(expandedContentHeight, maximumExpandedHeight))
+                .scrollDisabled(expandedContentHeight <= maximumExpandedHeight)
+            } else {
+                tags
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onChange(of: references) { _, _ in
+            showsAllReferences = false
+            expandedContentHeight = 24
+        }
+    }
+
+    private var tags: some View {
         ReferenceTagLayout(spacing: 6) {
-            ForEach(Array(references.prefix(visibleLimit)), id: \.self) { reference in
+            ForEach(showsAllReferences ? references : Array(references.prefix(visibleLimit)), id: \.self) { reference in
                 HStack(spacing: 5) {
                     Image(systemName: "arrow.triangle.branch").font(.system(size: 10))
                     Text(reference).lineLimit(1).truncationMode(.middle)
@@ -24,41 +46,23 @@ struct RevisionReferenceLabels: View {
                 .accessibilityLabel(reference)
             }
             if references.count > visibleLimit {
-                Button { showsAllReferences = true } label: {
-                    Text("+\(references.count - visibleLimit)")
-                        .font(.system(size: 11, weight: .medium))
-                        .padding(.horizontal, 8).frame(height: 24)
-                        .foregroundStyle(palette.secondaryText)
-                        .background(palette.secondaryText.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+                Button { showsAllReferences.toggle() } label: {
+                    HStack(spacing: 4) {
+                        if showsAllReferences { Image(systemName: "chevron.up").font(.system(size: 9, weight: .semibold)) }
+                        Text(showsAllReferences ? "收起" : "+\(references.count - visibleLimit)")
+                    }
+                    .font(.system(size: 11, weight: .medium))
+                    .padding(.horizontal, 8).frame(height: 24)
+                    .foregroundStyle(palette.secondaryText)
+                    .background(palette.secondaryText.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
                 }
                 .buttonStyle(.plain)
-                .help("查看全部 \(references.count) 个分支与标签")
-                .accessibilityLabel("查看全部 \(references.count) 个分支与标签")
-                .popover(isPresented: $showsAllReferences, arrowEdge: .bottom) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("关联分支与标签 · \(references.count)")
-                            .font(.system(size: 12, weight: .semibold)).foregroundStyle(palette.text)
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 10) {
-                                ForEach(references, id: \.self) { reference in
-                                    Text(reference).font(.system(size: 12))
-                                        .foregroundStyle(palette.text)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                        .textSelection(.enabled)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                }
-                            }
-                        }
-                        .frame(maxHeight: 240)
-                    }
-                    .padding(14).frame(width: 300)
-                    .background(palette.surface)
-                }
+                .help(showsAllReferences ? "收起分支与标签" : "展开全部 \(references.count) 个分支与标签")
+                .accessibilityLabel(showsAllReferences ? "收起分支与标签" : "展开全部 \(references.count) 个分支与标签")
             }
         }
         .fixedSize(horizontal: false, vertical: true)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .onChange(of: references) { _, _ in showsAllReferences = false }
     }
 }
 

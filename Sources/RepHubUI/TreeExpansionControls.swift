@@ -11,7 +11,7 @@ struct TreeExpansionControls: View {
             Button {
                 collapsed.subtract(Set(directoryIDs))
             } label: {
-                Label("全部展开", systemImage: "arrow.down.right.and.arrow.up.left")
+                Label("全部展开", systemImage: "arrow.up.left.and.arrow.down.right")
                     .labelStyle(.iconOnly)
             }
             .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
@@ -21,7 +21,7 @@ struct TreeExpansionControls: View {
             Button {
                 collapsed.formUnion(Set(directoryIDs))
             } label: {
-                Label("全部收起", systemImage: "arrow.up.left.and.arrow.down.right")
+                Label("全部收起", systemImage: "arrow.down.right.and.arrow.up.left")
                     .labelStyle(.iconOnly)
             }
             .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))

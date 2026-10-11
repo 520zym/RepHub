@@ -631,7 +631,8 @@ private struct HistoryRevisionInspector: View {
     @ViewBuilder
     private func referenceLabels(_ references: [String]) -> some View {
         if !references.isEmpty {
-            RevisionReferenceLabels(references: references, visibleLimit: isCompact ? 1 : 2, palette: palette)
+            RevisionReferenceLabels(references: references, visibleLimit: isCompact ? 1 : 2,
+                                    maximumExpandedHeight: isCompact ? 84 : 180, palette: palette)
         }
     }
 
