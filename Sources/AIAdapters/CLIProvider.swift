@@ -66,7 +66,13 @@ public struct CLIProvider: AIProvider {
         let help = try await runner.run(executable: launch.executable, arguments: launch.argumentsPrefix + helpArguments, directory: workDirectory, timeout: timeout)
         guard help.exitCode == 0 else { throw AIError.unavailable(checkFailure(help, executable: launch.displayName)) }
 
-        let helpText = help.output + "\n" + help.error
+        var helpText = help.output + "\n" + help.error
+        if kind == .codexCLI {
+            // `--ask-for-approval` 是当前 Codex 的顶层参数，exec 子命令帮助不会列出它。
+            let globalHelp = try await runner.run(executable: launch.executable, arguments: launch.argumentsPrefix + ["--help"], directory: workDirectory, timeout: timeout)
+            guard globalHelp.exitCode == 0 else { throw AIError.unavailable(checkFailure(globalHelp, executable: launch.displayName)) }
+            helpText += "\n" + globalHelp.output + "\n" + globalHelp.error
+        }
         let missing = requiredHelpFlags.filter { !helpText.contains($0) }
         guard missing.isEmpty else {
             throw AIError.unavailable("\(kind.title) 版本不支持安全执行所需参数：\(missing.joined(separator: "、"))。请升级该 CLI 后重试。")
@@ -88,7 +94,7 @@ public struct CLIProvider: AIProvider {
         case .codexCLI:
             ["--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--sandbox", "--ask-for-approval", "--color", "--json"]
         case .claudeCLI:
-            ["--safe-mode", "--no-session-persistence", "--tools", "--disallowedTools", "--permission-prompts", "--no-chrome", "--output-format", "stream-json", "--input-format", "--max-turns", "--verbose"]
+            ["--safe-mode", "--no-session-persistence", "--tools", "--disallowedTools", "--permission-mode", "--no-chrome", "--output-format", "stream-json", "--input-format", "--verbose"]
         case .openAICompatible: []
         }
     }
@@ -98,16 +104,17 @@ public struct CLIProvider: AIProvider {
         switch kind {
         case .codexCLI:
             var arguments = [
-                "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules",
-                "-C", directory.path, "--sandbox", "read-only", "--ask-for-approval", "never", "--color", "never", "--json", "-"
+                "--ask-for-approval", "never", "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules",
+                "-C", directory.path, "--sandbox", "read-only", "--color", "never", "--json", "-"
             ]
-            if !model.isEmpty { arguments.insert(contentsOf: ["--model", model], at: 1) }
+            if !model.isEmpty { arguments.insert(contentsOf: ["--model", model], at: 0) }
             return arguments
         case .claudeCLI:
+            // 当前 Claude Code 已移除 `--max-turns`；这里禁用全部工具且采用一次性
+            // `--print` 调用，因而不会产生工具回合或继续会话。
             var arguments = [
                 "--safe-mode", "-p", "--no-session-persistence", "--tools", "", "--disallowedTools", "mcp__*",
-                "--permission-prompts", "none", "--no-chrome", "--output-format", "stream-json", "--input-format", "text",
-                "--max-turns", "1", "--verbose"
+                "--permission-mode", "dontAsk", "--no-chrome", "--output-format", "stream-json", "--input-format", "text", "--verbose"
             ]
             if !model.isEmpty { arguments.insert(contentsOf: ["--model", model], at: 0) }
             return arguments
@@ -161,11 +168,30 @@ public struct CLIProvider: AIProvider {
         guard hasEnvNodeShebang(at: resolvedURL) else {
             return CLILaunch(executable: executableURL.path, argumentsPrefix: [], displayName: executableURL.lastPathComponent)
         }
-        let nodeURL = resolvedURL.deletingLastPathComponent().appendingPathComponent("node")
-        guard FileManager.default.isExecutableFile(atPath: nodeURL.path) else {
-            throw AIError.unavailable("Codex CLI 依赖同目录的 Node，但未找到可执行文件：\(nodeURL.path)。请重新安装 Codex CLI，或在连接设置中指定可用路径。")
+        guard let nodeURL = resolveNode(forScriptAt: resolvedURL, originalExecutable: executableURL) else {
+            throw AIError.unavailable("Codex CLI 依赖 Node，但未找到可执行版本。请重新安装 Codex CLI，或在连接设置中指定可用路径。")
         }
         return CLILaunch(executable: nodeURL.path, argumentsPrefix: [resolvedURL.path], displayName: executableURL.lastPathComponent)
+    }
+
+    private func resolveNode(forScriptAt scriptURL: URL, originalExecutable: URL) -> URL? {
+        let fileManager = FileManager.default
+        // npm/mise 的常见布局是 `bin/codex -> ../lib/node_modules/.../codex.js`。
+        // 先使用未展开链接所在 bin 的 node，避免展开后误在包目录中寻找。
+        let sibling = originalExecutable.deletingLastPathComponent().appendingPathComponent("node")
+        if fileManager.isExecutableFile(atPath: sibling.path) { return sibling }
+
+        // 手动指定包内脚本时，仅向上检查有限层级的 `bin/node`；不会扫描用户目录。
+        var directory = scriptURL.deletingLastPathComponent()
+        for _ in 0..<10 {
+            let candidate = directory.appendingPathComponent("bin/node")
+            if fileManager.isExecutableFile(atPath: candidate.path) { return candidate }
+            let parent = directory.deletingLastPathComponent()
+            guard parent.path != directory.path else { break }
+            directory = parent
+        }
+        if let node = ToolLocator.find("node") { return URL(fileURLWithPath: node) }
+        return nil
     }
 
     private func hasEnvNodeShebang(at url: URL) -> Bool {

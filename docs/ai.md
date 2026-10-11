@@ -27,6 +27,8 @@ API 首批支持 Chat Completions 协议，不将任意服务地址等同于协�
 
 CLI 在空临时目录运行，代码和提示词通过有界内存 stdin 传入，不进入命令参数。Codex 使用只读沙箱、临时会话、忽略用户配置/规则；Claude 使用安全模式、禁用内置工具/MCP、禁用会话持久化。CLI 仍是独立外部程序，读取权限受其自身实现及管理策略约束；特别是 Codex 只读模式不等同于操作系统级“只能读取 stdin”。RepHub 不传入正式仓库目录或扩大权限，也不会因参数不支持而降级安全设置。
 
+当前 Claude 采用 `--permission-mode dontAsk`、`--tools ""`、`--disallowedTools "mcp__*"` 与 `--safe-mode`，通过一次性 `-p` 调用输出。Codex 的 `--ask-for-approval never` 放在顶层，npm 符号链接安装会优先使用同一安装目录的 Node。
+
 ## 文档依据
 
 - [OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)

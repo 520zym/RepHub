@@ -181,7 +181,8 @@ private struct ConnectionEditor: View {
                 } else {
                     Section("本机命令") {
                         TextField("可执行文件路径", text: $connection.executablePath, prompt: Text("留空自动检测"))
-                        Text("CLI 可不填模型；配置检查只运行版本查询，不会读取登录令牌或发送代码。")
+                        TextField("模型（可选）", text: $connection.model, prompt: Text("留空使用 CLI 默认模型"))
+                        Text("配置检查只查询版本与支持的参数，不会发送代码或调用模型。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -200,7 +201,7 @@ private struct ConnectionEditor: View {
             }
             .padding()
         }
-        .frame(width: 520, height: connection.kind == .openAICompatible ? 445 : 385)
+        .frame(width: 520, height: 445)
         .alert(item: $notice) { notice in
             Alert(title: Text(notice.title), message: Text(notice.message), dismissButton: .default(Text("好")))
         }

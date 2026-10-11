@@ -20,8 +20,9 @@
 
 - 工作区支持按文件提交到 Git、SVN 或两个已识别目标。每个目标独立选择文件、预览最终差异与填写多行说明，分别保留结果并可跳转历史。Git 仅创建本地提交，未选暂存内容保留。详见 [提交代码](docs/committing.md)。
 - 应用采用最终选定的“翡翠分支”图标，打包时生成标准 macOS 图标资源。
+- AI 场景支持模型 API（Chat Completions）、Codex CLI、Claude Code。连接与提示词分别配置，密钥使用 macOS 钥匙串；按 Git / SVN 所选文件生成提交说明，或审查工作区和历史提交，支持取消及结果过期核对。详见 [AI 场景与连接](docs/ai.md)。
 
-初始化、暂存区的独立管理、Git 推送、AI 场景与 API / CLI 连接尚未接入。未管理目录只能查看提示，不能初始化。SVN 可使用本机已有认证配置，也可填写只在当前应用会话使用的账号密码；尚无证书信任管理界面。
+初始化、暂存区的独立管理和 Git 推送尚未接入。未管理目录只能查看提示，不能初始化。SVN 可使用本机已有认证配置，也可填写只在当前应用会话使用的账号密码；尚无证书信任管理界面。
 
 ## 构建与运行
 
@@ -46,6 +47,8 @@ open build/RepHub.app
 | GitAdapter / SVNAdapter | 具体命令构造和输出解析 |
 | RepositoryApplication | 多提供者识别、读取、写操作互斥、多目标提交与全绑定刷新，只依赖契约 |
 | DesignSystem | 独立的应用主题、代码配色、外观模式及持久化 |
+| AICore / AIApplication | 独立 AI 契约、连接及场景配置、凭据引用与执行编排 |
+| AIAdapters | Chat Completions、Codex / Claude CLI 及 macOS 钥匙串适配 |
 | RepHubUI | 原生工作区、差异、历史图与设置交互 |
 | RepHubApp | 窗口、菜单、依赖组装 |
 
@@ -57,6 +60,6 @@ open build/RepHub.app
 
 ## 下一阶段
 
-后续接入独立 Git 推送、AI 场景、模型 API 与本地 CLI，并补齐未管理目录的初始化流程。新增 SVN 写操作继续遵循先只读探测 TLS、再单次写入，不能无感重试可能已经执行的写命令。
+后续接入独立 Git 推送、未管理目录初始化和冲突处理；AI 按实际服务需求扩展协议及上下文能力。新增 SVN 写操作继续遵循先只读探测 TLS、再单次写入，不能无感重试可能已经执行的写命令。
 
 提交实窗样本可用 `python3 scripts/create-commit-fixture.py` 创建在系统临时目录，包含共管仓库和预先暂存但可不勾选的文件，用于验证提交范围及状态保留。

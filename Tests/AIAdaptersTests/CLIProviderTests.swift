@@ -34,6 +34,13 @@ final class CLIProviderTests: XCTestCase {
         XCTAssertEqual(delivered, "Claude 草稿")
     }
 
+    func testClaudeCheckAcceptsCurrentSafetyOptions() async throws {
+        let script = try makeCLI(mode: "claude-success")
+        defer { try? FileManager.default.removeItem(at: script.deletingLastPathComponent()) }
+        let result = try await CLIProvider(kind: .claudeCLI).check(connection(kind: .claudeCLI, executable: script.path))
+        XCTAssertTrue(result.contains("fake-cli"))
+    }
+
     func testCodexEnvNodeScriptUsesSiblingNodeWithoutPATHLookup() async throws {
         let cli = try makeEnvNodeCodex()
         defer { try? FileManager.default.removeItem(at: cli.deletingLastPathComponent().deletingLastPathComponent()) }
@@ -44,6 +51,22 @@ final class CLIProviderTests: XCTestCase {
         XCTAssertTrue(check.contains("node-shim"))
         let response = try await provider.execute(request(connection: connection), apiKey: nil) { _ in }
         XCTAssertEqual(response, "由相邻 Node 启动")
+    }
+
+    func testLocalCodexCheckWhenExplicitlyRequested() async throws {
+        guard ProcessInfo.processInfo.environment["REPHUB_VERIFY_LOCAL_CODEX"] == "1" else {
+            throw XCTSkip("仅在明确请求时验证本机 Codex 版本与帮助，不发送代码。")
+        }
+        let result = try await CLIProvider(kind: .codexCLI).check(AIConnection(name: "本机 Codex", kind: .codexCLI, timeoutSeconds: 15))
+        XCTAssertFalse(result.isEmpty)
+    }
+
+    func testLocalClaudeCheckWhenExplicitlyRequested() async throws {
+        guard ProcessInfo.processInfo.environment["REPHUB_VERIFY_LOCAL_CLAUDE"] == "1" else {
+            throw XCTSkip("仅在明确请求时验证本机 Claude 版本与帮助，不发送代码。")
+        }
+        let result = try await CLIProvider(kind: .claudeCLI).check(AIConnection(name: "本机 Claude", kind: .claudeCLI, timeoutSeconds: 15))
+        XCTAssertFalse(result.isEmpty)
     }
 
     func testCheckRejectsCLIWithoutRequiredSafetyFlag() async throws {
@@ -132,7 +155,7 @@ final class CLIProviderTests: XCTestCase {
           if [[ "\(mode)" == "help-missing" ]]; then
             print -- '--skip-git-repo-check --ephemeral --ignore-user-config --sandbox --ask-for-approval --color --json'
           else
-            print -- '--skip-git-repo-check --ephemeral --ignore-user-config --ignore-rules --sandbox --ask-for-approval --color --json --safe-mode --no-session-persistence --tools --disallowedTools --permission-prompts --no-chrome --output-format stream-json --input-format --max-turns --verbose'
+            print -- '--skip-git-repo-check --ephemeral --ignore-user-config --ignore-rules --sandbox --ask-for-approval --color --json --safe-mode --no-session-persistence --tools --disallowedTools --permission-mode --no-chrome --output-format stream-json --input-format --verbose'
           fi
           exit 0
         fi
@@ -141,7 +164,9 @@ final class CLIProviderTests: XCTestCase {
         done
         case "\(mode)" in
           codex-success)
-            [[ "$args" == *"--model fixture-model"* && "$args" == *"--sandbox read-only"* && "$args" == *"--ask-for-approval never"* && "$args" == *"--ignore-rules"* && "$args" == *"--json"* ]] || { print -u2 'unsafe codex flags'; exit 92; }
+            for required in '--model fixture-model' '--sandbox read-only' '--ask-for-approval never' '--ignore-rules' '--json'; do
+              [[ "$args" == *"$required"* ]] || { print -u2 'unsafe codex flags'; exit 92; }
+            done
             payload=$(cat)
             [[ "$payload" == *"secret diff"* ]] || { print -u2 'stdin missing diff'; exit 93; }
             print -- '{"type":"item.updated","item":{"id":"r","type":"reasoning","text":"不要展示"}}'
@@ -150,7 +175,7 @@ final class CLIProviderTests: XCTestCase {
             print -- '{"type":"turn.completed","status":"completed"}'
             ;;
           claude-success)
-            [[ "$args" == *"--model fixture-model"* && "$args" == *"--safe-mode"* && "$args" == *"--tools  --disallowedTools mcp__*"* && "$args" == *"--permission-prompts none"* && "$args" == *"--output-format stream-json"* && "$args" == *"--max-turns 1"* ]] || { print -u2 'unsafe claude flags'; exit 94; }
+            [[ "$args" == *"--model fixture-model"* && "$args" == *"--safe-mode"* && "$args" == *"--tools  --disallowedTools mcp__*"* && "$args" == *"--permission-mode dontAsk"* && "$args" == *"--output-format stream-json"* ]] || { print -u2 'unsafe claude flags'; exit 94; }
             payload=$(cat)
             [[ "$payload" == *"secret diff"* ]] || { print -u2 'stdin missing diff'; exit 95; }
             print -- '{"type":"assistant","message":{"content":[{"type":"thinking","text":"不要展示"},{"type":"text","text":"Claude 草稿"}]}}'
@@ -175,13 +200,17 @@ final class CLIProviderTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("rephub-node-cli-tests-\(UUID().uuidString)", isDirectory: true)
         let bin = directory.appendingPathComponent("bin", isDirectory: true)
         try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let packageBin = directory.appendingPathComponent("lib/node_modules/@openai/codex/bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: packageBin, withIntermediateDirectories: true)
         let codex = bin.appendingPathComponent("codex")
+        let scriptTarget = packageBin.appendingPathComponent("codex.js")
         let node = bin.appendingPathComponent("node")
-        try "#!/usr/bin/env node\nthis is deliberately not JavaScript\n".write(to: codex, atomically: true, encoding: .utf8)
+        try "#!/usr/bin/env node\nthis is deliberately not JavaScript\n".write(to: scriptTarget, atomically: true, encoding: .utf8)
+        try FileManager.default.createSymbolicLink(atPath: codex.path, withDestinationPath: "../lib/node_modules/@openai/codex/bin/codex.js")
         let nodeScript = """
         #!/bin/zsh
         set -eu
-        [[ "$1" == *"/bin/codex" ]] || { print -u2 'missing script argument'; exit 98; }
+        [[ "$1" == *"/lib/node_modules/@openai/codex/bin/codex.js" ]] || { print -u2 'missing resolved script argument'; exit 98; }
         shift
         args="$*"
         if [[ "$args" == *"--version"* ]]; then print 'node-shim codex 1.0'; exit 0; fi
@@ -191,7 +220,7 @@ final class CLIProviderTests: XCTestCase {
         print -- '{"type":"turn.completed","status":"completed"}'
         """
         try nodeScript.write(to: node, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: codex.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptTarget.path)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: node.path)
         return codex
     }
