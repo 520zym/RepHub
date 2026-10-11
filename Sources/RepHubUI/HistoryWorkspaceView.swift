@@ -302,7 +302,8 @@ private struct BranchTreeNodeView: View {
     }
 
     private func isSelected(_ node: PathTreeNode<BranchReference>) -> Bool {
-        node.payload?.name == selectedReference
+        guard let name = node.payload?.name, let selectedReference else { return false }
+        return name == selectedReference
     }
 
     private func isVisible(_ node: PathTreeNode<BranchReference>) -> Bool {
@@ -630,7 +631,19 @@ private struct HistoryRevisionInspector: View {
     @ViewBuilder
     private func referenceLabels(_ references: [String]) -> some View {
         if !references.isEmpty {
-            HStack(spacing: 5) { ForEach(references, id: \.self) { Text($0).font(.caption2).padding(.horizontal, 6).padding(.vertical, 3).background(palette.selection, in: Capsule()) } }
+            ScrollView(.horizontal) {
+                HStack(spacing: 5) {
+                    ForEach(references, id: \.self) { reference in
+                        Text(reference).font(.caption2).lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .padding(.horizontal, 6).padding(.vertical, 3)
+                            .background(palette.selection, in: Capsule())
+                            .help(reference)
+                    }
+                }
+            }
+            .scrollIndicators(.hidden)
+            .frame(height: 24)
         }
     }
 
@@ -726,6 +739,9 @@ private struct RevisionFileTreeNodeView: View {
                 }
                 Text(node.title).lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 0)
+                if node.isDirectory, node.payload != nil {
+                    statusMark(for: node.payload).frame(width: 15)
+                }
             }
             .font(.system(size: 12))
             .padding(.leading, 8 + CGFloat(depth) * 13).padding(.trailing, 8)
@@ -736,6 +752,10 @@ private struct RevisionFileTreeNodeView: View {
         .help(node.payload?.path ?? node.title)
         .accessibilityLabel(node.payload?.path ?? node.id)
         .contextMenu {
+            if node.isDirectory, let change = node.payload {
+                Button("查看变更", systemImage: "doc.text.magnifyingglass") { select(change) }
+                Divider()
+            }
             if let change = node.payload {
                 Button("查看文件历史", systemImage: "clock.arrow.circlepath") { showHistory(change) }
             }
@@ -770,7 +790,8 @@ private struct RevisionFileTreeNodeView: View {
     }
 
     private func isSelected(_ node: PathTreeNode<FileChange>) -> Bool {
-        node.payload?.path == selectedPath
+        guard let path = node.payload?.path, let selectedPath else { return false }
+        return path == selectedPath
     }
 
     private func isExpanded(_ node: PathTreeNode<FileChange>) -> Bool {

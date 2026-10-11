@@ -169,6 +169,9 @@ struct WorkspaceFileTreeView: View {
         .buttonStyle(.plain).help(entry.path)
         .accessibilityLabel(entry.path)
         .contextMenu {
+            if entry.isDirectory, let change {
+                Button("查看变更", systemImage: "rectangle.and.text.magnifyingglass") { model.selectChange(change) }
+            }
             if !entry.isDirectory {
                 Button("查看文件历史", systemImage: "clock.arrow.circlepath") { model.showFileHistory(path: entry.path) }
             }
@@ -202,25 +205,30 @@ struct WorkspaceFileTreeView: View {
         }.font(.system(size: 13)).padding(.horizontal, 12).frame(height: 30)
         ForEach(cachedChangeRows) { row in
             Button {
-                if let change = row.change { model.selectChange(change) }
-                else if model.treeState.workingCollapsed.contains(row.id) { model.treeState.workingCollapsed.remove(row.id) }
-                else { model.treeState.workingCollapsed.insert(row.id) }
+                if row.isDirectory {
+                    if model.treeState.workingCollapsed.contains(row.id) { model.treeState.workingCollapsed.remove(row.id) }
+                    else { model.treeState.workingCollapsed.insert(row.id) }
+                } else if let change = row.change { model.selectChange(change) }
             } label: {
                 HStack(spacing: 7) {
-                    if row.change == nil { Image(systemName: model.treeState.workingCollapsed.contains(row.id) ? "chevron.right" : "chevron.down").font(.system(size: 9, weight: .semibold)).frame(width: 9) }
+                    if row.isDirectory { Image(systemName: model.treeState.workingCollapsed.contains(row.id) ? "chevron.right" : "chevron.down").font(.system(size: 9, weight: .semibold)).frame(width: 9) }
                     else { Color.clear.frame(width: 9, height: 1) }
-                    Image(systemName: row.change == nil ? "folder" : fileIcon(row.title, isLink: false)).foregroundStyle(row.change == nil ? palette.accent : palette.secondaryText).frame(width: 16)
+                    Image(systemName: row.isDirectory ? "folder" : fileIcon(row.title, isLink: false)).foregroundStyle(row.isDirectory ? palette.accent : palette.secondaryText).frame(width: 16)
                     Text(row.title).lineLimit(1).truncationMode(.middle)
                     Spacer(minLength: 1)
                     if let change = row.change { changeBadge(change) }
                 }
                 .font(.system(size: 12)).padding(.leading, 9 + CGFloat(min(row.depth, 5)) * 13).padding(.trailing, 9)
                 .frame(maxWidth: .infinity, minHeight: 29, alignment: .leading).contentShape(Rectangle())
-                .background(row.change?.path == model.selectedPath ? palette.selection : .clear, in: RoundedRectangle(cornerRadius: 6))
+                .background(row.change.map { $0.path == model.selectedPath } == true ? palette.selection : .clear, in: RoundedRectangle(cornerRadius: 6))
             }
             .buttonStyle(.plain).help(row.id).accessibilityLabel(row.change?.path ?? row.id)
             .contextMenu {
-                if let change = row.change { Button("查看文件历史", systemImage: "clock.arrow.circlepath") { model.showFileHistory(path: change.path) } }
+                if row.isDirectory, let change = row.change {
+                    Button("查看变更", systemImage: "rectangle.and.text.magnifyingglass") { model.selectChange(change) }
+                } else if let change = row.change {
+                    Button("查看文件历史", systemImage: "clock.arrow.circlepath") { model.showFileHistory(path: change.path) }
+                }
             }
         }
         if changes.isEmpty && !model.isLoading {
@@ -240,10 +248,13 @@ struct WorkspaceFileTreeView: View {
             for name in groups.keys.sorted(by: { $0.localizedStandardCompare($1) == .orderedAscending }) {
                 guard let members = groups[name] else { continue }
                 let fullPath = prefix + name
-                if members.count == 1, members[0].path == fullPath { result.append(.init(id: fullPath, title: name, depth: depth, change: members[0])) }
-                else {
-                    result.append(.init(id: fullPath, title: name, depth: depth, change: nil))
-                    if !model.treeState.workingCollapsed.contains(fullPath) { collect(members, prefix: fullPath + "/", depth: depth + 1) }
+                let directoryChange = members.first(where: { $0.path == fullPath })
+                let descendants = members.filter { $0.path != fullPath }
+                if descendants.isEmpty, let directoryChange {
+                    result.append(.init(id: fullPath, title: name, depth: depth, change: directoryChange, isDirectory: false))
+                } else {
+                    result.append(.init(id: fullPath, title: name, depth: depth, change: directoryChange, isDirectory: true))
+                    if !model.treeState.workingCollapsed.contains(fullPath) { collect(descendants, prefix: fullPath + "/", depth: depth + 1) }
                 }
             }
         }
@@ -273,4 +284,5 @@ private struct WorkspaceChangeRow: Identifiable {
     let title: String
     let depth: Int
     let change: FileChange?
+    let isDirectory: Bool
 }

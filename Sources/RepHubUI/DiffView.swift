@@ -43,6 +43,7 @@ public struct DiffView: View {
                 switch preparedDiff.content {
                 case let .unified(diff):
                     SideBySideDiff(diff: diff, presentation: presentation, palette: codePalette)
+                        .id(preparedSource ?? "")
                 case let .binary(text):
                     binaryState(text, palette: appPalette)
                 case let .unsupported(text):
@@ -166,31 +167,88 @@ private struct SideBySideDiff: View {
     let diff: PreparedUnifiedDiff
     let presentation: DiffPresentation
     let palette: CodePalette
+    @State private var page = 0
+
+    private static let rowsPerPage = 300
+    private var pageCount: Int { max(1, (diff.rows.count + Self.rowsPerPage - 1) / Self.rowsPerPage) }
+    private var displayedPage: Int { min(page, pageCount - 1) }
+    private var displayedRows: [PreparedDiffRow] {
+        let start = displayedPage * Self.rowsPerPage
+        let end = min(start + Self.rowsPerPage, diff.rows.count)
+        return start < end ? Array(diff.rows[start..<end]) : []
+    }
+    private var displayedColumnRows: [PreparedDiffRow] {
+        displayedRows.filter { row in
+            if case let .metadata(_, isHunk) = row { return isHunk }
+            return true
+        }
+    }
+    private var usesPlainLargeFileRendering: Bool { pageCount > 1 }
 
     var body: some View {
-        Group {
-            if presentation == .sideBySide { sideBySideBody }
-            else { unifiedBody }
-        }.background(palette.background)
+        VStack(spacing: 0) {
+            if pageCount > 1 { pageNavigation }
+            Group {
+                if presentation == .sideBySide { sideBySideBody }
+                else { unifiedBody }
+            }
+            .id(displayedPage)
+        }
+        .background(palette.background)
+    }
+
+    private var pageNavigation: some View {
+        HStack(spacing: 10) {
+            Text("大型差异：第 \(displayedPage + 1) / \(pageCount) 段，每段最多 \(Self.rowsPerPage) 行；保留增删配色，暂不进行语法高亮")
+                .font(.caption)
+                .foregroundStyle(palette.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Menu {
+                Button("首段") { page = 0 }
+                Divider()
+                ForEach(0..<pageCount, id: \.self) { target in
+                    Button("第 \(target + 1) 段") { page = target }
+                }
+                Divider()
+                Button("末段") { page = pageCount - 1 }
+            } label: {
+                Label("跳转", systemImage: "list.bullet")
+            }
+            .menuStyle(.borderlessButton)
+            .accessibilityLabel("跳转到任意段")
+            .help("跳转到任意段")
+            Spacer()
+            Button { if page > 0 { page -= 1 } } label: { Image(systemName: "chevron.left") }
+                .buttonStyle(.plain).disabled(displayedPage == 0)
+                .accessibilityLabel("前一段").help("前一段")
+            Button { if displayedPage + 1 < pageCount { page += 1 } } label: { Image(systemName: "chevron.right") }
+                .buttonStyle(.plain).disabled(displayedPage + 1 >= pageCount)
+                .accessibilityLabel("后一段").help("后一段")
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 28)
+        .background(palette.secondary.opacity(0.05))
     }
 
     private var sideBySideBody: some View {
         GeometryReader { geometry in
-            let columnWidth = max(1, (geometry.size.width - 6) / 2)
-            let rowHeight = CGFloat(diff.columnRows.count) * 24
-            let contentHeight = max(1, max(rowHeight, geometry.size.height - 28))
+            let viewportColumnWidth = max(1, (geometry.size.width - 6) / 2)
+            let rowHeight = CGFloat(displayedColumnRows.count) * 24
+            let contentHeight = max(rowHeight, geometry.size.height - 28)
             VStack(spacing: 0) {
                 HStack(spacing: 0) {
-                    columnTitle("旧版本", width: columnWidth)
+                    columnTitle("旧版本", width: viewportColumnWidth)
                     columnGutter
-                    columnTitle("新版本", width: columnWidth)
+                    columnTitle("新版本", width: viewportColumnWidth)
                 }
                 .frame(height: 28)
+                // 每列独立横向滚动，始终各占一半视口；分页确保嵌套滚动中的节点数量有上限。
                 ScrollView(.vertical) {
                     HStack(spacing: 0) {
-                        diffColumn(.old, width: columnWidth, height: contentHeight)
+                        diffColumn(.old, viewportWidth: viewportColumnWidth, contentHeight: contentHeight)
                         columnGutter
-                        diffColumn(.new, width: columnWidth, height: contentHeight)
+                        diffColumn(.new, viewportWidth: viewportColumnWidth, contentHeight: contentHeight)
                     }
                 }
             }
@@ -202,10 +260,11 @@ private struct SideBySideDiff: View {
     }
 
     private var unifiedBody: some View {
-        ScrollView([.horizontal, .vertical]) {
+        let rows = displayedRows
+        return ScrollView([.horizontal, .vertical]) {
             LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(diff.rows.indices, id: \.self) { index in
-                    let row = diff.rows[index]
+                ForEach(rows.indices, id: \.self) { index in
+                    let row = rows[index]
                     switch row {
                     case let .metadata(text, isHunk): metadataRow(text, isHunk: isHunk)
                     case let .paired(old, new): unifiedRow(old: old, new: new)
@@ -221,22 +280,28 @@ private struct SideBySideDiff: View {
             .frame(height: 28).background(palette.secondary.opacity(0.035))
     }
 
-    private func diffColumn(_ side: DiffColumn, width: CGFloat, height: CGFloat) -> some View {
-        let preparedWidth = side == .old ? diff.oldColumnWidth : diff.newColumnWidth
-        let contentWidth = max(width, preparedWidth)
+    private func diffColumn(_ side: DiffColumn, viewportWidth: CGFloat, contentHeight: CGFloat) -> some View {
+        let contentWidth = max(viewportWidth, side == .old ? diff.oldColumnWidth : diff.newColumnWidth)
         return ScrollView(.horizontal) {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(diff.columnRows.indices, id: \.self) { index in
-                    let row = diff.columnRows[index]
-                    switch row {
-                    case let .metadata(text, isHunk):
-                        if isHunk { metadataRow(text, isHunk: true).frame(width: contentWidth, alignment: .leading) }
-                    case let .paired(old, new):
-                        codeCell(side == .old ? old : new).frame(width: contentWidth, alignment: .leading)
-                    }
+            diffColumnContent(side, width: contentWidth, height: contentHeight)
+        }
+        .frame(width: viewportWidth, height: contentHeight)
+    }
+
+    private func diffColumnContent(_ side: DiffColumn, width: CGFloat, height: CGFloat) -> some View {
+        let rows = displayedColumnRows
+        return LazyVStack(alignment: .leading, spacing: 0) {
+            ForEach(rows.indices, id: \.self) { index in
+                let row = rows[index]
+                switch row {
+                case let .metadata(text, isHunk):
+                    if isHunk { metadataRow(text, isHunk: true).frame(width: width, alignment: .leading) }
+                case let .paired(old, new):
+                    codeCell(side == .old ? old : new).frame(width: width, alignment: .leading)
                 }
-            }.frame(width: contentWidth, height: height, alignment: .topLeading)
-        }.frame(width: width, height: height)
+            }
+        }
+        .frame(width: width, height: height, alignment: .topLeading)
     }
 
     private func metadataRow(_ text: String, isHunk: Bool) -> some View {
@@ -260,7 +325,7 @@ private struct SideBySideDiff: View {
         return HStack(spacing: 0) {
             Text(line?.number.map(String.init) ?? "").foregroundStyle(palette.lineNumber).frame(width: 45, alignment: .trailing).padding(.trailing, 8)
             Text(marker(for: line, alwaysShow: showMarker)).foregroundStyle(foreground(for: kind)).frame(width: 15)
-            SyntaxHighlighting.text(line?.text ?? "", palette: palette).fixedSize(horizontal: true, vertical: false).textSelection(.enabled)
+            codeText(line?.text ?? "").fixedSize(horizontal: true, vertical: false).textSelection(.enabled)
             Spacer(minLength: 12)
         }
         .font(.system(size: 13, design: .monospaced)).frame(height: 24)
@@ -270,6 +335,13 @@ private struct SideBySideDiff: View {
     private func marker(for line: PreparedDiffLine?, alwaysShow: Bool) -> String {
         guard let line else { return "" }
         return switch line.kind { case .added: "+"; case .removed: "-"; case .context: alwaysShow ? " " : "" }
+    }
+    @ViewBuilder private func codeText(_ text: String) -> some View {
+        if usesPlainLargeFileRendering {
+            Text(text).foregroundStyle(palette.foreground)
+        } else {
+            SyntaxHighlighting.text(text, palette: palette)
+        }
     }
     private func background(for kind: PreparedDiffSideKind) -> Color { switch kind { case .added: palette.addedBackground; case .removed: palette.removedBackground; case .context: palette.background } }
     private func foreground(for kind: PreparedDiffSideKind) -> Color { switch kind { case .added: palette.addedForeground; case .removed: palette.removedForeground; case .context: palette.foreground } }

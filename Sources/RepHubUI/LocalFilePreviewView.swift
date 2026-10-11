@@ -13,7 +13,7 @@ struct LocalFilePreviewView: NSViewRepresentable {
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
-        scrollView.autohidesScrollers = true
+        scrollView.autohidesScrollers = false
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = true
 
@@ -26,6 +26,11 @@ struct LocalFilePreviewView: NSViewRepresentable {
         textView.importsGraphics = false
         textView.drawsBackground = true
         textView.textContainerInset = NSSize(width: 18, height: 14)
+        textView.minSize = .zero
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isHorizontallyResizable = true
+        textView.isVerticallyResizable = true
+        textView.autoresizingMask = []
         textView.textContainer?.widthTracksTextView = false
         textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.layoutManager?.allowsNonContiguousLayout = true
@@ -42,26 +47,60 @@ struct LocalFilePreviewView: NSViewRepresentable {
     private func update(textView: NSTextView, scrollView: NSScrollView, coordinator: Coordinator) {
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         let foreground = NSColor(palette.foreground)
-        if coordinator.lastText != text {
+        let background = NSColor(palette.background)
+        let selection = NSColor(palette.selection)
+        let textChanged = coordinator.lastText != text
+        let themeChanged = !coordinator.matchesTheme(foreground: foreground, background: background, selection: selection)
+        if textChanged {
             textView.textStorage?.setAttributedString(NSAttributedString(
                 string: text,
                 attributes: [.font: font, .foregroundColor: foreground]
             ))
             coordinator.lastText = text
-        } else {
+            resize(textView: textView, in: scrollView)
+        } else if themeChanged {
             textView.textStorage?.addAttributes(
                 [.font: font, .foregroundColor: foreground],
                 range: NSRange(location: 0, length: textView.textStorage?.length ?? 0)
             )
         }
-        let background = NSColor(palette.background)
-        scrollView.backgroundColor = background
-        textView.backgroundColor = background
-        textView.insertionPointColor = foreground
-        textView.selectedTextAttributes = [.backgroundColor: NSColor(palette.selection), .foregroundColor: foreground]
+        if textChanged || themeChanged {
+            scrollView.backgroundColor = background
+            textView.backgroundColor = background
+            textView.insertionPointColor = foreground
+            textView.selectedTextAttributes = [.backgroundColor: selection, .foregroundColor: foreground]
+            coordinator.updateTheme(foreground: foreground, background: background, selection: selection)
+        }
+    }
+
+    private func resize(textView: NSTextView, in scrollView: NSScrollView) {
+        guard let layoutManager = textView.layoutManager, let container = textView.textContainer else { return }
+        layoutManager.ensureLayout(for: container)
+        let used = layoutManager.usedRect(for: container)
+        let inset = textView.textContainerInset
+        let viewport = scrollView.contentView.bounds.size
+        textView.setFrameSize(NSSize(
+            width: max(viewport.width, ceil(used.width) + inset.width * 2),
+            height: max(viewport.height, ceil(used.height) + inset.height * 2)
+        ))
     }
 
     final class Coordinator {
         var lastText: String?
+        private var foreground: NSColor?
+        private var background: NSColor?
+        private var selection: NSColor?
+
+        func matchesTheme(foreground: NSColor, background: NSColor, selection: NSColor) -> Bool {
+            self.foreground?.isEqual(foreground) == true &&
+            self.background?.isEqual(background) == true &&
+            self.selection?.isEqual(selection) == true
+        }
+
+        func updateTheme(foreground: NSColor, background: NSColor, selection: NSColor) {
+            self.foreground = foreground
+            self.background = background
+            self.selection = selection
+        }
     }
 }
