@@ -96,7 +96,8 @@ struct HistoryWorkspaceView: View {
             ),
             search: $revisionSearch,
             selectedReference: model.historyReference,
-            clearReference: { model.selectHistoryReference(nil) },
+            references: model.snapshot?.branches ?? [],
+            selectReference: model.selectHistoryReference,
             drawsGraphConnections: revisionSearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
             palette: palette
         )
@@ -114,13 +115,12 @@ private struct HistoryBranchSidebar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("分支").font(.headline)
+                Text("分支").font(.system(size: 13, weight: .semibold))
                 Spacer()
-                Image(systemName: "line.3.horizontal.decrease.circle").foregroundStyle(palette.secondaryText)
             }
-            .padding(.horizontal, 14).padding(.vertical, 12)
-            TextField("搜索分支或标签…", text: $search)
-                .textFieldStyle(.roundedBorder).padding(.horizontal, 12).padding(.bottom, 10)
+            .padding(.horizontal, 14).frame(height: 39)
+            WorkbenchSearchField("搜索分支或标签…", text: $search, palette: palette)
+                .padding(.horizontal, 10).padding(.bottom, 10)
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
@@ -181,7 +181,8 @@ private struct HistoryRevisionTable: View {
     @Binding var selectedRevisionID: String?
     @Binding var search: String
     let selectedReference: String?
-    let clearReference: () -> Void
+    let references: [BranchReference]
+    let selectReference: (String?) -> Void
     let drawsGraphConnections: Bool
     let palette: AppPalette
 
@@ -195,14 +196,27 @@ private struct HistoryRevisionTable: View {
             VStack(spacing: 0) {
                 HStack(spacing: 10) {
                     bindingSource
-                    TextField("搜索提交、作者、版本号…", text: $search).textFieldStyle(.roundedBorder)
-                    Button(action: clearReference) {
-                        Label(selectedReference ?? "所有分支", systemImage: "arrow.triangle.branch")
+                    WorkbenchSearchField("搜索提交、作者、版本号…", text: $search, palette: palette)
+                    Menu {
+                        Button("所有分支") { selectReference(nil) }
+                        if !references.isEmpty { Divider() }
+                        ForEach(references) { reference in
+                            Button(reference.name) { selectReference(reference.name) }
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.triangle.branch")
+                            Text(selectedReference ?? "所有分支").lineLimit(1)
+                        }
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(selectedReference == nil ? palette.secondaryText : palette.accent)
+                        .padding(.horizontal, 8).frame(height: 30)
+                        .background(selectedReference == nil ? .clear : palette.selection.opacity(0.6), in: RoundedRectangle(cornerRadius: 7))
                     }
-                    .buttonStyle(.bordered)
-                    .help(selectedReference == nil ? "当前显示已加载的全部提交" : "清除分支筛选并显示全部提交")
+                    .menuStyle(.borderlessButton).menuIndicator(.visible).fixedSize()
+                    .help("筛选历史范围，不会切换工作副本分支")
                 }
-                .padding(12).background(palette.surface)
+                .padding(.horizontal, 14).frame(height: 48).background(palette.surface)
                 Divider()
                 tableHeader(graphWidth: graphWidth, showAuthor: showAuthor, showDate: showDate, showHash: showHash)
                 Divider()
@@ -235,16 +249,17 @@ private struct HistoryRevisionTable: View {
         .background(palette.surface)
     }
 
-    private var bindingSource: some View {
-        Picker("版本控制", selection: $selectedBindingID) {
-            ForEach(bindings) { binding in
-                Label(binding.providerName, systemImage: binding.providerID == .git ? "arrow.triangle.branch" : "point.3.connected.trianglepath.dotted")
-                    .tag(Optional(binding.id))
-            }
+    @ViewBuilder private var bindingSource: some View {
+        if bindings.count > 1 {
+            WorkbenchSegmentedPicker(title: "版本控制", selection: $selectedBindingID,
+                options: bindings.map { .init(Optional($0.id), $0.providerID == .svn ? "SVN" : $0.providerName) }, palette: palette)
+                .frame(width: 130)
+        } else if let binding = bindings.first {
+            Label(binding.providerName, systemImage: binding.providerID == .git ? "arrow.triangle.branch" : "point.3.connected.trianglepath.dotted")
+                .font(.system(size: 12, weight: .medium)).foregroundStyle(palette.secondaryText)
+                .frame(height: 30).padding(.trailing, 4).fixedSize()
+                .accessibilityLabel("版本控制来源：\(binding.providerName)")
         }
-        .labelsHidden().pickerStyle(.segmented)
-        .frame(width: bindings.count > 1 ? 150 : 94)
-        .disabled(bindings.count < 2)
     }
 
     private func tableHeader(graphWidth: CGFloat, showAuthor: Bool, showDate: Bool, showHash: Bool) -> some View {
@@ -279,6 +294,7 @@ private struct HistoryRevisionInspector: View {
                         .font(.caption).foregroundStyle(palette.secondaryText)
                     if !messageBody.isEmpty { Text(messageBody).font(.callout).textSelection(.enabled) }
                     Button { } label: { Label("审查此提交", systemImage: "sparkles") }
+                        .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
                         .disabled(true).help("AI 审查当前不可用")
                 }
                 Divider()

@@ -39,6 +39,7 @@ public struct WorkspaceView: View {
         .foregroundStyle(palette.text)
         .preferredColorScheme(appearance.preferredColorScheme)
         .toolbar { toolbar(palette: palette) }
+        .toolbar(removing: .title)
         .onChange(of: section) { _, value in
             if value == .history {
                 model.selectRevision(model.snapshot?.revisions.first(where: { $0.id == model.selectedRevisionID }) ?? model.snapshot?.revisions.first)
@@ -86,72 +87,79 @@ public struct WorkspaceView: View {
 
     @ToolbarContentBuilder private func toolbar(palette: AppPalette) -> some ToolbarContent {
         ToolbarItem(placement: .navigation) {
-            Menu {
-                Button("打开本地文件夹…", action: model.chooseFolder)
-                if let workspace = model.workspace {
-                    Divider()
-                    Text(workspace.directory.path)
+            HStack(spacing: 12) {
+                Menu {
+                    Button("打开本地文件夹…", action: model.chooseFolder)
+                    if let workspace = model.workspace {
+                        Divider()
+                        Text(workspace.directory.path)
+                    }
+                } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: "externaldrive").font(.system(size: 14))
+                        Text(model.workspace?.name ?? "RepHub").font(.system(size: 13, weight: .semibold))
+                    }
+                    .frame(height: 30)
                 }
-            } label: {
-                HStack(spacing: 9) {
-                    Image(systemName: "externaldrive").font(.system(size: 18))
-                    Text(model.workspace?.name ?? "RepHub").font(.system(size: 14, weight: .semibold))
+                .menuStyle(.borderlessButton).menuIndicator(.visible).fixedSize()
+                .help("打开或切换仓库")
+                if let binding = model.selectedBinding {
+                    Rectangle().fill(palette.border).frame(width: 1, height: 16)
+                    Label(binding.currentBranch.isEmpty ? binding.providerName : binding.currentBranch, systemImage: "arrow.triangle.branch")
+                        .labelStyle(.titleAndIcon)
+                        .font(.system(size: 12)).lineLimit(1)
+                        .foregroundStyle(palette.secondaryText)
+                        .help("当前工作副本分支")
                 }
             }
-            .menuStyle(.borderlessButton)
-            .help("打开或切换仓库")
         }
-        ToolbarItem(placement: .navigation) {
-            if let binding = model.selectedBinding {
-                HStack(spacing: 6) {
-                    Image(systemName: "arrow.triangle.branch")
-                    Text(binding.currentBranch.isEmpty ? binding.providerName : binding.currentBranch)
-                        .lineLimit(1).font(.system(size: 12))
-                }
-                .foregroundStyle(palette.secondaryText)
-                .help("当前工作副本分支")
-            }
-        }
+        .sharedBackgroundVisibility(.hidden)
         ToolbarItem(placement: .principal) {
-            Picker("视图", selection: $section) {
-                Text("工作区").tag(WorkspaceSection.workingCopy)
-                Text("提交历史").tag(WorkspaceSection.history)
-            }
-            .pickerStyle(.segmented).frame(width: 230)
+            WorkbenchSegmentedPicker(title: "视图", selection: $section,
+                options: [.init(.workingCopy, "工作区"), .init(.history, "提交历史")], palette: palette)
+                .frame(width: 200)
         }
-        ToolbarItemGroup(placement: .primaryAction) {
-            if model.isLoading { ProgressView().controlSize(.small) }
-            Button(action: model.refresh) { Label("刷新", systemImage: "arrow.clockwise") }
-                .disabled(model.selectedBinding == nil || model.isLoading).help("刷新仓库 · ⌘R")
-            if section == .workingCopy {
-                Button { historyExpanded.toggle() } label: {
-                    Label(historyExpanded ? "收起历史" : "显示历史", systemImage: "rectangle.bottomthird.inset.filled")
+        .sharedBackgroundVisibility(.hidden)
+        ToolbarItem(placement: .primaryAction) {
+            HStack(spacing: 6) {
+                if model.isLoading { ProgressView().controlSize(.small) }
+                Button(action: model.refresh) { Label("刷新", systemImage: "arrow.clockwise").labelStyle(.iconOnly) }
+                    .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
+                    .accessibilityLabel("刷新")
+                    .disabled(model.selectedBinding == nil || model.isLoading).help("刷新仓库 · ⌘R")
+                if section == .workingCopy {
+                    Button { historyExpanded.toggle() } label: {
+                        Label(historyExpanded ? "收起历史" : "显示历史", systemImage: "rectangle.bottomthird.inset.filled").labelStyle(.iconOnly)
+                    }
+                    .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
+                    .accessibilityLabel(historyExpanded ? "收起历史" : "显示历史")
+                    .help(historyExpanded ? "收起底部提交历史" : "显示底部提交历史")
                 }
-                .help(historyExpanded ? "收起底部提交历史" : "显示底部提交历史")
+                Button {} label: { Label("AI 审查", systemImage: "sparkles").labelStyle(.titleAndIcon) }
+                    .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
+                    .accessibilityLabel("AI 审查")
+                    .disabled(true).help("AI 审查尚未接入")
             }
-            Button {} label: {
-                Label("AI 审查", systemImage: "sparkles").labelStyle(.titleAndIcon)
-            }
-            .disabled(true).help("AI 审查尚未接入")
         }
+        .sharedBackgroundVisibility(.hidden)
     }
 
     private func commitBar(palette: AppPalette) -> some View {
         HStack(spacing: 12) {
             TextField("提交说明…", text: $commitMessage)
                 .textFieldStyle(.plain).font(.system(size: 13))
-                .padding(.horizontal, 11).frame(height: 34)
+                .padding(.horizontal, 11).frame(height: 30)
                 .background(palette.surface, in: RoundedRectangle(cornerRadius: 7))
                 .overlay(RoundedRectangle(cornerRadius: 7).stroke(palette.border.opacity(0.65)))
             ForEach(model.workspace?.bindings ?? []) { binding in
                 Toggle(binding.providerName == "Subversion" ? "SVN" : binding.providerName, isOn: Binding(
                     get: { commitTargets.contains(binding.id) },
                     set: { if $0 { commitTargets.insert(binding.id) } else { commitTargets.remove(binding.id) } }
-                )).toggleStyle(.checkbox).fixedSize()
+                )).toggleStyle(.checkbox).font(.system(size: 12)).fixedSize()
             }
             Button {} label: { Label("AI 生成", systemImage: "sparkles") }
-                .buttonStyle(.plain).disabled(true).help("AI 生成提交说明尚未接入")
-            Button("提交") {}.buttonStyle(.borderedProminent).controlSize(.large)
+                .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet)).disabled(true).help("AI 生成提交说明尚未接入")
+            Button("提交") {}.buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
                 .disabled(true).help("当前为读取版本，实际提交尚未接入")
         }
         .padding(.horizontal, 12).frame(height: 56)
@@ -183,7 +191,7 @@ public struct WorkspaceView: View {
         } description: {
             Text(model.errorMessage ?? (model.workspace?.isUnmanaged == true ? "未识别到 Git 或 Subversion 工作副本。初始化功能尚未接入。" : "从「项目」菜单打开本地 Git 或 Subversion 仓库。"))
         } actions: {
-            Button("打开本地文件夹…", action: model.chooseFolder).buttonStyle(.borderedProminent)
+            Button("打开本地文件夹…", action: model.chooseFolder).buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
         }
     }
 }
@@ -207,13 +215,7 @@ private struct ChangeTreeView: View {
                 Spacer()
                 Text("\(model.snapshot?.changes.count ?? 0)").font(.system(size: 11)).foregroundStyle(palette.secondaryText)
             }.padding(.horizontal, 14).frame(height: 39)
-            HStack(spacing: 7) {
-                Image(systemName: "magnifyingglass").foregroundStyle(palette.secondaryText)
-                TextField("筛选文件…", text: $filter).textFieldStyle(.plain)
-            }
-            .font(.system(size: 12)).padding(8)
-            .background(palette.surface.opacity(0.7), in: RoundedRectangle(cornerRadius: 7))
-            .overlay(RoundedRectangle(cornerRadius: 7).stroke(palette.border.opacity(0.5)))
+            WorkbenchSearchField("筛选文件…", text: $filter, palette: palette)
             .padding(.horizontal, 10).padding(.bottom, 10)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {

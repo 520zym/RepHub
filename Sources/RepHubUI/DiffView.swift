@@ -54,11 +54,9 @@ public struct DiffView: View {
             }
             Spacer(minLength: 8)
             if model.patch?.isTruncated == true { Label("内容已截断", systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange) }
-            Picker("差异布局", selection: $presentation) {
-                Label("并排", systemImage: "rectangle.split.2x1").tag(DiffPresentation.sideBySide)
-                Label("统一", systemImage: "text.alignleft").tag(DiffPresentation.unified)
-            }
-            .labelsHidden().pickerStyle(.segmented).frame(width: 138)
+            WorkbenchSegmentedPicker(title: "差异布局", selection: $presentation,
+                options: [.init(.sideBySide, "并排"), .init(.unified, "统一")], palette: appPalette, compact: true)
+                .frame(width: 112)
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
     }
