@@ -12,6 +12,24 @@ public final class WorkspaceModel {
     public private(set) var snapshots: [String: BindingSnapshot] = [:]
     public private(set) var selectedBindingID: String?
     public private(set) var historyReference: String?
+    /// 非空时，历史列表只表示这个相对文件路径。它不能复用 `selectedPath`：后者同时服务工作区和差异阅读。
+    public private(set) var historyFilePath: String?
+    /// 文件历史的锚点（例如从旧路径继续追溯），不应覆盖仓库的分支筛选。
+    public private(set) var historyFileReference: String?
+    public private(set) var historyFileEntries: [FileHistoryEntry] = []
+    private var fileHistorySyncStatus: RepositorySyncStatus?
+    private var fileHistoryIssues: [String] = []
+    private var explicitHistoryIssues: [String] = []
+    /// 仓库历史显示仓库级同步状态；文件范围显示同一路径计算出的状态。
+    public var historySyncStatus: RepositorySyncStatus? {
+        historyFilePath == nil ? snapshot?.syncStatus : fileHistorySyncStatus
+    }
+    public var historyIssues: [String] {
+        if !explicitHistoryIssues.isEmpty { return explicitHistoryIssues }
+        return historyFilePath == nil ? (snapshot?.issues ?? []) : fileHistoryIssues
+    }
+    /// 文件历史请求的版本号；历史主视图据此切换到提交历史页面。
+    public private(set) var historyPresentationRequest = 0
     public var selectedPath: String?
     public var selectedRevisionID: String?
     public private(set) var revisionFiles: [FileChange] = []
@@ -80,6 +98,7 @@ public final class WorkspaceModel {
             self.revisionFiles = []
             self.selectedBindingID = workspace.bindings.first?.id
             self.historyReference = nil
+            self.clearFileHistoryState()
             if let binding = workspace.bindings.first {
                 try await self.load(binding: binding, reference: nil, token: token)
             }
@@ -91,12 +110,19 @@ public final class WorkspaceModel {
         guard let binding = selectedBinding else { return }
         let revisionID = selectedRevisionID
         let reference = historyReference
+        let filePath = historyFilePath
+        let fileReference = historyFileReference
         selectedRevisionID = nil
         revisionFiles = []
         selectedPath = nil
         patch = nil
         start { [weak self] token in
             guard let self else { return }
+            if let filePath {
+                try await self.reloadFileHistory(binding: binding, path: filePath, reference: fileReference,
+                                                 preferredRevisionID: revisionID, token: token)
+                return
+            }
             try await self.load(binding: binding, reference: reference, token: token, readsWorkingPatch: revisionID == nil)
             if let revisionID, self.accepts(token),
                let revision = self.snapshot?.revisions.first(where: { $0.id == revisionID }) ?? self.snapshot?.revisions.first {
@@ -113,8 +139,9 @@ public final class WorkspaceModel {
         isHistoryVisible = visible
 
         if visible {
-            selectRevision(snapshot?.revisions.first)
+            selectRevision(historyRevisions.first)
         } else {
+            clearFileHistoryState()
             selectChange(preferredFile(in: snapshot?.changes ?? []))
         }
     }
@@ -124,6 +151,7 @@ public final class WorkspaceModel {
         guard selectedBindingID != binding.id else { return }
         selectedBindingID = binding.id
         historyReference = nil
+        clearFileHistoryState()
         selectedPath = nil
         selectedRevisionID = nil
         revisionFiles = []
@@ -143,6 +171,81 @@ public final class WorkspaceModel {
         loadPatch()
     }
 
+    /// 显示某一文件的历史。调用方可传入已删除的历史路径；只有路径本身越界时会被拒绝。
+    public func showFileHistory(path: String, reference: String? = nil) {
+        guard !isInteractionLocked, let binding = selectedBinding else { return }
+        guard let path = validatedRelativePath(path) else {
+            clearFileHistoryState()
+            selectedRevisionID = nil
+            selectedPath = nil
+            revisionFiles = []
+            patch = nil
+            explicitHistoryIssues = ["文件路径无效，不能使用绝对路径或上级目录。"]
+            errorMessage = explicitHistoryIssues.first
+            return
+        }
+
+        historyPresentationRequest += 1
+        historyFilePath = path
+        historyFileEntries = []
+        fileHistorySyncStatus = nil
+        fileHistoryIssues = []
+        explicitHistoryIssues = []
+        historyFileReference = reference
+        selectedRevisionID = nil
+        selectedPath = nil
+        revisionFiles = []
+        patch = nil
+        isHistoryVisible = true
+
+        start { [weak self] token in
+            guard let self else { return }
+            let fileHistory: FileHistorySnapshot
+            do {
+                fileHistory = try await self.service.fileHistory(in: binding, path: path, reference: reference)
+            } catch {
+                guard self.accepts(token), self.selectedBindingID == binding.id,
+                      self.historyFilePath == path, self.historyFileReference == reference else { throw error }
+                self.fileHistoryIssues = ["文件历史：\(error.localizedDescription)"]
+                throw error
+            }
+            guard self.accepts(token), self.selectedBindingID == binding.id,
+                  self.historyFilePath == path, self.historyFileReference == reference else { return }
+            self.historyFileEntries = fileHistory.entries
+            self.fileHistorySyncStatus = fileHistory.syncStatus
+            self.fileHistoryIssues = fileHistory.issues
+            guard let entry = fileHistory.entries.first else { return }
+            self.selectedRevisionID = entry.revision.id
+            try await self.loadFileHistoryRevision(entry, binding: binding, token: token)
+        }
+    }
+
+    /// 从当前工作目录挑选文件。面板中必须解析真实路径，防止符号链接越出仓库根目录。
+    public func chooseFileHistory() {
+        guard !isInteractionLocked, let binding = selectedBinding else { return }
+        let reference = historyFilePath == nil ? historyReference : historyFileReference
+        let panel = NSOpenPanel()
+        panel.title = "查看文件历史"
+        panel.message = "选择当前仓库中的一个文件"
+        panel.directoryURL = binding.root
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url,
+              let path = relativePathInsideBinding(url, binding: binding) else { return }
+        showFileHistory(path: path, reference: reference)
+    }
+
+    public func clearFileHistory() {
+        guard !isInteractionLocked else { return }
+        clearFileHistoryState()
+        selectedRevisionID = nil
+        revisionFiles = []
+        patch = nil
+        if isHistoryVisible { selectRevision(snapshot?.revisions.first) }
+    }
+
     public func selectRevision(_ revision: Revision?) {
         guard !isInteractionLocked else { return }
         selectedRevisionID = revision?.id
@@ -151,6 +254,14 @@ public final class WorkspaceModel {
         patch = nil
         guard let binding = selectedBinding, let revision else {
             patch = nil
+            return
+        }
+        if historyFilePath != nil {
+            guard let entry = historyFileEntries.first(where: { $0.revision.id == revision.id }) else { return }
+            start { [weak self] token in
+                guard let self else { return }
+                try await self.loadFileHistoryRevision(entry, binding: binding, token: token)
+            }
             return
         }
         start { [weak self] token in
@@ -164,6 +275,7 @@ public final class WorkspaceModel {
         guard !isInteractionLocked else { return }
         guard let binding = selectedBinding else { return }
         historyReference = reference
+        clearFileHistoryState()
         selectedRevisionID = nil
         selectedPath = nil
         revisionFiles = []
@@ -187,7 +299,12 @@ public final class WorkspaceModel {
               let path = change?.path else { return }
         start { [weak self] token in
             guard let self else { return }
-            let patch = try await self.service.diff(in: binding, path: path, revision: revisionID)
+            let patch: RepositoryPatch
+            if let entry = self.historyFileEntries.first(where: { $0.revision.id == revisionID && $0.path == path }) {
+                patch = try await self.service.fileHistoryDiff(in: binding, entry: entry)
+            } else {
+                patch = try await self.service.diff(in: binding, path: path, revision: revisionID)
+            }
             guard self.accepts(token), self.selectedBindingID == binding.id,
                   self.selectedRevisionID == revisionID, self.selectedPath == path else { return }
             self.patch = patch
@@ -200,6 +317,11 @@ public final class WorkspaceModel {
 
     public var snapshot: BindingSnapshot? {
         selectedBindingID.flatMap { snapshots[$0] }
+    }
+
+    /// 当前历史范围内可展示的提交；文件范围下保留适配器提供的重命名/peg 信息，选择时会回查对应条目。
+    public var historyRevisions: [Revision] {
+        historyFilePath == nil ? (snapshot?.revisions ?? []) : historyFileEntries.map(\.revision)
     }
 
     /// 单次写操作只针对一个绑定。服务层负责串行化以及结束后的全部绑定刷新。
@@ -223,6 +345,8 @@ public final class WorkspaceModel {
         // 记录阅读上下文。写操作结束后的快照来自服务层，补回当前所选差异即可。
         let preservedBindingID = selectedBindingID
         let preservedReference = historyReference
+        let preservedFilePath = historyFilePath
+        let preservedFileReference = historyFileReference
         let preservedRevisionID = selectedRevisionID
         let preservedPath = selectedPath
         let operationWorkspace = workspace ?? Workspace(directory: binding.root, bindings: [binding], issues: [])
@@ -242,6 +366,8 @@ public final class WorkspaceModel {
                         service: service,
                         preferredBindingID: preservedBindingID,
                         reference: preservedReference,
+                        filePath: preservedFilePath,
+                        fileReference: preservedFileReference,
                         revisionID: preservedRevisionID,
                         path: preservedPath,
                         token: token
@@ -267,6 +393,8 @@ public final class WorkspaceModel {
         service: RepositoryService,
         preferredBindingID: String?,
         reference: String?,
+        filePath: String?,
+        fileReference: String?,
         revisionID: String?,
         path: String?,
         token: Int
@@ -278,6 +406,8 @@ public final class WorkspaceModel {
             service: service,
             preferredBindingID: preferredBindingID,
             reference: reference,
+            filePath: filePath,
+            fileReference: fileReference,
             revisionID: revisionID,
             path: path,
             token: token
@@ -309,6 +439,8 @@ public final class WorkspaceModel {
         service: RepositoryService,
         preferredBindingID: String?,
         reference: String?,
+        filePath: String?,
+        fileReference: String?,
         revisionID: String?,
         path: String?,
         token: Int
@@ -317,6 +449,12 @@ public final class WorkspaceModel {
         let binding = workspace.bindings.first { $0.id == preferredBindingID } ?? workspace.bindings.first
         selectedBindingID = binding?.id
         historyReference = reference
+        historyFilePath = filePath
+        historyFileReference = fileReference
+        historyFileEntries = []
+        fileHistorySyncStatus = nil
+        fileHistoryIssues = []
+        explicitHistoryIssues = []
         selectedRevisionID = revisionID
         selectedPath = path
         revisionFiles = []
@@ -325,6 +463,11 @@ public final class WorkspaceModel {
 
         // service.perform 的全量快照采用默认历史范围。保留分支筛选时必须重新按该范围读取。
         do {
+            if let filePath {
+                try await reloadFileHistory(binding: binding, path: filePath, reference: fileReference,
+                                            preferredRevisionID: revisionID, token: token, restoresOperation: true)
+                return
+            }
             if let reference {
                 let scopedSnapshot = await service.load(binding, reference: reference)
                 guard operationToken == token, selectedBindingID == binding.id else { return }
@@ -415,6 +558,91 @@ public final class WorkspaceModel {
         self.patch = patch
     }
 
+    private func reloadFileHistory(
+        binding: RepositoryBinding,
+        path: String,
+        reference: String?,
+        preferredRevisionID: String?,
+        token: Int,
+        restoresOperation: Bool = false
+    ) async throws {
+        // 先清空旧数据；读取失败时绝不能把旧文件的同步状态或提交列表保留在界面上。
+        historyFileEntries = []
+        fileHistorySyncStatus = nil
+        fileHistoryIssues = []
+        explicitHistoryIssues = []
+        let fileHistory: FileHistorySnapshot
+        do {
+            fileHistory = try await service.fileHistory(in: binding, path: path, reference: reference)
+        } catch {
+            guard acceptsHistoryLoad(token, restoresOperation: restoresOperation), selectedBindingID == binding.id,
+                  historyFilePath == path, historyFileReference == reference else { throw error }
+            fileHistoryIssues = ["文件历史：\(error.localizedDescription)"]
+            throw error
+        }
+        guard acceptsHistoryLoad(token, restoresOperation: restoresOperation), selectedBindingID == binding.id,
+              historyFilePath == path, historyFileReference == reference else { return }
+        historyFileEntries = fileHistory.entries
+        fileHistorySyncStatus = fileHistory.syncStatus
+        fileHistoryIssues = fileHistory.issues
+        guard let entry = preferredRevisionID.flatMap({ requested in
+            fileHistory.entries.first(where: { $0.revision.id == requested })
+        }) ?? fileHistory.entries.first else {
+            selectedRevisionID = nil
+            selectedPath = nil
+            revisionFiles = []
+            patch = nil
+            return
+        }
+        selectedRevisionID = entry.revision.id
+        try await loadFileHistoryRevision(entry, binding: binding, token: token, restoresOperation: restoresOperation)
+    }
+
+    private func loadFileHistoryRevision(
+        _ entry: FileHistoryEntry,
+        binding: RepositoryBinding,
+        token: Int,
+        restoresOperation: Bool = false
+    ) async throws {
+        guard historyFilePath != nil else { return }
+        let revisionID = entry.revision.id
+        selectedRevisionID = revisionID
+        selectedPath = entry.path
+        // 文件历史的右侧列表只能包含该文件，不能误把整次提交的改动带入。
+        revisionFiles = [FileChange(path: entry.path, kind: .modified)]
+        let patch = try await service.fileHistoryDiff(in: binding, entry: entry)
+        guard acceptsHistoryLoad(token, restoresOperation: restoresOperation), selectedBindingID == binding.id,
+              historyFilePath != nil, selectedRevisionID == revisionID,
+              selectedPath == entry.path else { return }
+        self.patch = patch
+    }
+
+    private func clearFileHistoryState() {
+        historyFilePath = nil
+        historyFileReference = nil
+        historyFileEntries = []
+        fileHistorySyncStatus = nil
+        fileHistoryIssues = []
+        explicitHistoryIssues = []
+    }
+
+    private func validatedRelativePath(_ candidate: String) -> String? {
+        guard !candidate.isEmpty, !candidate.hasPrefix("/") else { return nil }
+        let components = candidate.split(separator: "/", omittingEmptySubsequences: false)
+        guard !components.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) else { return nil }
+        return components.joined(separator: "/")
+    }
+
+    private func relativePathInsideBinding(_ url: URL, binding: RepositoryBinding) -> String? {
+        let root = binding.root.standardizedFileURL.resolvingSymlinksInPath()
+        let selected = url.standardizedFileURL.resolvingSymlinksInPath()
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: selected.path, isDirectory: &isDirectory), !isDirectory.boolValue else { return nil }
+        let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        guard selected.path.hasPrefix(rootPath) else { return nil }
+        return validatedRelativePath(String(selected.path.dropFirst(rootPath.count)))
+    }
+
     private func preferredFile(in files: [FileChange]) -> FileChange? {
         let sourceExtensions: Set<String> = ["swift", "java", "kt", "js", "ts", "tsx", "py", "go", "rs", "c", "cpp", "h", "xml", "json", "yaml", "yml"]
         return files.first(where: { $0.kind != .untracked && sourceExtensions.contains(($0.path as NSString).pathExtension.lowercased()) })
@@ -435,6 +663,10 @@ public final class WorkspaceModel {
 
     private func accepts(_ token: Int) -> Bool {
         !Task.isCancelled && requestToken == token
+    }
+
+    private func acceptsHistoryLoad(_ token: Int, restoresOperation: Bool) -> Bool {
+        restoresOperation ? operationToken == token : accepts(token)
     }
 
     private func start(_ operation: @escaping (Int) async throws -> Void) {

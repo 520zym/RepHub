@@ -24,6 +24,7 @@
 ### 契约与能力
 
 - `VersionControlProvider` 提供类型标识、显示名、可用性与目录检测入口。注册表可返回多个匹配绑定。
+- `RepositoryHistoryProvider` 独立提供单文件历史、历史路径差异及同步状态；`FileHistoryEntry` 保留适配器追溯所需的路径和锚点。业务层校验相对路径并单独保留同步读取错误，UI 不解析命令输出。Git 保留分支上游语义，SVN 保留工作副本 BASE 与混合修订语义。
 - `RepositoryOperationProvider` 单独定义异步写操作入口，使用 `RepositoryOperationKind`、阶段进度与 `RepositoryOperationResult`；界面不导入 Git / SVN 模块。`RepositoryService` 负责同实例操作互斥、目标复核、取消后脱离取消上下文刷新所有绑定。
 - `RepositoryBinding` 包含实际工作副本根目录、在工作区内的覆盖范围、远端信息和可用能力。一个工作区允许多个绑定；嵌套和共管不能只用一个仓库类型枚举表示。
 - 检测结果区分已识别、确认未管理、工具缺失、权限不足、元数据损坏与未知错误；检测失败不能降级为“未管理”。

@@ -51,6 +51,10 @@ public struct WorkspaceView: View {
             commitTargets = Set(model.workspace?.bindings.map(\.id) ?? [])
             commitMessage = ""
         }
+        .onChange(of: model.historyPresentationRequest) { _, _ in
+            section = .history
+            model.setHistoryVisible(true)
+        }
         .sheet(isPresented: $showsOperationSheet, onDismiss: model.dismissOperationResult) {
             RepositoryOperationView(model: model, palette: palette) {
                 model.dismissOperationResult()
@@ -294,6 +298,13 @@ private struct ChangeTreeView: View {
                         }
                         .buttonStyle(.plain).help(row.id)
                         .accessibilityLabel(row.change?.path ?? row.id)
+                        .contextMenu {
+                            if let change = row.change {
+                                Button("查看文件历史", systemImage: "clock.arrow.circlepath") {
+                                    model.showFileHistory(path: change.path)
+                                }
+                            }
+                        }
                     }
                     if changes.isEmpty && !model.isLoading {
                         Text(filter.isEmpty ? "工作区没有变更" : "没有匹配的文件")

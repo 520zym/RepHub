@@ -43,11 +43,11 @@ struct HistoryWorkspaceView: View {
     }
 
     private var supportsGraph: Bool {
-        model.selectedBinding?.capabilities.contains(.commitGraph) == true
+        !isFileHistory && model.selectedBinding?.capabilities.contains(.commitGraph) == true
     }
 
     private var supportsBranches: Bool {
-        model.selectedBinding?.capabilities.contains(.branches) == true
+        !isFileHistory && model.selectedBinding?.capabilities.contains(.branches) == true
     }
 
     @ViewBuilder
@@ -90,8 +90,9 @@ struct HistoryWorkspaceView: View {
 
     private var filteredRevisions: [Revision] {
         let query = revisionSearch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !query.isEmpty else { return model.snapshot?.revisions ?? [] }
-        return (model.snapshot?.revisions ?? []).filter {
+        let revisions = model.historyRevisions
+        guard !query.isEmpty else { return revisions }
+        return revisions.filter {
             $0.subject.lowercased().contains(query)
                 || $0.author.lowercased().contains(query)
                 || $0.id.lowercased().contains(query)
@@ -104,7 +105,11 @@ struct HistoryWorkspaceView: View {
             revisions: filteredRevisions,
             supportsGraph: supportsGraph,
             supportsBranches: supportsBranches,
-            issues: (model.workspace?.issues ?? []) + (model.snapshot?.issues ?? []),
+            fileHistoryPath: model.historyFilePath,
+            fileHistoryReference: model.historyFileReference,
+            usesGitIdentifiers: model.selectedBinding?.providerID == .git,
+            syncStatus: model.historySyncStatus,
+            issues: (model.workspace?.issues ?? []) + model.historyIssues,
             bindings: model.workspace?.bindings ?? [],
             selectedBindingID: bindingSelection,
             selectedRevisionID: Binding(
@@ -115,10 +120,14 @@ struct HistoryWorkspaceView: View {
             selectedReference: model.historyReference,
             references: model.snapshot?.branches ?? [],
             selectReference: model.selectHistoryReference,
-            drawsGraphConnections: revisionSearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            chooseFileHistory: model.chooseFileHistory,
+            clearFileHistory: model.clearFileHistory,
+            drawsGraphConnections: !isFileHistory && revisionSearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
             palette: palette
         )
     }
+
+    private var isFileHistory: Bool { model.historyFilePath != nil }
 }
 
 private struct HistoryBranchSidebar: View {
@@ -193,6 +202,10 @@ private struct HistoryRevisionTable: View {
     let revisions: [Revision]
     let supportsGraph: Bool
     let supportsBranches: Bool
+    let fileHistoryPath: String?
+    let fileHistoryReference: String?
+    let usesGitIdentifiers: Bool
+    let syncStatus: RepositorySyncStatus?
     let issues: [String]
     let bindings: [RepositoryBinding]
     @Binding var selectedBindingID: String?
@@ -201,6 +214,8 @@ private struct HistoryRevisionTable: View {
     let selectedReference: String?
     let references: [BranchReference]
     let selectReference: (String?) -> Void
+    let chooseFileHistory: () -> Void
+    let clearFileHistory: () -> Void
     let drawsGraphConnections: Bool
     let palette: AppPalette
 
@@ -236,8 +251,20 @@ private struct HistoryRevisionTable: View {
                         .frame(width: 132)
                         .help("筛选历史范围，不会切换工作副本分支")
                     }
+                    Button(action: chooseFileHistory) {
+                        Label("文件历史", systemImage: "doc.text.magnifyingglass").labelStyle(.iconOnly)
+                    }
+                    .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
+                    .accessibilityLabel("选择文件查看历史")
+                    .help("选择当前工作区中的一个文件，查看其提交历史")
                 }
                 .padding(.horizontal, 14).frame(height: 48).background(palette.surface)
+                if let fileHistoryPath {
+                    fileHistoryScope(path: fileHistoryPath, reference: fileHistoryReference)
+                }
+                if let syncStatus {
+                    syncSummary(syncStatus)
+                }
                 tableHeader(graphWidth: graphWidth, showAuthor: showAuthor, showDate: showDate, showHash: showHash)
                     .background(palette.secondaryText.opacity(0.045))
                 if revisions.isEmpty {
@@ -258,7 +285,13 @@ private struct HistoryRevisionTable: View {
                         ForEach(Array(revisions.enumerated()), id: \.element.id) { index, revision in
                             HStack(spacing: 8) {
                                 if supportsGraph { HistoryGraphCell(row: graphRows[index], accent: palette.accent, width: graphWidth, drawsConnections: drawsGraphConnections) }
-                                Text(revision.subject).lineLimit(1).layoutPriority(2).frame(maxWidth: .infinity, alignment: .leading)
+                                HStack(spacing: 6) {
+                                    Text(revision.subject).lineLimit(1).layoutPriority(2)
+                                    if let state = syncStatus?.states[revision.id], state != .synchronized {
+                                        RevisionSyncBadge(state: state, palette: palette)
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
                                 if showAuthor { Text(revision.author).lineLimit(1).frame(width: 92, alignment: .leading) }
                                 if showDate { Text(revision.date.formatted(date: .numeric, time: .shortened)).lineLimit(1).frame(width: 126, alignment: .leading) }
                                 if showHash { Text(revision.shortID).font(.system(.caption, design: .monospaced)).foregroundStyle(palette.secondaryText).frame(width: 70, alignment: .leading) }
@@ -281,6 +314,75 @@ private struct HistoryRevisionTable: View {
         .background(palette.surface)
     }
 
+    private func fileHistoryScope(path: String, reference: String?) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "doc.text")
+                .foregroundStyle(palette.accent)
+            Text("文件历史")
+                .font(.caption.weight(.semibold))
+            Text(path)
+                .font(.system(.caption, design: .monospaced))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .foregroundStyle(palette.secondaryText)
+            if let reference, !reference.isEmpty {
+                Text("截至 \(shortReference(reference))")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(palette.secondaryText)
+                    .lineLimit(1)
+                    .help("文件历史截至修订 \(reference)")
+            }
+            Spacer(minLength: 6)
+            Button("显示全部历史", action: clearFileHistory)
+                .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
+                .help("关闭文件历史范围，返回仓库提交历史")
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 31)
+        .background(palette.selection.opacity(0.42))
+        .help(path)
+    }
+
+    private func shortReference(_ reference: String) -> String {
+        // 只缩写完整提交哈希；分支名和标签保留原文，交由布局自然省略。
+        reference.count >= 40 && reference.allSatisfy(\.isHexDigit)
+            ? String(reference.prefix(10)) : reference
+    }
+
+    private func syncSummary(_ status: RepositorySyncStatus) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: syncSymbol(for: status))
+                .foregroundStyle(syncColor(for: status))
+            Text(status.summary)
+                .font(.caption.weight(.medium))
+                .lineLimit(1)
+            if !status.detail.isEmpty {
+                Text(status.detail)
+                    .font(.caption)
+                    .foregroundStyle(palette.secondaryText)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 27)
+        .background(palette.sidebar.opacity(0.55))
+        .help(status.detail.isEmpty ? status.summary : "\(status.summary)\n\(status.detail)")
+    }
+
+    private func syncSymbol(for status: RepositorySyncStatus) -> String {
+        if status.states.values.contains(.uncertain) { return "questionmark.circle" }
+        if status.states.isEmpty, status.incomingCount == nil, status.outgoingCount == nil { return "questionmark.circle" }
+        if (status.incomingCount ?? 0) > 0 { return "arrow.down.circle" }
+        if (status.outgoingCount ?? 0) > 0 { return "arrow.up.circle" }
+        return "checkmark.circle"
+    }
+
+    private func syncColor(for status: RepositorySyncStatus) -> Color {
+        (status.states.values.contains(.uncertain) || (status.states.isEmpty && status.incomingCount == nil && status.outgoingCount == nil))
+            ? palette.secondaryText : palette.accent
+    }
+
     @ViewBuilder private var bindingSource: some View {
         if bindings.count > 1 {
             WorkbenchSegmentedPicker(title: "版本控制", selection: $selectedBindingID,
@@ -300,7 +402,7 @@ private struct HistoryRevisionTable: View {
             Text("提交说明").frame(maxWidth: .infinity, alignment: .leading)
             if showAuthor { Text("作者").frame(width: 92, alignment: .leading) }
             if showDate { Text("日期").frame(width: 126, alignment: .leading) }
-            if showHash { Text(supportsGraph ? "哈希" : "修订号").frame(width: 70, alignment: .leading) }
+            if showHash { Text(usesGitIdentifiers ? "哈希" : "修订号").frame(width: 70, alignment: .leading) }
         }
         .font(.caption.weight(.semibold)).foregroundStyle(palette.secondaryText)
         .padding(.horizontal, 10).padding(.vertical, 7)
@@ -325,6 +427,12 @@ private struct HistoryRevisionInspector: View {
                 HStack(spacing: 8) {
                     Text(revision.shortID).font(.system(.caption, design: .monospaced)).foregroundStyle(palette.accent)
                     Text(revision.author).lineLimit(1).font(.caption).foregroundStyle(palette.secondaryText)
+                    if let state = model.historySyncStatus?.states[revision.id], state != .synchronized {
+                        Label(state.title, systemImage: syncSymbol(for: state))
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(state == .uncertain ? palette.secondaryText : palette.accent)
+                            .help(syncHelp(for: state))
+                    }
                 }
                 if !isCompact {
                     Label(revision.date.formatted(date: .abbreviated, time: .shortened), systemImage: "calendar")
@@ -345,7 +453,8 @@ private struct HistoryRevisionInspector: View {
                         .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
                         .disabled(true).help("AI 审查当前不可用")
                 }
-                Text("变更的文件  \(model.revisionFiles.count)").font(.subheadline.weight(.semibold)).padding(.top, 8)
+                Text(model.historyFilePath == nil ? "变更的文件  \(model.revisionFiles.count)" : "历史文件")
+                    .font(.subheadline.weight(.semibold)).padding(.top, 8)
                 revisionFiles
             } else {
                 ContentUnavailableView("选择一个提交", systemImage: "arrowshape.turn.up.right")
@@ -359,16 +468,34 @@ private struct HistoryRevisionInspector: View {
     }
 
     private var selectedRevision: Revision? {
-        model.snapshot?.revisions.first { $0.id == model.selectedRevisionID }
+        model.historyRevisions.first { $0.id == model.selectedRevisionID }
     }
 
     private var issues: [String] {
-        (model.workspace?.issues ?? []) + (model.snapshot?.issues ?? [])
+        (model.workspace?.issues ?? []) + model.historyIssues
     }
 
     private var messageBody: String {
         guard let revision = selectedRevision else { return "" }
         return revision.message.components(separatedBy: .newlines).dropFirst().joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func syncSymbol(for state: RevisionSyncState) -> String {
+        switch state {
+        case .incoming: "arrow.down.circle"
+        case .outgoing: "arrow.up.circle"
+        case .synchronized: "checkmark.circle"
+        case .uncertain: "questionmark.circle"
+        }
+    }
+
+    private func syncHelp(for state: RevisionSyncState) -> String {
+        switch state {
+        case .incoming: "此提交尚未更新到本地"
+        case .outgoing: "此提交尚未推送到上游"
+        case .synchronized: "此提交已同步"
+        case .uncertain: "当前无法确认此提交的同步状态"
+        }
     }
 
     @ViewBuilder
@@ -384,14 +511,29 @@ private struct HistoryRevisionInspector: View {
         })) {
             ForEach(model.revisionFiles) { change in
                 HStack(spacing: 7) {
-                    Text(change.kind.symbol).font(.caption2.weight(.bold)).foregroundStyle(changeColor(change.kind))
-                        .padding(.horizontal, 4).padding(.vertical, 2)
-                        .background(changeColor(change.kind).opacity(0.14), in: Capsule())
-                        .frame(width: 20)
+                    if model.historyFilePath == nil {
+                        Text(change.kind.symbol).font(.caption2.weight(.bold)).foregroundStyle(changeColor(change.kind))
+                            .padding(.horizontal, 4).padding(.vertical, 2)
+                            .background(changeColor(change.kind).opacity(0.14), in: Capsule())
+                            .frame(width: 20)
+                    } else {
+                        Image(systemName: "doc.text")
+                            .font(.caption)
+                            .foregroundStyle(palette.secondaryText)
+                            .frame(width: 20)
+                    }
                     Text(change.name).lineLimit(1)
                     Spacer(minLength: 0)
                 }
                 .tag(Optional(change.path)).help(change.path)
+                .contextMenu {
+                    Button("查看文件历史", systemImage: "clock.arrow.circlepath") {
+                        let entry = model.historyFileEntries.first {
+                            $0.revision.id == model.selectedRevisionID && $0.path == change.path
+                        }
+                        model.showFileHistory(path: change.path, reference: entry?.pegRevision ?? model.selectedRevisionID)
+                    }
+                }
                 .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)
             }
@@ -437,6 +579,48 @@ private struct HistoryIssueNotice: View {
 
     private var summary: String {
         message.split(whereSeparator: \.isNewline).first.map(String.init) ?? "仓库读取失败"
+    }
+}
+
+private struct RevisionSyncBadge: View {
+    let state: RevisionSyncState
+    let palette: AppPalette
+
+    var body: some View {
+        Label(state.title, systemImage: symbol)
+            .labelStyle(.iconOnly)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(color)
+            .frame(width: 18, height: 18)
+            .background(color.opacity(0.11), in: Capsule())
+            .help(helpText)
+            .accessibilityLabel(state.title)
+    }
+
+    private var symbol: String {
+        switch state {
+        case .incoming: "arrow.down"
+        case .outgoing: "arrow.up"
+        case .synchronized: "checkmark"
+        case .uncertain: "questionmark"
+        }
+    }
+
+    private var color: Color {
+        switch state {
+        case .incoming, .outgoing: palette.accent
+        case .synchronized: palette.added
+        case .uncertain: palette.secondaryText
+        }
+    }
+
+    private var helpText: String {
+        switch state {
+        case .incoming: "此提交尚未更新到本地"
+        case .outgoing: "此提交尚未推送到上游"
+        case .synchronized: "此提交已同步"
+        case .uncertain: "当前无法确认此提交的同步状态"
+        }
     }
 }
 
