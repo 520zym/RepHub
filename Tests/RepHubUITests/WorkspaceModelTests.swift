@@ -77,6 +77,131 @@ final class WorkspaceModelTests: XCTestCase {
         XCTAssertTrue(diffs.contains { $0.path == "Sources/App.swift" && $0.revision == nil })
     }
 
+    func testOpeningDualManagedWorkspaceRecordsOneRecentRepository() async throws {
+        let directory = try makeDirectory()
+        let store = RecentRepositoryStore()
+        let git = WorkspaceFixtureProvider(providerID: .git)
+        let svn = WorkspaceFixtureProvider(providerID: .svn)
+        let model = WorkspaceModel(service: RepositoryService(providers: [git, svn]), recentRepositories: store)
+
+        model.open(directory)
+        try await waitUntil { !model.isLoading && model.workspace?.bindings.count == 2 }
+
+        XCTAssertEqual(store.entries.count, 1)
+        XCTAssertEqual(store.entries[0].path, directory.standardizedFileURL.resolvingSymlinksInPath().path)
+        XCTAssertEqual(store.entries[0].providerNames, ["Git 测试适配器", "SVN 测试适配器"])
+    }
+
+    func testReopeningRepositoryMovesItsRecentEntryToFrontWithoutDuplicating() async throws {
+        let firstDirectory = try makeDirectory()
+        let secondDirectory = try makeDirectory()
+        let store = RecentRepositoryStore()
+        let model = WorkspaceModel(service: RepositoryService(providers: [WorkspaceFixtureProvider()]), recentRepositories: store)
+
+        model.open(firstDirectory)
+        try await waitUntil { !model.isLoading && model.workspace?.directory == firstDirectory.standardizedFileURL }
+        model.open(secondDirectory)
+        try await waitUntil { !model.isLoading && model.workspace?.directory == secondDirectory.standardizedFileURL }
+        model.open(firstDirectory)
+        try await waitUntil { !model.isLoading && model.workspace?.directory == firstDirectory.standardizedFileURL }
+
+        XCTAssertEqual(store.entries.map(\.path), [
+            firstDirectory.standardizedFileURL.resolvingSymlinksInPath().path,
+            secondDirectory.standardizedFileURL.resolvingSymlinksInPath().path,
+        ])
+    }
+
+    func testUnmanagedAndDetectionFailureAreNotRecordedAsRecentRepositories() async throws {
+        let unmanagedDirectory = try makeDirectory()
+        let failedDirectory = try makeDirectory()
+        let store = RecentRepositoryStore()
+        let unmanaged = WorkspaceFixtureProvider(detectsRepository: false)
+        let model = WorkspaceModel(service: RepositoryService(providers: [unmanaged]), recentRepositories: store)
+
+        model.open(unmanagedDirectory)
+        try await waitUntil { !model.isLoading && model.workspace?.isUnmanaged == true }
+        XCTAssertTrue(store.entries.isEmpty)
+
+        let failing = WorkspaceFixtureProvider(detectError: true)
+        let failingModel = WorkspaceModel(service: RepositoryService(providers: [failing]), recentRepositories: store)
+        failingModel.open(failedDirectory)
+        try await waitUntil { !failingModel.isLoading && !(failingModel.workspace?.issues.isEmpty ?? true) }
+        XCTAssertTrue(store.entries.isEmpty)
+    }
+
+    func testOpeningMissingRecentRepositoryPreservesCurrentWorkspaceAndHistory() async throws {
+        let directory = try makeDirectory()
+        let store = RecentRepositoryStore()
+        let model = WorkspaceModel(service: RepositoryService(providers: [WorkspaceFixtureProvider()]), recentRepositories: store)
+        model.open(directory)
+        try await waitUntil { !model.isLoading && model.workspace?.directory == directory.standardizedFileURL }
+        model.setHistoryVisible(true)
+        try await waitUntil { model.selectedRevisionID != nil }
+        let openedWorkspace = try XCTUnwrap(model.workspace)
+        let historyID = model.selectedRevisionID
+        let originalEntries = store.entries
+        let missing = RecentRepository(
+            path: directory.appendingPathComponent("missing-repository", isDirectory: true).path,
+            name: "missing-repository", providerNames: ["Git"], lastOpenedAt: .now
+        )
+
+        model.openRecentRepository(missing)
+
+        XCTAssertEqual(model.workspace?.id, openedWorkspace.id)
+        XCTAssertEqual(model.selectedRevisionID, historyID)
+        XCTAssertEqual(store.entries, originalEntries)
+        XCTAssertNotNil(model.recentRepositoryError)
+        XCTAssertTrue(model.recentRepositoryError?.contains("不存在或无法访问") == true)
+    }
+
+    func testOpeningRecentDirectoryWithoutVersionControlPreservesCurrentSelectionAndDiff() async throws {
+        let managedDirectory = try makeDirectory()
+        let staleDirectory = try makeDirectory()
+        let store = RecentRepositoryStore()
+        let provider = WorkspaceFixtureProvider(unmanagedDirectories: [staleDirectory.standardizedFileURL.path])
+        let model = WorkspaceModel(service: RepositoryService(providers: [provider]), recentRepositories: store)
+
+        model.open(managedDirectory)
+        try await waitUntil { model.patch?.text == "working:Sources/App.swift" && !model.isLoading }
+        let currentWorkspace = try XCTUnwrap(model.workspace)
+        let currentPath = model.selectedPath
+        let currentPatch = model.patch
+        let staleBinding = RepositoryBinding(providerID: .git, providerName: "Git 测试适配器",
+                                             root: staleDirectory, capabilities: [.status])
+        store.record(Workspace(directory: staleDirectory, bindings: [staleBinding], issues: []))
+        let staleRepository = try XCTUnwrap(store.entries.first { $0.path == staleDirectory.standardizedFileURL.path })
+        let entriesBefore = store.entries
+
+        model.openRecentRepository(staleRepository)
+        try await waitUntil { !model.isLoading && model.recentRepositoryError != nil }
+
+        XCTAssertEqual(model.workspace?.id, currentWorkspace.id)
+        XCTAssertEqual(model.selectedPath, currentPath)
+        XCTAssertEqual(model.patch?.text, currentPatch?.text)
+        XCTAssertEqual(model.patch?.isTruncated, currentPatch?.isTruncated)
+        XCTAssertEqual(store.entries, entriesBefore)
+        XCTAssertTrue(model.recentRepositoryError?.contains("无法识别为受版本控制的仓库") == true)
+    }
+
+    func testLateOpenDoesNotRecordSupersededRepository() async throws {
+        let slowDirectory = try makeDirectory()
+        let currentDirectory = try makeDirectory()
+        let log = WorkspaceInvocationLog()
+        let provider = WorkspaceFixtureProvider(
+            detectDelays: [slowDirectory.standardizedFileURL.path: 180_000_000], log: log
+        )
+        let store = RecentRepositoryStore()
+        let model = WorkspaceModel(service: RepositoryService(providers: [provider]), recentRepositories: store)
+
+        model.open(slowDirectory)
+        try await waitForDetectionStart(slowDirectory, log: log)
+        model.open(currentDirectory)
+        try await waitUntil { !model.isLoading && model.workspace?.directory == currentDirectory.standardizedFileURL }
+        try await Task.sleep(nanoseconds: 240_000_000)
+
+        XCTAssertEqual(store.entries.map(\.path), [currentDirectory.standardizedFileURL.resolvingSymlinksInPath().path])
+    }
+
     func testSelectingHistoryRevisionLoadsItsPreferredFileWithSameRevision() async throws {
         let provider = WorkspaceFixtureProvider()
         let model = WorkspaceModel(service: RepositoryService(providers: [provider]))
@@ -398,6 +523,15 @@ final class WorkspaceModelTests: XCTestCase {
         XCTAssertTrue(started, "等待迟到响应开始超时")
     }
 
+    private func waitForDetectionStart(_ directory: URL, log: WorkspaceInvocationLog) async throws {
+        let deadline = DispatchTime.now().uptimeNanoseconds + 1_000_000_000
+        while !(await log.didStartDetection(at: directory.standardizedFileURL.path)) && DispatchTime.now().uptimeNanoseconds < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let started = await log.didStartDetection(at: directory.standardizedFileURL.path)
+        XCTAssertTrue(started, "等待打开仓库识别开始超时")
+    }
+
     private func waitForOperationStart(_ operation: RepositoryOperationKind, log: WorkspaceInvocationLog) async throws {
         let deadline = DispatchTime.now().uptimeNanoseconds + 1_000_000_000
         while !(await log.didStartOperation(operation)) && DispatchTime.now().uptimeNanoseconds < deadline {
@@ -431,19 +565,33 @@ private struct WorkspaceFixtureProvider: RepositoryOperationProvider, Repository
     let operationDelay: UInt64
     let fileHistoryDelays: [String: UInt64]
     let fileHistoryFailures: Set<String>
+    let detectsRepository: Bool
+    let detectError: Bool
+    let detectDelays: [String: UInt64]
+    let unmanagedDirectories: Set<String>
 
-    init(providerID: ProviderID = .git, revisions: [Revision]? = nil, delays: [String: UInt64] = [:], fileHistoryDelays: [String: UInt64] = [:], fileHistoryFailures: Set<String> = [], operationDelay: UInt64 = 0, log: WorkspaceInvocationLog = WorkspaceInvocationLog()) {
+    init(providerID: ProviderID = .git, revisions: [Revision]? = nil, delays: [String: UInt64] = [:], fileHistoryDelays: [String: UInt64] = [:], fileHistoryFailures: Set<String> = [], operationDelay: UInt64 = 0, detectsRepository: Bool = true, detectError: Bool = false, detectDelays: [String: UInt64] = [:], unmanagedDirectories: Set<String> = [], log: WorkspaceInvocationLog = WorkspaceInvocationLog()) {
         self.id = providerID
         self.revisions = revisions ?? [Revision(id: providerID == .svn ? "r1" : "a1b2c3d4", author: "zym", date: .distantPast, message: "feat: 历史读取")]
         self.delays = delays
         self.operationDelay = operationDelay
         self.fileHistoryDelays = fileHistoryDelays
         self.fileHistoryFailures = fileHistoryFailures
+        self.detectsRepository = detectsRepository
+        self.detectError = detectError
+        self.detectDelays = detectDelays
+        self.unmanagedDirectories = unmanagedDirectories
         self.log = log
     }
 
     func detect(at directory: URL) async throws -> RepositoryBinding? {
-        RepositoryBinding(
+        await log.recordDetectionStart(at: directory.standardizedFileURL.path)
+        if let delay = detectDelays[directory.standardizedFileURL.path] {
+            await uncancellableDelay(nanoseconds: delay)
+        }
+        if detectError { throw VersionControlError.toolUnavailable("测试检测失败") }
+        guard detectsRepository, !unmanagedDirectories.contains(directory.standardizedFileURL.path) else { return nil }
+        return RepositoryBinding(
             providerID: id,
             providerName: displayName,
             root: directory,
@@ -547,6 +695,7 @@ private actor WorkspaceInvocationLog {
     private var fileHistory: [String] = []
     private var startedFileHistory: [String] = []
     private var fileHistoryDiffs: [FileHistoryEntry] = []
+    private var detectionStarts: [String] = []
 
     func recordChangedFiles(_ revision: String) { changedFiles.append(revision) }
     func recordHistory(_ reference: String?) { history.append(reference) }
@@ -556,6 +705,7 @@ private actor WorkspaceInvocationLog {
     func recordFileHistoryStart(_ path: String) { startedFileHistory.append(path) }
     func recordFileHistory(_ path: String) { fileHistory.append(path) }
     func recordFileHistoryDiff(_ entry: FileHistoryEntry) { fileHistoryDiffs.append(entry) }
+    func recordDetectionStart(at path: String) { detectionStarts.append(path) }
     func changedFileRequests() -> [String] { changedFiles }
     func historyReferences() -> [String?] { history }
     func didStartDiff(_ path: String) -> Bool { startedDiffs.contains { $0.path == path } }
@@ -564,6 +714,7 @@ private actor WorkspaceInvocationLog {
     func didStartFileHistory(_ path: String) -> Bool { startedFileHistory.contains(path) }
     func fileHistoryRequests() -> [String] { fileHistory }
     func fileHistoryDiffRequests() -> [FileHistoryEntry] { fileHistoryDiffs }
+    func didStartDetection(at path: String) -> Bool { detectionStarts.contains(path) }
     func didStartOperation(_ operation: RepositoryOperationKind) -> Bool {
         performedOperations.contains { $0.0.rawValue == operation.rawValue }
     }

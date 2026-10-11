@@ -23,7 +23,8 @@ struct RepHubApp: App {
         self.aiService = service
         _aiSettings = State(initialValue: settings)
         _workspace = State(initialValue: WorkspaceModel(service: RepositoryService(providers: [GitProvider(), SVNProvider()]),
-                                                        aiSettings: settings, aiService: service))
+                                                        aiSettings: settings, aiService: service,
+                                                        recentRepositories: RecentRepositoryStore(defaults: .standard)))
     }
 
     var body: some Scene {
@@ -39,10 +40,12 @@ struct RepHubApp: App {
                 Button("打开仓库…", action: workspace.showRepositoryAcquisition)
                     .keyboardShortcut("o")
                     .disabled(workspace.isOperating)
+                RecentRepositoriesMenu(model: workspace)
             }
             CommandMenu("项目") {
                 Button("打开仓库…", action: workspace.showRepositoryAcquisition)
                     .disabled(workspace.isOperating)
+                RecentRepositoriesMenu(model: workspace)
                 Divider()
                 Button("刷新仓库", action: workspace.refresh)
                     .keyboardShortcut("r")

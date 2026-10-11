@@ -24,7 +24,7 @@ public struct WorkspaceView: View {
         let palette = appearance.palette(for: appearance.preferredColorScheme ?? systemColorScheme)
         GeometryReader { geometry in
             VStack(spacing: 0) {
-                if model.workspace == nil || model.workspace?.isUnmanaged == true {
+                if model.workspace == nil || model.workspace?.bindings.isEmpty == true {
                     welcome(palette: palette)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if section == .history {
@@ -90,13 +90,23 @@ public struct WorkspaceView: View {
                 palette: palette,
                 dismiss: model.dismissRepositoryAcquisition,
                 openLocalFolder: model.chooseFolder,
-                openAcquiredFolder: model.open
+                openAcquiredFolder: model.open,
+                recentRepositories: model.recentRepositories,
+                openRecentRepository: model.openRecentRepository
             )
         }
         .sheet(isPresented: $model.showsAIReview) {
             if let ai = model.aiReview {
                 AIRunView(model: ai, palette: palette, dismiss: { model.showsAIReview = false })
             }
+        }
+        .alert("无法打开仓库", isPresented: Binding(
+            get: { model.recentRepositoryError != nil },
+            set: { if !$0 { model.recentRepositoryError = nil } }
+        )) {
+            Button("好", role: .cancel) { model.recentRepositoryError = nil }
+        } message: {
+            Text(model.recentRepositoryError ?? "")
         }
     }
 
@@ -134,6 +144,7 @@ public struct WorkspaceView: View {
             HStack(spacing: 12) {
                 Menu {
                     Button("打开仓库…", action: model.showRepositoryAcquisition)
+                    RecentRepositoriesMenu(model: model)
                     if let workspace = model.workspace {
                         Divider()
                         Text(workspace.directory.path)
@@ -276,13 +287,25 @@ public struct WorkspaceView: View {
     }
 
     private func welcome(palette: AppPalette) -> some View {
-        ContentUnavailableView {
-            Label(model.workspace?.isUnmanaged == true ? "此目录尚未受版本控制" : "打开一个工作区", systemImage: "folder")
-        } description: {
-            Text(model.errorMessage ?? (model.workspace?.isUnmanaged == true ? "未识别到 Git 或 Subversion 工作副本。初始化功能尚未接入。" : "从「项目」菜单打开本地 Git 或 Subversion 仓库。"))
-        } actions: {
-            Button("打开仓库…", action: model.showRepositoryAcquisition).buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
+        let issues = model.workspace?.issues ?? []
+        let description = model.errorMessage ?? (!issues.isEmpty ? issues.joined(separator: "\n") :
+            (model.workspace?.isUnmanaged == true ? "未识别到 Git 或 Subversion 工作副本。初始化功能尚未接入。" : "从「项目」菜单打开仓库，或继续最近的工作。"))
+        return VStack(spacing: 24) {
+            ContentUnavailableView {
+                Label(model.workspace?.isUnmanaged == true ? "此目录尚未受版本控制" : "打开一个工作区", systemImage: "folder")
+            } description: {
+                Text(description)
+            } actions: {
+                Button("打开仓库…", action: model.showRepositoryAcquisition).buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            if !model.recentRepositories.entries.isEmpty {
+                RecentRepositoriesView(store: model.recentRepositories, palette: palette,
+                                       open: model.openRecentRepository, maximumHeight: 236)
+                    .frame(width: 560)
+            }
         }
+        .disabled(model.isInteractionLocked)
     }
 }
 

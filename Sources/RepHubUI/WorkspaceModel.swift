@@ -49,6 +49,8 @@ public final class WorkspaceModel {
     public private(set) var operationResult: RepositoryOperationResult?
     public private(set) var isOperationCancelling = false
     public var showsRepositoryAcquisition = false
+    public let recentRepositories: RecentRepositoryStore
+    public var recentRepositoryError: String?
     public var showsAIReview = false
     public let aiReview: AIRunModel?
 
@@ -74,8 +76,10 @@ public final class WorkspaceModel {
         let preview: WorkspaceFilePreview?
     }
 
-    public init(service: RepositoryService, aiSettings: AISettingsStore? = nil, aiService: AIService? = nil) {
+    public init(service: RepositoryService, aiSettings: AISettingsStore? = nil, aiService: AIService? = nil,
+                recentRepositories: RecentRepositoryStore = RecentRepositoryStore()) {
         self.service = service
+        self.recentRepositories = recentRepositories
         self.repositoryAcquisition = RepositoryAcquisitionModel(service: service)
         if let aiSettings, let aiService {
             self.aiReview = AIRunModel(settings: aiSettings, service: aiService)
@@ -203,14 +207,37 @@ public final class WorkspaceModel {
         showsRepositoryAcquisition = false
     }
 
+    public func openRecentRepository(_ repository: RecentRepository) {
+        guard !isInteractionLocked, !repositoryAcquisition.isBusy else { return }
+        showsRepositoryAcquisition = false
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: repository.path, isDirectory: &isDirectory),
+              isDirectory.boolValue, FileManager.default.isReadableFile(atPath: repository.path) else {
+            recentRepositoryError = "文件夹不存在或无法访问：\n\(repository.path)\n\n请确认磁盘已连接，或从打开入口重新选择位置。可以在最近打开列表中移除此记录。"
+            return
+        }
+        recentRepositoryError = nil
+        openWorkspace(repository.directory, requiresManagedRepository: true)
+    }
+
     public func open(_ url: URL) {
+        openWorkspace(url, requiresManagedRepository: false)
+    }
+
+    private func openWorkspace(_ url: URL, requiresManagedRepository: Bool) {
         guard !isInteractionLocked else { return }
-        invalidateReadingCache()
-        fileBrowser.setRoot(nil)
         start { [service] token in
             let workspace = try await service.open(directory: url)
             guard self.accepts(token) else { return }
+            if requiresManagedRepository, workspace.bindings.isEmpty {
+                let reason = workspace.issues.isEmpty ? "此文件夹已无法识别为受版本控制的仓库。" : workspace.issues.joined(separator: "\n")
+                self.recentRepositoryError = "\(reason)\n\n\(url.path)\n\n当前工作区保持打开，可以移除此记录或重新选择仓库位置。"
+                return
+            }
+            self.invalidateReadingCache()
+            self.fileBrowser.setRoot(nil)
             self.workspace = workspace
+            self.recentRepositories.record(workspace)
             self.snapshots = [:]
             self.patch = nil
             self.selectedPath = nil

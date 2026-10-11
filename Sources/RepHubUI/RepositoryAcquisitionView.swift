@@ -1,6 +1,7 @@
 import SwiftUI
 import DesignSystem
 import VersionControlCore
+import RepositoryApplication
 
 /// 统一打开入口：已有本地目录、Git 克隆和 SVN 子目录检出在同一个工作流中完成。
 struct RepositoryAcquisitionView: View {
@@ -9,6 +10,8 @@ struct RepositoryAcquisitionView: View {
     let dismiss: () -> Void
     let openLocalFolder: () -> Void
     let openAcquiredFolder: (URL) -> Void
+    let recentRepositories: RecentRepositoryStore
+    let openRecentRepository: (RecentRepository) -> Void
 
     @State private var source: Source = .local
 
@@ -72,6 +75,11 @@ struct RepositoryAcquisitionView: View {
                 }
                 .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
                 Spacer()
+            }
+            if !recentRepositories.entries.isEmpty {
+                RecentRepositoriesView(store: recentRepositories, palette: palette, open: openRecentRepository)
+                    .padding(.top, 8)
+                    .disabled(model.isBusy)
             }
         }
         .padding(22).frame(minHeight: 205, alignment: .topLeading)
