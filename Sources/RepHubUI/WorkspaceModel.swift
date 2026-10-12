@@ -59,8 +59,11 @@ public final class WorkspaceModel {
     public let monitor: WorkspaceMonitor?
     public let repositoryManagement: RepositoryManagementModel
     public let repositorySetup: RepositorySetupModel
+    /// 可选注入，保持旧的工作区读取与测试构造方式兼容。
+    public let repositoryMigration: RepositoryMigrationModel?
     public var showsRepositoryManagement = false
     public var showsRepositorySetup = false
+    public var showsRepositoryMigration = false
     public var recentRepositoryError: String?
     public var showsAIReview = false
     public let aiReview: AIRunModel?
@@ -89,13 +92,15 @@ public final class WorkspaceModel {
 
     public init(service: RepositoryService, aiSettings: AISettingsStore? = nil, aiService: AIService? = nil,
                 recentRepositories: RecentRepositoryStore = RecentRepositoryStore(),
-                workspaceLinks: WorkspaceLinkStore = WorkspaceLinkStore(), monitor: WorkspaceMonitor? = nil) {
+                workspaceLinks: WorkspaceLinkStore = WorkspaceLinkStore(), monitor: WorkspaceMonitor? = nil,
+                migrationService: RepositoryMigrationService? = nil) {
         self.service = service
         self.recentRepositories = recentRepositories
         self.workspaceLinks = workspaceLinks
         self.monitor = monitor
         self.repositoryManagement = RepositoryManagementModel(service: service)
         self.repositorySetup = RepositorySetupModel(service: service)
+        self.repositoryMigration = migrationService.map(RepositoryMigrationModel.init(service:))
         self.repositoryAcquisition = RepositoryAcquisitionModel(service: service)
         if let aiSettings, let aiService {
             self.aiReview = AIRunModel(settings: aiSettings, service: aiService)
@@ -130,7 +135,7 @@ public final class WorkspaceModel {
     /// 供应用退出保护使用；操作后的状态核对同样属于进行中状态。
     public var isOperating: Bool {
         isOperationInProgress || repositoryAcquisition.isAcquiring || repositoryCommit.isBusy
-            || repositoryManagement.isBusy || repositorySetup.isBusy
+            || repositoryManagement.isBusy || repositorySetup.isBusy || repositoryMigration?.isBusy == true
     }
     public var isInteractionLocked: Bool { isOperating }
     public var operationRefreshIssues: [String] {
@@ -201,6 +206,15 @@ public final class WorkspaceModel {
         guard !isInteractionLocked, let workspace, workspace.isUnmanaged else { return }
         repositorySetup.prepare(directory: workspace.directory)
         showsRepositorySetup = true
+    }
+
+    public func showRepositoryMigration() {
+        guard !isInteractionLocked, let migration = repositoryMigration else { return }
+        migration.reset()
+        if let svn = workspace?.bindings.first(where: { $0.providerID == .svn }), let remote = svn.remoteURL {
+            migration.prefillSource(url: remote)
+        }
+        showsRepositoryMigration = true
     }
 
     public func applyManagementResponse(_ response: WorkspaceManagementResult) {
@@ -294,6 +308,7 @@ public final class WorkspaceModel {
         fileBrowser.setRoot(nil)
         showsRepositoryManagement = false
         showsRepositorySetup = false
+        showsRepositoryMigration = false
         isHistoryVisible = false
     }
 
@@ -895,6 +910,7 @@ public final class WorkspaceModel {
 
     /// 取消并不回滚已由 Git/SVN 落地的步骤；仍等待服务层刷新真实状态。
     public func cancelOperation() {
+        if repositoryMigration?.isBusy == true { repositoryMigration?.cancel(); return }
         if repositoryManagement.isBusy { repositoryManagement.cancel(); return }
         if repositorySetup.isExecuting { repositorySetup.cancel(); return }
         if repositoryCommit.isBusy { repositoryCommit.cancel(); return }

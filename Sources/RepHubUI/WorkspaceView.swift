@@ -114,6 +114,18 @@ public struct WorkspaceView: View {
                 model.open(result.directory)
             })
         }
+        .sheet(isPresented: $model.showsRepositoryMigration, onDismiss: { model.repositoryMigration?.dismiss() }) {
+            if let migration = model.repositoryMigration {
+                RepositoryMigrationView(model: migration, palette: palette, dismiss: {
+                    migration.dismiss()
+                    model.showsRepositoryMigration = false
+                }, openResult: { result in
+                    migration.dismiss()
+                    model.showsRepositoryMigration = false
+                    model.open(result)
+                })
+            }
+        }
         .sheet(isPresented: $model.showsAIReview) {
             if let ai = model.aiReview {
                 AIRunView(model: ai, palette: palette, dismiss: { model.showsAIReview = false })
@@ -177,6 +189,9 @@ public struct WorkspaceView: View {
                             Button("初始化版本控制…", action: model.prepareSetup)
                         } else {
                             Button("管理当前仓库…", action: model.prepareManagement)
+                            if model.repositoryMigration != nil {
+                                Button("迁移仓库…", action: model.showRepositoryMigration)
+                            }
                             Button("关联本地工作副本…", action: model.chooseLinkedFolder)
                             if !workspace.linkedDirectories.isEmpty {
                                 Menu("已关联的工作副本") {

@@ -21,6 +21,7 @@
 - 工作区支持按文件提交到 Git、SVN 或两个已识别目标。每个目标独立选择文件、预览最终差异与填写多行说明，分别保留结果并可跳转历史。Git 仅创建本地提交，未选暂存内容保留。详见 [提交代码](docs/committing.md)。
 - 未受管理目录可单选初始化 Git，或以“导入到新的 SVN 远端目录 → 校验检出 → 保留原目录备份”的方式接入 SVN；不会把 SVN 导入伪装成本地初始化。
 - “仓库操作与版本比较”提供 Git 的当前仓库远端/提交身份配置、独立推送、按文件暂存/取消暂存/暂存差异、创建/切换/合并分支、冲突标记解决，以及 Git 提交与 SVN 修订的两版本比较。关联目录可同项目显示，写操作始终明确到一个来源。详见 [初始化、管理与关联工作副本](docs/repository-management.md)。
+- “项目 → 迁移仓库…”提供首版 SVN 指定目录到空 Git 仓库的转换：先固定来源修订并读取可导出的线性历史，或由用户明确选择单快照；再在独立目录逐修订生成 Git 对象并核对，展示文件、源／目标内容、生成提交差异、作者映射和修订映射。只有用户在预览中点击发布时才推送到目标分支；发布前再次确认目标没有引用，并以目标分支不存在作为条件。原 SVN 工作副本不会修改。空目录、SVN 属性和 `svn:externals` 不会自动映射；单个 blob 超过 16 MiB 时停止核对和发布。详见 [仓库迁移设计](docs/repository-migration.md)。
 - 项目打开期间可按 15／30／60 秒或暂停检查关联来源的本地状态；监控只提示刷新，不会自动 fetch、update 或提交，退出应用后停止。手动检查即使应用处于后台也可执行，但仍避开仓库写操作和正在展示的工作流；界面显示最近检查时间、进行状态和按来源的读取错误。
 - 应用采用最终选定的“翡翠分支”图标，打包时生成标准 macOS 图标资源。
 - AI 场景支持模型 API（Chat Completions、OpenAI Responses、Anthropic Messages）、Codex CLI、Claude Code。连接与提示词分别配置，密钥使用 macOS 钥匙串；按 Git / SVN 所选文件生成提交说明，或审查工作区和历史提交，支持取消及结果过期核对。详见 [AI 场景与连接](docs/ai.md)。
@@ -50,14 +51,14 @@ open build/RepHub.app
 | VersionControlCore | 提供者契约、能力、仓库 / 文件 / 修订模型 |
 | ToolExecution | 无 shell 的参数数组执行、工具定位、输出上限与超时取消 |
 | GitAdapter / SVNAdapter | 具体命令构造和输出解析 |
-| RepositoryApplication | 多提供者识别、读取、写操作互斥、多目标提交与全绑定刷新，只依赖契约 |
+| RepositoryApplication | 多提供者识别、读取、写操作互斥、多目标提交、迁移编排与全绑定刷新，只依赖契约 |
 | DesignSystem | 独立的应用主题、代码配色、外观模式及持久化 |
 | AICore / AIApplication | 独立 AI 契约、连接及场景配置、凭据引用与执行编排 |
 | AIAdapters | Chat Completions、OpenAI Responses、Anthropic Messages、Codex / Claude CLI 及 macOS 钥匙串适配 |
 | RepHubUI | 原生工作区、差异、历史图与设置交互 |
 | RepHubApp | 窗口、菜单、依赖组装 |
 
-更新测试在独立 Git / file:// SVN 仓库中执行，自动化测试使用隔离 HOME 和工具配置，不使用业务仓库。`python3 scripts/create-update-fixtures.py` 可建立可重复的原生界面验收样本，所有远端和副本均位于 `系统临时目录/RepHub-UpdateFixtures/<uuid>`。首发剩余能力的定向验证记录见[原生验证记录](docs/native-verification.md)；原生架构与后续流程边界见 [架构说明](docs/native-architecture.md)，完整目标见 [需求](docs/requirements.md)。
+更新和迁移测试只在独立 Git / file:// SVN 仓库中执行，自动化测试使用隔离 HOME 和工具配置，不使用业务仓库。`python3 scripts/create-update-fixtures.py` 可建立可重复的原生界面验收样本，所有远端和副本均位于 `系统临时目录/RepHub-UpdateFixtures/<uuid>`。首发剩余能力的定向验证记录见[原生验证记录](docs/native-verification.md)；原生架构与后续流程边界见 [架构说明](docs/native-architecture.md)，完整目标见 [需求](docs/requirements.md)。
 
 文件历史和同步状态的界面样本使用 `python3 scripts/create-history-fixtures.py` 创建，位于 `系统临时目录/RepHub-HistoryFixtures/<uuid>`；包含 Git 分叉与中文改名文件，以及 SVN 待更新、改名和混合修订样本。
 

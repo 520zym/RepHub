@@ -1188,7 +1188,7 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
                 throw VersionControlError.invalidData("无法读取选定 SVN 目录在固定版本 r\(anchor) 的提交上下文。")
             }
             let revision = try migrationSnapshotRevision(anchor: anchor, context: log)
-            var warnings = migrationWarnings()
+            var warnings = migrationWarnings(mode: mode)
             if revision.author.isEmpty {
                 warnings.append("SVN 快照上下文未包含作者；发布前需为该提交指定 Git 作者。")
             }
@@ -1204,7 +1204,7 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
             guard !revisions.isEmpty else {
                 throw VersionControlError.invalidData("SVN 目录没有可迁移的提交历史。")
             }
-            var warnings = migrationWarnings()
+            var warnings = migrationWarnings(mode: mode)
             if revisions.contains(where: { $0.author.isEmpty }) {
                 warnings.append("部分 SVN 提交未包含作者；发布前需为这些提交指定 Git 作者。")
             }
@@ -1359,9 +1359,11 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         "\(address)@\(normalizedRevision(pegRevision))"
     }
 
-    private func migrationWarnings() -> [String] {
+    private func migrationWarnings(mode: MigrationMode) -> [String] {
         [
-            "仅迁移当前账号在所选 SVN 目录可读取的线性历史；服务端权限或保留策略导致不可读取的历史不会被伪称已迁移。跨目录复制、改名或删除导致任一历史修订无法导出时会停止，不会跳过。",
+            mode == .snapshot
+                ? "本次仅迁移固定修订的代码快照，生成一个新的 Git 初始提交，不包含原 SVN 历史。"
+                : "仅迁移当前账号在所选 SVN 目录可读取的线性历史；服务端权限或保留策略导致不可读取的历史不会被伪称已迁移。跨目录复制、改名或删除导致任一历史修订无法导出时会停止，不会跳过。",
             "SVN 的自定义属性、锁、权限与目录属性不能完整映射到 Git；可执行位和符号链接由 SVN 导出结果保留。",
             "SVN externals 不会随迁移导出；请在预览中单独处理外部依赖。",
             "迁移过程中本地未提交修改不属于远端 SVN 历史，不会被包含。"

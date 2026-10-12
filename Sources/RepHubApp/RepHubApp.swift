@@ -22,13 +22,16 @@ struct RepHubApp: App {
         let service = AIService(providers: [OpenAICompatibleProvider(), OpenAIResponsesProvider(), AnthropicMessagesProvider(),
                                             CLIProvider(kind: .codexCLI), CLIProvider(kind: .claudeCLI)], secrets: secrets)
         self.aiService = service
-        let repositories = RepositoryService(providers: [GitProvider(), SVNProvider()])
+        let svn = SVNProvider()
+        let repositories = RepositoryService(providers: [GitProvider(), svn])
+        let migrations = RepositoryMigrationService(sources: [svn], targets: [GitMigrationTargetProvider()])
         _aiSettings = State(initialValue: settings)
         _workspace = State(initialValue: WorkspaceModel(service: repositories,
                                                         aiSettings: settings, aiService: service,
                                                         recentRepositories: RecentRepositoryStore(defaults: .standard),
                                                         workspaceLinks: WorkspaceLinkStore(defaults: .standard),
-                                                        monitor: WorkspaceMonitor(service: repositories, defaults: .standard)))
+                                                        monitor: WorkspaceMonitor(service: repositories, defaults: .standard),
+                                                        migrationService: migrations))
     }
 
     var body: some Scene {
@@ -58,6 +61,8 @@ struct RepHubApp: App {
                     .disabled(workspace.selectedBinding == nil || workspace.isOperating)
                 Button("关联工作副本…", action: workspace.chooseLinkedFolder)
                     .disabled(workspace.workspace?.bindings.isEmpty != false || workspace.isOperating)
+                Button("迁移仓库…", action: workspace.showRepositoryMigration)
+                    .disabled(workspace.isOperating)
                 Divider()
                 Button("关闭仓库", action: workspace.closeWorkspace)
                     .disabled(workspace.workspace == nil || workspace.isOperating)

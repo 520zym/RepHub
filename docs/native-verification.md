@@ -307,3 +307,14 @@ Claude Code 2.1.177 不再提供旧的 `--permission-prompts` 和 `--max-turns` 
 5. 原生 SVN r2 → r3 比较显示“仓库根目录（属性）”，选中后展示实际 `rephub:qa` 属性差异。
 
 最终应用经 `scripts/build-app.sh` 编译、打包及临时签名。测试不接触正式业务仓库，不调用真实模型、不读取已有登录令牌；没有验证真实 API 账号、额度或服务可用性。SVN 复制／移动、递归目录删除、树／属性冲突修复及高级 Git 工作流仍按现有范围限制处理。模拟服务和 QA 应用验收后退出。
+
+## 2026-10-12：SVN 到空 Git 仓库迁移
+
+本轮迁移验收只使用独立本地 `file://` SVN 与临时 Git bare 远端；未打开、读取或写入正式业务仓库及远端，也没有访问真实旧 TLS SVN 服务。
+
+- 定向自动验证最终覆盖 **49 个不同测试**，全部通过、无跳过：SVN 迁移 4 项（152 条真实历史、501 条模拟分页、固定锚点及已有导出目录拒绝）；Git 迁移目标 5 项；SVN→Git 集成 3 项；检查点恢复 4 项；迁移 UI 模型 4 项；工作区模型 24 项与关联工作区模型 5 项。初轮记录 `/tmp/rephub-migration-tests.log` 中 SVN 4 项通过，Git／集成测试因路径问题失败；修复后 `/tmp/rephub-migration-regression.log` 通过 12 项，`/tmp/rephub-migration-final-tests.log` 通过 41 项，之后在 `/tmp/rephub-migration-guard-tests.log` 中补测并通过 4 项迁移 UI 模型测试，含新增的工作区锁定与退出取消保护；按不同测试去重为 49 项。
+- 原生实窗使用独立应用标识 `com.zym.RepHub.migrationQA`；夹具清单 `/tmp/rephub-migration-fixtures.json` 指向本地 `file://` SVN 与临时 bare Git。浏览 SVN `trunk` 并选择中文模块后，编辑作者邮箱并转换 3 条历史；概览、文件树、中文文本的源／目标双侧预览、二进制大小与 SHA 摘要、删除文件所在提交的差异均已核对。
+- 预览阶段以 `git ls-remote --refs` 确认目标没有引用。明确点击发布后，目标 `main` 与本地迁移末端均为 `8e0c7eff1821f49685a771625b2076facd654b0d`，远端为 3 条提交；源 SVN `status` 为空。
+- 最终版另用同一隔离来源和新的空 Git 目标验证快照模式：固定 r4，只生成 1 条 Git 提交；发布前远端无引用，发布后本地与远端 `main` 一致，末端为 `26651e1755f6bbd2794f55eb80125a2c37acc1a6`。实窗确认来源／目标摘要、作者占位说明、双侧二进制摘要及发布结果提示；文件栏缩窄后为双侧内容留出空间。
+- 最终 `scripts/build-app.sh` 编译、打包、临时签名和 `codesign --verify --deep --strict build/RepHub.app` 均通过。验收后退出 QA 应用；截图仅通过原生工具即时查看，未声明归档截图文件。
+- 首版仅支持所选 SVN 目录可读取的线性历史或显式快照。Git→Git、Git→SVN、SVN→SVN、已有目标历史合并和持续同步尚未实现；单个对象超过 16 MiB 时会阻断核对与发布。具体功能与恢复边界见[仓库迁移设计](repository-migration.md)。
