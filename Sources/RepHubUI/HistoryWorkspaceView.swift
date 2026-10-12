@@ -1,3 +1,4 @@
+import AppKit
 import Observation
 import SwiftUI
 import DesignSystem
@@ -12,6 +13,7 @@ struct HistoryWorkspaceView: View {
     let showAsMainView: Bool
     @State private var branchSearch = ""
     @State private var revisionSearch = ""
+    @State private var revisionFilter = HistoryFilter()
 
     var body: some View {
         let palette = appearance.palette(for: appearance.preferredColorScheme ?? systemColorScheme)
@@ -41,6 +43,11 @@ struct HistoryWorkspaceView: View {
         .background(palette.surface)
         .onAppear {
             if showAsMainView { model.setHistoryVisible(true) }
+        }
+        .onChange(of: filterScopeID) { _, _ in
+            // 新的仓库来源不能沿用上一个来源的作者或日期条件。
+            revisionSearch = ""
+            revisionFilter.clear()
         }
     }
 
@@ -91,15 +98,7 @@ struct HistoryWorkspaceView: View {
     }
 
     private var filteredRevisions: [Revision] {
-        let query = revisionSearch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let revisions = model.historyRevisions
-        guard !query.isEmpty else { return revisions }
-        return revisions.filter {
-            $0.subject.lowercased().contains(query)
-                || $0.author.lowercased().contains(query)
-                || $0.id.lowercased().contains(query)
-                || $0.references.joined(separator: " ").lowercased().contains(query)
-        }
+        revisionFilter.filtered(model.historyRevisions, search: revisionSearch)
     }
 
     private func revisionTable(palette: AppPalette) -> some View {
@@ -119,12 +118,13 @@ struct HistoryWorkspaceView: View {
                 set: { id in model.selectRevision(filteredRevisions.first(where: { $0.id == id })) }
             ),
             search: $revisionSearch,
+            filter: $revisionFilter,
             selectedReference: model.historyReference,
             references: model.snapshot?.branches ?? [],
             selectReference: model.selectHistoryReference,
             chooseFileHistory: model.chooseFileHistory,
             clearFileHistory: model.clearFileHistory,
-            drawsGraphConnections: !isFileHistory && revisionSearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            drawsGraphConnections: !isFileHistory && revisionSearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !revisionFilter.isActive,
             loadedCount: model.historyRevisions.count,
             hasMore: model.hasMoreHistory,
             isLoadingMore: model.isLoadingMoreHistory,
@@ -137,6 +137,10 @@ struct HistoryWorkspaceView: View {
     }
 
     private var isFileHistory: Bool { model.historyFilePath != nil }
+
+    private var filterScopeID: String {
+        "\(model.workspace?.id ?? "")|\(model.selectedBindingID ?? "")"
+    }
 }
 
 private struct HistoryBranchSidebar: View {
@@ -342,6 +346,7 @@ private struct HistoryRevisionTable: View {
     @Binding var selectedBindingID: String?
     @Binding var selectedRevisionID: String?
     @Binding var search: String
+    @Binding var filter: HistoryFilter
     let selectedReference: String?
     let references: [BranchReference]
     let selectReference: (String?) -> Void
@@ -358,6 +363,7 @@ private struct HistoryRevisionTable: View {
     let palette: AppPalette
 
     @State private var isNearHistoryEnd = false
+    @State private var isFilterPopoverPresented = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -370,6 +376,7 @@ private struct HistoryRevisionTable: View {
                 HStack(spacing: 10) {
                     bindingSource
                     WorkbenchSearchField("搜索已加载的提交、作者、版本号…", text: $search, palette: palette)
+                    filterControl
                     if supportsBranches {
                         Menu {
                             Button("所有分支") { selectReference(nil) }
@@ -411,7 +418,7 @@ private struct HistoryRevisionTable: View {
                     VStack(spacing: 6) {
                         Image(systemName: issues.isEmpty ? "clock.arrow.circlepath" : "exclamationmark.triangle")
                             .font(.title3)
-                        Text(!search.isEmpty ? "已加载记录中没有匹配的提交" : (issues.isEmpty ? "暂无提交记录" : "提交历史暂时不可用"))
+                        Text(hasActiveFilter ? "已加载记录中没有匹配的提交" : (issues.isEmpty ? "暂无提交记录" : "提交历史暂时不可用"))
                             .font(.callout.weight(.medium))
                         if !issues.isEmpty {
                             Text("可在右侧展开查看读取原因")
@@ -442,6 +449,11 @@ private struct HistoryRevisionTable: View {
                             .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
                             .listRowSeparator(.hidden)
                             .listRowBackground(Color.clear)
+                            .contextMenu {
+                                Button("复制完整\(usesGitIdentifiers ? "哈希" : "修订号")") {
+                                    copyRevisionID(revision.id)
+                                }
+                            }
                         }
                     }
                     .onScrollGeometryChange(for: Bool.self) { geometry in
@@ -466,8 +478,7 @@ private struct HistoryRevisionTable: View {
     }
 
     private func loadMoreIfNearEnd() {
-        guard isNearHistoryEnd, !isReading, !isLoadingMore, hasMore, loadMoreError == nil,
-              search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard isNearHistoryEnd, !isReading, !isLoadingMore, hasMore, loadMoreError == nil else { return }
         loadMore()
     }
 
@@ -479,9 +490,10 @@ private struct HistoryRevisionTable: View {
                     .lineLimit(2).help(loadMoreError)
             }
             HStack(spacing: 8) {
-                Text("已加载 \(loadedCount) 条")
+                Text("已加载 \(loadedCount) 条 · 当前显示 \(revisions.count) 条")
                     .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
                     .lineLimit(1)
+                    .help(hasActiveFilter ? "搜索和筛选仅作用于已加载的提交；可继续加载更早的提交。" : "当前显示所有已加载的提交。")
                 Spacer(minLength: 0)
                 if isLoadingMore {
                     ProgressView().controlSize(.small)
@@ -498,6 +510,30 @@ private struct HistoryRevisionTable: View {
         }
         .padding(.horizontal, 12).padding(.vertical, 5)
         .background(palette.sidebar.opacity(0.4))
+    }
+
+    private var hasActiveFilter: Bool {
+        filter.isActive || !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var filterControl: some View {
+        Button {
+            isFilterPopoverPresented.toggle()
+        } label: {
+            Label("筛选提交", systemImage: filter.isActive ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+                .labelStyle(.iconOnly)
+        }
+        .buttonStyle(WorkbenchButtonStyle(palette: palette, role: filter.isActive ? .secondary : .quiet))
+        .accessibilityLabel(filter.isActive ? "提交筛选，已启用" : "筛选已加载的提交")
+        .help(filter.isActive ? "作者或日期筛选已启用（仅已加载提交）" : "按作者或日期筛选已加载的提交")
+        .popover(isPresented: $isFilterPopoverPresented, arrowEdge: .top) {
+            HistoryFilterPopover(filter: $filter, palette: palette)
+        }
+    }
+
+    private func copyRevisionID(_ revisionID: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(revisionID, forType: .string)
     }
 
     private func fileHistoryScope(path: String, reference: String?) -> some View {
@@ -594,6 +630,64 @@ private struct HistoryRevisionTable: View {
     }
 }
 
+private struct HistoryFilterPopover: View {
+    @Binding var filter: HistoryFilter
+    let palette: AppPalette
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("筛选已加载的提交")
+                .font(.headline)
+            Text("筛选不会限制继续读取更早的提交。")
+                .font(.caption)
+                .foregroundStyle(palette.secondaryText)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("作者").font(.caption.weight(.medium)).foregroundStyle(palette.secondaryText)
+                TextField("作者姓名", text: $filter.author)
+                    .textFieldStyle(.roundedBorder)
+            }
+            dateControl(title: "起始日期", date: $filter.startDate)
+            dateControl(title: "结束日期", date: $filter.endDate)
+            if filter.hasInvalidDateRange {
+                Label("结束日期早于起始日期，当前不会匹配提交。", systemImage: "exclamationmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(palette.secondaryText)
+            }
+            HStack {
+                if let range = filter.dateRangeDescription {
+                    Text(range).font(.caption).foregroundStyle(palette.secondaryText).lineLimit(1)
+                }
+                Spacer(minLength: 12)
+                Button("清除") { filter.clear() }
+                    .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
+                    .disabled(!filter.isActive)
+            }
+        }
+        .padding(14)
+        .frame(width: 286)
+        .background(palette.surface)
+    }
+
+    private func dateControl(title: String, date: Binding<Date?>) -> some View {
+        let enabled = Binding(
+            get: { date.wrappedValue != nil },
+            set: { isEnabled in date.wrappedValue = isEnabled ? (date.wrappedValue ?? Date()) : nil }
+        )
+        return VStack(alignment: .leading, spacing: 4) {
+            Toggle(title, isOn: enabled)
+                .font(.callout)
+            if enabled.wrappedValue {
+                DatePicker(title, selection: Binding(
+                    get: { date.wrappedValue ?? Date() },
+                    set: { date.wrappedValue = $0 }
+                ), displayedComponents: .date)
+                .labelsHidden()
+                .datePickerStyle(.field)
+            }
+        }
+    }
+}
+
 private struct HistoryRevisionInspector: View {
     @Bindable var model: WorkspaceModel
     let palette: AppPalette
@@ -619,6 +713,9 @@ private struct HistoryRevisionInspector: View {
                             .foregroundStyle(state == .uncertain ? palette.secondaryText : palette.accent)
                             .help(syncHelp(for: state))
                     }
+                }
+                .contextMenu {
+                    Button("复制完整修订号") { copyRevisionID(revision.id) }
                 }
                 if !isCompact {
                     Label(revision.date.formatted(date: .abbreviated, time: .shortened), systemImage: "calendar")
@@ -694,6 +791,11 @@ private struct HistoryRevisionInspector: View {
         case .synchronized: "此提交已同步"
         case .uncertain: "当前无法确认此提交的同步状态"
         }
+    }
+
+    private func copyRevisionID(_ revisionID: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(revisionID, forType: .string)
     }
 
     @ViewBuilder

@@ -194,7 +194,20 @@ public struct WorkspaceView: View {
                                     Text("每 30 秒").tag(30)
                                     Text("每分钟").tag(60)
                                 }
-                                Button("立即检查", action: monitor.checkNow)
+                                Divider()
+                                if monitor.isChecking {
+                                    Label("正在检查本地变更…", systemImage: "arrow.triangle.2.circlepath")
+                                } else if let lastCheckedAt = monitor.lastCheckedAt {
+                                    Text("上次检查：\(lastCheckedAt.formatted(date: .omitted, time: .shortened))")
+                                } else {
+                                    Text("尚未完成检查")
+                                }
+                                if let error = monitor.errorMessage {
+                                    Label("最近一次检查失败", systemImage: "exclamationmark.circle")
+                                        .help(error)
+                                }
+                                Button(monitor.isChecking ? "正在检查…" : "立即检查", action: monitor.checkNow)
+                                    .disabled(monitor.isChecking)
                             }
                         }
                         Divider()

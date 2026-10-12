@@ -299,11 +299,15 @@ public final class WorkspaceModel {
 
     private func restartMonitoring() {
         guard let workspace else { monitor?.stop(); return }
-        monitor?.start(workspace: workspace) { [weak self] in
+        monitor?.start(workspace: workspace, shouldPoll: { [weak self] in
             guard let self else { return false }
             return NSApplication.shared.isActive && !self.isInteractionLocked && !self.isLoading
                 && !self.isLoadingMoreHistory && !self.showsRepositoryManagement && !self.showsRepositorySetup
-        }
+        }, canCheckManually: { [weak self] in
+            guard let self else { return false }
+            return !self.isInteractionLocked && !self.isLoading
+                && !self.isLoadingMoreHistory && !self.showsRepositoryManagement && !self.showsRepositorySetup
+        })
     }
 
     public func refreshMonitoredChanges() {

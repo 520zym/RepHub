@@ -67,6 +67,64 @@ final class WorkspaceMonitorTests: XCTestCase {
         XCTAssertEqual(calls, 0)
     }
 
+    func testManualCheckCanRunWhileAutomaticPollingIsInactive() async throws {
+        let state = MonitorState(tokens: ["git": "one"])
+        let provider = MonitorProvider(id: .git, state: state)
+        let binding = makeBinding(id: "git", providerID: .git)
+        let monitor = WorkspaceMonitor(service: RepositoryService(providers: [provider]))
+        monitor.intervalSeconds = 0
+
+        // 模拟应用在后台：自动轮询不允许，但用户明确点“立即检查”仍可建立基线。
+        monitor.start(
+            workspace: Workspace(directory: temporaryDirectory(), bindings: [binding], issues: []),
+            shouldPoll: { false },
+            canCheckManually: { true }
+        )
+        try await waitUntil { !monitor.isChecking && monitor.lastCheckedAt != nil }
+        let baselineCalls = await state.callCount()
+        XCTAssertEqual(baselineCalls, 1)
+
+        // 定时器走同一个入口，后台时不得绕过自动轮询保护。
+        monitor.checkAutomatically()
+        for _ in 0..<8 { await Task.yield() }
+        let callsAfterAutomaticAttempt = await state.callCount()
+        XCTAssertEqual(callsAfterAutomaticAttempt, 1)
+
+        await state.setToken("two", for: "git")
+        monitor.checkNow()
+        try await waitUntil { !monitor.isChecking && monitor.pendingBindingIDs == [binding.id] }
+    }
+
+    func testBusyManualCheckWaitsForFirstBaselineInsteadOfDiscardingIt() async throws {
+        let state = MonitorState(tokens: ["git": "one"])
+        let provider = MonitorProvider(id: .git, state: state)
+        let binding = makeBinding(id: "git", providerID: .git)
+        let monitor = WorkspaceMonitor(service: RepositoryService(providers: [provider]))
+        monitor.intervalSeconds = 0
+        let permission = MonitorPermission(isBusy: true)
+
+        monitor.start(
+            workspace: Workspace(directory: temporaryDirectory(), bindings: [binding], issues: []),
+            shouldPoll: { false },
+            canCheckManually: { !permission.isBusy }
+        )
+        for _ in 0..<8 { await Task.yield() }
+        XCTAssertNil(monitor.lastCheckedAt)
+        let callsWhileBusy = await state.callCount()
+        XCTAssertEqual(callsWhileBusy, 0)
+
+        // 忙碌期间的 token 不会被误当成已读；解除后第一次读取才成为基线。
+        await state.setToken("two", for: "git")
+        permission.isBusy = false
+        monitor.checkNow()
+        try await waitUntil { !monitor.isChecking && monitor.lastCheckedAt != nil }
+        XCTAssertTrue(monitor.pendingBindingIDs.isEmpty)
+
+        await state.setToken("three", for: "git")
+        monitor.checkNow()
+        try await waitUntil { !monitor.isChecking && monitor.pendingBindingIDs == [binding.id] }
+    }
+
     func testStopDiscardsLateCheckResult() async throws {
         let state = MonitorState(tokens: ["git": "changed"], delayNanoseconds: 180_000_000)
         let provider = MonitorProvider(id: .git, state: state)
@@ -145,6 +203,15 @@ final class WorkspaceMonitorTests: XCTestCase {
         }
         let calls = await state.callCount()
         XCTAssertGreaterThanOrEqual(calls, expected, "等待本地状态读取开始超时")
+    }
+}
+
+@MainActor
+private final class MonitorPermission {
+    var isBusy: Bool
+
+    init(isBusy: Bool) {
+        self.isBusy = isBusy
     }
 }
 

@@ -34,7 +34,10 @@ public final class WorkspaceMonitor {
     private let defaults: UserDefaults?
     private let clock: @MainActor @Sendable () -> Date
     private var workspace: Workspace?
+    /// 自动轮询只应在应用位于前台且界面空闲时执行。
     private var shouldPoll: (@MainActor @Sendable () -> Bool)?
+    /// 手动检查不要求应用前台，但仍必须避开写操作与展示中的工作流。
+    private var canCheckManually: (@MainActor @Sendable () -> Bool)?
     private var baselineTokens: [String: String] = [:]
     private var pollingTask: Task<Void, Never>?
     private var checkingTask: Task<Void, Never>?
@@ -61,15 +64,26 @@ public final class WorkspaceMonitor {
         workspace: Workspace,
         shouldPoll: @escaping @MainActor @Sendable () -> Bool
     ) {
+        start(workspace: workspace, shouldPoll: shouldPoll, canCheckManually: shouldPoll)
+    }
+
+    /// `shouldPoll` 仅决定定时轮询，`canCheckManually` 保护所有会改变或暂时占用工作区的流程。
+    public func start(
+        workspace: Workspace,
+        shouldPoll: @escaping @MainActor @Sendable () -> Bool,
+        canCheckManually: @escaping @MainActor @Sendable () -> Bool
+    ) {
         stop()
         self.workspace = workspace
         self.shouldPoll = shouldPoll
+        self.canCheckManually = canCheckManually
         baselineTokens = [:]
         pendingBindingIDs = []
         errorsByBindingID = [:]
         errorMessage = nil
         lastCheckedAt = nil
         schedulePollingIfNeeded()
+        // 建立初始基线时不要求应用在前台，避免刚打开工作区后切出窗口而漏掉首轮读取。
         checkNow()
     }
 
@@ -82,6 +96,7 @@ public final class WorkspaceMonitor {
         checkingTask = nil
         workspace = nil
         shouldPoll = nil
+        canCheckManually = nil
         baselineTokens = [:]
         pendingBindingIDs = []
         lastCheckedAt = nil
@@ -95,9 +110,23 @@ public final class WorkspaceMonitor {
         pendingBindingIDs = []
     }
 
-    /// 手动请求一次本地 token 检查。被锁定、后台或已有检查时安静跳过。
+    /// 手动请求一次本地 token 检查。后台仍可执行，但写操作、弹窗或已有检查会阻止它。
     public func checkNow() {
-        guard !isChecking, let workspace, let shouldPoll, shouldPoll() else { return }
+        beginCheck(manual: true)
+    }
+
+    /// 定时器调用的入口。保留为模块内可见，便于验证后台时不会绕过自动轮询保护。
+    func checkAutomatically() {
+        beginCheck(manual: false)
+    }
+
+    private func beginCheck(manual: Bool) {
+        guard !isChecking, let workspace else { return }
+        if manual {
+            guard canCheckManually?() == true else { return }
+        } else {
+            guard shouldPoll?() == true else { return }
+        }
         let runGeneration = generation
         let workspaceID = workspace.id
         isChecking = true
@@ -164,7 +193,7 @@ public final class WorkspaceMonitor {
                     return
                 }
                 guard let self, self.generation == scheduledGeneration, !Task.isCancelled else { return }
-                self.checkNow()
+                self.checkAutomatically()
             }
         }
     }
