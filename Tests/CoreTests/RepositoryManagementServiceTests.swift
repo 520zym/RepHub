@@ -128,6 +128,27 @@ struct RepositoryManagementServiceTests {
         #expect(comparison.toRevision == "fixed-to")
     }
 
+    @Test("仓库根标记仅可用于只读修订比较")
+    func comparisonAllowsRootMarkerButWritesStillRejectIt() async throws {
+        let directory = try temporaryDirectory()
+        let provider = ManagementFixture(comparisonFiles: [FileChange(path: ".", kind: .modified)])
+        let service = RepositoryService(providers: [provider])
+        let binding = try #require(await provider.detect(at: directory))
+
+        let comparison = try await service.compare(in: binding, from: "old", to: "new")
+        #expect(comparison.files.map(\.path) == ["."])
+        let patch = try await service.comparisonDiff(in: binding, comparison: comparison, path: ".")
+        #expect(patch.text == ".")
+        await #expect(throws: VersionControlError.self) {
+            try await service.manage(
+                .init(action: .stage(paths: ["."]), stateToken: "state-1"),
+                bindingID: binding.id,
+                in: Workspace(directory: directory, bindings: [binding], issues: []),
+                progress: { _ in }
+            )
+        }
+    }
+
     @MainActor @Test("关联目录内存存储会规范化、去重并排除主目录")
     func linkStoreUsesNormalizedPaths() throws {
         let primary = try temporaryDirectory()
@@ -168,13 +189,16 @@ private final class ManagementFixture: RepositorySetupProvider, RepositoryManage
     private let throwsAfterManagement: Bool
     private let managementDelay: Duration?
     private let detectsRepository: Bool
+    private let comparisonFiles: [FileChange]
 
     init(throwsAfterSetup: Bool = false, throwsAfterManagement: Bool = false,
-         managementDelay: Duration? = nil, detectsRepository: Bool = true) {
+         managementDelay: Duration? = nil, detectsRepository: Bool = true,
+         comparisonFiles: [FileChange] = [FileChange(path: "Sources/App.swift", kind: .modified)]) {
         self.throwsAfterSetup = throwsAfterSetup
         self.throwsAfterManagement = throwsAfterManagement
         self.managementDelay = managementDelay
         self.detectsRepository = detectsRepository
+        self.comparisonFiles = comparisonFiles
     }
 
     func detect(at directory: URL) async throws -> RepositoryBinding? {
@@ -203,7 +227,7 @@ private final class ManagementFixture: RepositorySetupProvider, RepositoryManage
         return .init(outcome: .succeeded, summary: "完成")
     }
     func compare(in binding: RepositoryBinding, from: String, to: String) async throws -> RepositoryComparison {
-        .init(fromRevision: "fixed-from", toRevision: "fixed-to", files: [FileChange(path: "Sources/App.swift", kind: .modified)])
+        .init(fromRevision: "fixed-from", toRevision: "fixed-to", files: comparisonFiles)
     }
     func comparisonDiff(in binding: RepositoryBinding, comparison: RepositoryComparison, path: String) async throws -> RepositoryPatch {
         .init(text: path)

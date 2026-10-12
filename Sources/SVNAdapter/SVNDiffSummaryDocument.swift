@@ -9,11 +9,13 @@ final class SVNDiffSummaryDocument: NSObject, XMLParserDelegate {
     struct Entry {
         let path: String
         let item: String
+        let properties: String
         let kind: String
     }
 
     private(set) var entries: [Entry] = []
     private var item: String?
+    private var properties: String?
     private var kind: String?
     private var text = ""
 
@@ -29,6 +31,7 @@ final class SVNDiffSummaryDocument: NSObject, XMLParserDelegate {
     func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes attributeDict: [String: String] = [:]) {
         if elementName == "path" {
             item = attributeDict["item"]
+            properties = attributeDict["props"]
             kind = attributeDict["kind"] ?? ""
             text = ""
         }
@@ -38,8 +41,12 @@ final class SVNDiffSummaryDocument: NSObject, XMLParserDelegate {
 
     func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
         guard elementName == "path", let item else { return }
-        entries.append(Entry(path: text.trimmingCharacters(in: .whitespacesAndNewlines), item: item, kind: kind ?? ""))
+        entries.append(Entry(
+            path: text.trimmingCharacters(in: .whitespacesAndNewlines), item: item,
+            properties: properties ?? "none", kind: kind ?? ""
+        ))
         self.item = nil
+        properties = nil
         kind = nil
         text = ""
     }

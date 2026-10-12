@@ -6,8 +6,10 @@ public struct RepositoryCommitFile: Identifiable, Hashable, Sendable {
     public let change: FileChange
     public let fingerprint: String
     public let restriction: String?
-    public init(change: FileChange, fingerprint: String, restriction: String? = nil) {
-        self.change = change; self.fingerprint = fingerprint; self.restriction = restriction
+    /// 适配器在准备提交时确认的节点类型；界面据此呈现目录的非递归提交语义。
+    public let isDirectory: Bool
+    public init(change: FileChange, fingerprint: String, restriction: String? = nil, isDirectory: Bool = false) {
+        self.change = change; self.fingerprint = fingerprint; self.restriction = restriction; self.isDirectory = isDirectory
     }
 }
 

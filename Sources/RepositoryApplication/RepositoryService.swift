@@ -661,15 +661,15 @@ public actor RepositoryService {
         try validateComparisonRevision(comparison.fromRevision)
         try validateComparisonRevision(comparison.toRevision)
         for change in comparison.files {
-            try validateManagedPath(change.path)
-            if let original = change.originalPath { try validateManagedPath(original) }
+            try validateComparisonPath(change.path)
+            if let original = change.originalPath { try validateComparisonPath(original) }
         }
         return comparison
     }
 
     public func comparisonDiff(in binding: RepositoryBinding, comparison: RepositoryComparison,
                                path: String) async throws -> RepositoryPatch {
-        try validateManagedPath(path)
+        try validateComparisonPath(path)
         guard comparison.files.contains(where: { $0.path == path || $0.originalPath == path }) else {
             throw VersionControlError.invalidRepository("所选文件不属于当前比较范围。")
         }
@@ -741,6 +741,13 @@ public actor RepositoryService {
     }
 
     private func validateManagedPath(_ path: String) throws { try validateCommitPath(path) }
+
+    /// `.` 是版本控制适配器在“只读修订比较”中表示工作副本根节点的通用标记。
+    /// 它不属于普通受控文件路径，所以绝不能复用于暂存、提交、冲突解决等写操作。
+    private func validateComparisonPath(_ path: String) throws {
+        if path == "." { return }
+        try validateManagedPath(path)
+    }
 
     private func validateComparisonRevision(_ value: String) throws {
         try validateManagementName(value, label: "修订范围")

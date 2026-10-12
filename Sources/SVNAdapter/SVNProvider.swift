@@ -476,13 +476,18 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
             files.append(try await commitFile(change: change, in: binding))
         }
         let restricted = files.filter { $0.restriction != nil }.count
+        let directoryCount = files.filter(\.isDirectory).count
+        let noticeParts = [
+            restricted == 0
+                ? "已按当前工作副本状态生成提交预览。"
+                : "其中 \(restricted) 个路径不能安全地按单文件范围提交。",
+            directoryCount > 0 ? "目录勾选仅提交自身，子项须单独选择。" : nil
+        ].compactMap { $0 }
         return RepositoryCommitPreparation(
             binding: binding,
             baseRevision: baseRevision,
             files: files,
-            notice: restricted == 0
-                ? "已按当前工作副本状态生成提交预览。"
-                : "其中 \(restricted) 个路径不能安全地按单文件范围提交。",
+            notice: noticeParts.joined(separator: " "),
             blockingReason: nil
         )
     }
@@ -509,15 +514,17 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
                 result.append(change)
                 continue
             }
-            // svn status 对未受控目录可能只显示根目录。提交预览展开为叶子文件，
-            // 让用户明确选择，而不会把整个目录递归交给 svn add。
-            result.append(contentsOf: try untrackedLeafFiles(in: url, root: binding.root))
+            // 保留目录节点：`svn add --depth empty` 与随后的同深度提交只会带入这个
+            // 节点本身，因而空目录可以提交；非空目录也可明确选择“只加入目录”。
+            // 同时列出叶子文件，供用户选择实际文件，而不会把整棵目录递归交给 svn。
+            result.append(change)
+            result.append(contentsOf: try untrackedDescendants(in: url, root: binding.root))
         }
         var paths = Set<String>()
         return result.filter { paths.insert($0.path).inserted }
     }
 
-    private func untrackedLeafFiles(in directory: URL, root: URL) throws -> [FileChange] {
+    private func untrackedDescendants(in directory: URL, root: URL) throws -> [FileChange] {
         if let attributes = try? FileManager.default.attributesOfItem(atPath: directory.path),
            attributes[.type] as? FileAttributeType == .typeSymbolicLink {
             return [FileChange(path: relativePath(directory.path, root: root), kind: .untracked)]
@@ -539,7 +546,12 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
                 continue
             }
             let values = try url.resourceValues(forKeys: properties)
-            if values.isDirectory == true, values.isSymbolicLink != true { continue }
+            // 即使为空的嵌套目录也必须成为明确候选。选中它时只会按 empty
+            // 深度加入该节点及必要父节点，旁路子项永远不会被隐式递归加入。
+            if values.isDirectory == true, values.isSymbolicLink != true {
+                files.append(FileChange(path: relative, kind: .untracked))
+                continue
+            }
             files.append(FileChange(path: relative, kind: .untracked))
         }
         if let enumerationError { throw enumerationError }
@@ -554,8 +566,11 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         }
         if file.change.kind == .untracked {
             let url = binding.root.appendingPathComponent(path)
-            let prefix = "新增未受 SVN 管理的文件：\(path)\n\n"
+            let prefix = "新增未受 SVN 管理的路径：\(path)\n\n"
             let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+            if attributes[.type] as? FileAttributeType == .typeDirectory {
+                return RepositoryPatch(text: prefix + "目录将以仅此节点的方式加入 SVN；未选择的子文件和子目录不会被递归加入或提交。\n")
+            }
             if attributes[.type] as? FileAttributeType == .typeSymbolicLink {
                 return RepositoryPatch(text: prefix + "符号链接 → \(try FileManager.default.destinationOfSymbolicLink(atPath: url.path))\n")
             }
@@ -566,6 +581,12 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
             if data.contains(0) { return RepositoryPatch(text: prefix + "二进制文件，大小 \(size) 字节。") }
             let suffix = size > data.count ? "\n\n… 已截断，文件共 \(size) 字节。" : ""
             return RepositoryPatch(text: prefix + String(decoding: data, as: UTF8.self) + suffix, isTruncated: size > data.count)
+        }
+        if file.isDirectory {
+            // 与实际的 `svn commit --depth empty` 对齐：目录预览只读取自身属性，
+            // 不把未选择的子文件内容差异显示为本次提交范围。
+            let result = try await svn(["diff", "--depth", "empty", "--", svnTargetPath(path)], directory: binding.root)
+            return RepositoryPatch(text: result.output)
         }
         return try await diff(in: binding, path: path, revision: nil)
     }
@@ -688,7 +709,13 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         let path = try validatedCommitPath(change.path, in: binding)
         let restriction = try await commitRestriction(for: change, path: path, in: binding)
         let snapshot = try await commitSnapshot(path: path, change: change, in: binding)
-        return RepositoryCommitFile(change: FileChange(path: path, kind: change.kind), fingerprint: snapshot, restriction: restriction)
+        let url = binding.root.appendingPathComponent(path)
+        var directory = ObjCBool(false)
+        let isDirectory = FileManager.default.fileExists(atPath: url.path, isDirectory: &directory) && directory.boolValue
+        return RepositoryCommitFile(
+            change: FileChange(path: path, kind: change.kind), fingerprint: snapshot,
+            restriction: restriction, isDirectory: isDirectory
+        )
     }
 
     private func validatedCommitPath(_ value: String, in binding: RepositoryBinding) throws -> String {
@@ -702,11 +729,6 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
             if try SVNXMLDocument(data: state.data).statusEntries.contains(where: { $0.copied || $0.movedFrom != nil || $0.movedTo != nil }) {
                 return "SVN 复制或移动节点涉及关联路径，当前不支持提交该范围。"
             }
-        }
-        let url = binding.root.appendingPathComponent(path)
-        var directory = ObjCBool(false)
-        if FileManager.default.fileExists(atPath: url.path, isDirectory: &directory), directory.boolValue {
-            return "目录提交可能包含未选择的子项；请逐个选择文件提交。"
         }
         switch change.kind {
         case .renamed, .copied, .conflicted, .unknown, .typeChanged:
@@ -728,6 +750,8 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
             }
             return nil
         default:
+            // `svn commit --depth empty <目录>` 只提交目录自身的属性变化，不会递归
+            // 提交子节点。受控目录因此可以作为明确的属性提交范围。
             return nil
         }
     }
@@ -1099,9 +1123,8 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         let result = try await svn(["diff", "--summarize", "--xml", "-r", "\(start):\(end)", target], directory: binding.root, remoteURL: binding.remoteURL)
         let paths = try SVNDiffSummaryDocument(data: result.data).entries.compactMap { entry -> FileChange? in
             guard let relative = relativeSummaryPath(entry.path, binding: binding) else { return nil }
-            // 仓库根自身的属性变化没有可选择的相对路径，当前比较面板不能安全展示为文件。
-            guard !relative.isEmpty else { return nil }
-            return FileChange(path: relative, kind: summaryKind(entry.item))
+            // `.` 是仅供修订比较读取的仓库根标记；绝不进入普通工作副本写路径验证。
+            return FileChange(path: relative.isEmpty ? "." : relative, kind: summaryKind(entry.item, properties: entry.properties))
         }
         return RepositoryComparison(fromRevision: "r\(start)", toRevision: "r\(end)", files: paths)
     }
@@ -1113,13 +1136,19 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         }
         let from = try numericSVNRevision(comparison.fromRevision)
         let to = try numericSVNRevision(comparison.toRevision)
-        let target = try repositoryFileURL(path: normalized, in: binding)
         // 删除节点只在 from 修订存在，新增节点只在 to 修订存在；普通变更取较新可见节点。
         let peg: Int = switch change.kind {
         case .deleted: from
         case .added: to
         default: max(from, to)
         }
+        if normalized == "." {
+            let target = try repositoryHistoryTarget(in: binding, pegRevision: String(peg))
+            // 根节点比较仅读取自身属性，不能让根路径的普通 diff 把整个子树加载进来。
+            let result = try await svn(["diff", "--depth", "empty", "-r", "\(from):\(to)", "--", target], directory: binding.root, remoteURL: binding.remoteURL)
+            return RepositoryPatch(text: result.output)
+        }
+        let target = try repositoryFileURL(path: normalized, in: binding)
         let result = try await svn(["diff", "-r", "\(from):\(to)", "--", "\(target)@\(peg)"], directory: binding.root, remoteURL: binding.remoteURL)
         return RepositoryPatch(text: result.output)
     }
@@ -1262,12 +1291,15 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         return normalizedRelativePath(value)
     }
 
-    private func summaryKind(_ item: String) -> FileChangeKind {
+    private func summaryKind(_ item: String, properties: String) -> FileChangeKind {
         switch item.lowercased() {
-        case "added": .added
-        case "deleted": .deleted
-        case "modified": .modified
-        default: .unknown
+        case "added": return .added
+        case "deleted": return .deleted
+        case "modified": return .modified
+        default:
+            // `svn diff --summarize --xml` 对纯属性修改会给出 item=none/normal，
+            // 同时以 props=modified 标记；这仍是实际可读取的修改。
+            return properties.lowercased() == "modified" ? .modified : .unknown
         }
     }
 

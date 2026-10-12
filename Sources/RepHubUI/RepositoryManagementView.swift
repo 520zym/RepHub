@@ -256,12 +256,14 @@ struct RepositoryManagementView: View {
             if model.isComparing { ProgressView("正在比较版本…").controlSize(.small).font(.system(size: 12)) }
             if let error = model.comparisonError { Text(error).font(.system(size: 12)).foregroundStyle(palette.removed) }
             if let comparison = model.comparison {
-                Text("\(shortRevision(comparison.fromRevision)) → \(shortRevision(comparison.toRevision)) · 差异文件 \(comparison.files.count) 个")
+                Text("\(shortRevision(comparison.fromRevision)) → \(shortRevision(comparison.toRevision)) · 变更路径 \(comparison.files.count) 个")
                     .font(.system(size: 12, weight: .medium))
                     .help("完整修订：\(comparison.fromRevision) → \(comparison.toRevision)")
                 HStack(spacing: 0) {
                     List(comparison.files, selection: Binding(get: { model.comparisonPath }, set: { path in if let path { model.loadComparisonDiff(path: path) } })) { file in
-                        Text(file.path).font(.system(size: 12)).lineLimit(1)
+                        Text(file.path == "." ? "仓库根目录（属性）" : file.path)
+                            .font(.system(size: 12)).lineLimit(1)
+                            .help(file.path == "." ? "当前工作副本对应的仓库目录自身属性" : file.path)
                     }
                     .scrollContentBackground(.hidden)
                     .background(palette.sidebar)

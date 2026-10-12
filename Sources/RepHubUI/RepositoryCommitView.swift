@@ -127,7 +127,7 @@ struct RepositoryCommitView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("可提交文件").font(.system(size: 13, weight: .semibold))
+                    Text("可提交路径").font(.system(size: 13, weight: .semibold))
                     Text("\(model.selectedFiles(for: preparation.binding.id).count) / \(preparation.files.filter { $0.restriction == nil }.count) 已选择")
                         .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
                 }
@@ -392,11 +392,14 @@ private struct CommitTreeRow: View {
                     Toggle("", isOn: Binding(get: { selected.contains(file.id) }, set: { _ in toggle(file) }))
                         .toggleStyle(.checkbox).labelsHidden().disabled(file.restriction != nil)
                     Button { preview(file) } label: {
+                        if file.isDirectory {
+                            Image(systemName: "folder").foregroundStyle(palette.accent).font(.system(size: 12))
+                        }
                         Text(file.change.kind.symbol).font(.system(size: 10, weight: .semibold, design: .monospaced)).foregroundStyle(file.restriction == nil ? palette.accent : palette.secondaryText)
                         Text(node.name).lineLimit(1).truncationMode(.middle)
                     }
                     .buttonStyle(.plain).frame(maxWidth: .infinity, alignment: .leading)
-                    .help(file.restriction ?? file.change.path)
+                    .help(file.restriction ?? (file.isDirectory ? "\(file.change.path) · 仅提交目录自身，子项须单独选择" : file.change.path))
                     if file.restriction != nil { Image(systemName: "lock.fill").font(.system(size: 9)).foregroundStyle(palette.secondaryText) }
                 } else {
                     Image(systemName: "folder").foregroundStyle(palette.accent).font(.system(size: 12))
