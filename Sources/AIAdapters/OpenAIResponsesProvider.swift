@@ -36,6 +36,7 @@ public struct OpenAIResponsesProvider: AIProvider, Sendable {
         if let key { wire.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
         await progress(.status("正在发送已选差异…"))
         let data = try await APIProviderSupport.data(session: session, request: wire, maximumBytes: maximumResponseBytes)
+        if let usage = usage(from: data) { await progress(.usage(usage)) }
         let text = try decode(data).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { throw AIError.emptyOutput }
         await progress(.textDelta(text)); await progress(.status("已生成"))
@@ -89,5 +90,20 @@ public struct OpenAIResponsesProvider: AIProvider, Sendable {
             return texts.joined()
         } catch let error as AIError { throw error }
         catch { throw AIError.failed("模型服务返回了无法识别的 Responses 结果。") }
+    }
+
+    private func usage(from data: Data) -> AITokenUsage? {
+        struct TokenDetails: Decodable { let cachedTokens: Int?; let reasoningTokens: Int?
+            enum CodingKeys: String, CodingKey { case cachedTokens = "cached_tokens"; case reasoningTokens = "reasoning_tokens" }
+        }
+        struct Usage: Decodable { let inputTokens: Int?; let outputTokens: Int?; let totalTokens: Int?; let inputDetails: TokenDetails?; let outputDetails: TokenDetails?
+            enum CodingKeys: String, CodingKey { case inputTokens = "input_tokens", outputTokens = "output_tokens", totalTokens = "total_tokens"; case inputDetails = "input_tokens_details", outputDetails = "output_tokens_details" }
+        }
+        struct Envelope: Decodable { let usage: Usage?; let model: String? }
+        guard let result = try? JSONDecoder().decode(Envelope.self, from: data), let value = result.usage else { return nil }
+        let reported = AITokenUsage(inputTokens: value.inputTokens, outputTokens: value.outputTokens, totalTokens: value.totalTokens,
+                                    cachedInputTokens: value.inputDetails?.cachedTokens,
+                                    reasoningTokens: value.outputDetails?.reasoningTokens, model: result.model)
+        return reported.hasReportedTokens ? reported : nil
     }
 }

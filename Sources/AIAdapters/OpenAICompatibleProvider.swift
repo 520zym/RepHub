@@ -75,6 +75,10 @@ public struct OpenAICompatibleProvider: AIProvider, Sendable {
                 // 不包含服务端响应正文，正文可能错误地回显凭据或包含敏感诊断数据。
                 throw AIError.failed("模型服务返回 HTTP \(http.statusCode)，请检查地址、模型、密钥或服务状态。")
             }
+            // 用量是服务端计费结果，即使输出随后因被截断而不能作为结果使用，也应先上报。
+            if let usage = usage(from: data) {
+                await progress(.usage(usage))
+            }
             let completion = try decodeCompletion(data)
             if let finishReason = completion.finishReason, finishReason != "stop" {
                 if finishReason == "length" {
@@ -106,7 +110,8 @@ public struct OpenAICompatibleProvider: AIProvider, Sendable {
             messages: [
                 .init(role: "system", content: request.systemPrompt),
                 .init(role: "user", content: request.userPrompt)
-            ]
+            ],
+            stream: false
         )
         do {
             return try JSONEncoder().encode(payload)
@@ -178,8 +183,14 @@ public struct OpenAICompatibleProvider: AIProvider, Sendable {
 
     private func decodeCompletion(_ data: Data) throws -> DecodedCompletion {
         do {
-            let response = try JSONDecoder().decode(ChatResponse.self, from: data)
-            guard let first = response.choices.first else {
+            let base = try? JSONDecoder().decode(BaseEnvelope.self, from: data)
+            // MiniMax 的 OpenAI 兼容层可能在 HTTP 200 中以 base_resp 传回业务错误。
+            // 此处不能把错误体当作空输出或成功响应。
+            if let response = base?.baseResponse, response.statusCode != 0 {
+                throw AIError.failed("模型服务未接受本次请求（服务状态 \(response.statusCode)），请检查模型、密钥或服务状态。")
+            }
+            let response = try JSONDecoder().decode(CompletionEnvelope.self, from: data)
+            guard let first = response.choices?.first else {
                 throw AIError.emptyOutput
             }
             return .init(content: first.message.content ?? "", finishReason: first.finishReason)
@@ -189,22 +200,64 @@ public struct OpenAICompatibleProvider: AIProvider, Sendable {
             throw AIError.failed("模型服务返回了无法识别的结果，请检查所用接口是否兼容 Chat Completions。")
         }
     }
+
+    private func usage(from data: Data) -> AITokenUsage? {
+        guard let response = try? JSONDecoder().decode(UsageEnvelope.self, from: data), let usage = response.usage else { return nil }
+        let reported = AITokenUsage(inputTokens: usage.promptTokens, outputTokens: usage.completionTokens,
+                                    totalTokens: usage.totalTokens, cachedInputTokens: usage.promptDetails?.cachedTokens ?? usage.cachedTokens ?? usage.promptCacheHitTokens,
+                                    cacheCreationInputTokens: usage.promptDetails?.cacheWriteTokens,
+                                    reasoningTokens: usage.completionDetails?.reasoningTokens, model: response.model)
+        return reported.hasReportedTokens ? reported : nil
+    }
 }
 
 private struct ChatRequest: Encodable {
     struct Message: Encodable { let role: String; let content: String }
     let model: String
     let messages: [Message]
+    let stream: Bool
 }
 
-private struct ChatResponse: Decodable {
+private struct CompletionEnvelope: Decodable {
     struct Choice: Decodable {
         struct Message: Decodable { let content: String? }
         let message: Message
         let finishReason: String?
         enum CodingKeys: String, CodingKey { case message; case finishReason = "finish_reason" }
     }
-    let choices: [Choice]
+    let choices: [Choice]?
+}
+
+private struct BaseEnvelope: Decodable {
+    let baseResponse: BaseResponse?
+    enum CodingKeys: String, CodingKey { case baseResponse = "base_resp" }
+}
+
+private struct BaseResponse: Decodable {
+    let statusCode: Int
+    enum CodingKeys: String, CodingKey { case statusCode = "status_code" }
+}
+
+private struct UsageEnvelope: Decodable {
+    struct Usage: Decodable {
+        struct PromptDetails: Decodable { let cachedTokens: Int?; let cacheWriteTokens: Int?
+            enum CodingKeys: String, CodingKey { case cachedTokens = "cached_tokens"; case cacheWriteTokens = "cache_write_tokens" }
+        }
+        struct CompletionDetails: Decodable { let reasoningTokens: Int?; enum CodingKeys: String, CodingKey { case reasoningTokens = "reasoning_tokens" } }
+        let promptTokens: Int?
+        let completionTokens: Int?
+        let totalTokens: Int?
+        let cachedTokens: Int?
+        let promptCacheHitTokens: Int?
+        let promptDetails: PromptDetails?
+        let completionDetails: CompletionDetails?
+        enum CodingKeys: String, CodingKey {
+            case promptTokens = "prompt_tokens", completionTokens = "completion_tokens", totalTokens = "total_tokens", cachedTokens = "cached_tokens", promptCacheHitTokens = "prompt_cache_hit_tokens"
+            case promptDetails = "prompt_tokens_details", completionDetails = "completion_tokens_details"
+        }
+    }
+    let usage: Usage?
+    let model: String?
 }
 
 private struct DecodedCompletion { let content: String; let finishReason: String? }

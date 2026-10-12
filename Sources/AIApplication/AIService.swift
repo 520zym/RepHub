@@ -5,13 +5,39 @@ import AICore
 public struct AIService: Sendable {
     private let providers: [any AIProvider]
     private let secrets: any AISecretStore
-    public init(providers: [any AIProvider], secrets: any AISecretStore) {
-        self.providers = providers; self.secrets = secrets
+    private let modelCatalogProvider: (any AIModelCatalogProvider)?
+    private let usageStore: AIUsageStore?
+
+    public init(providers: [any AIProvider], secrets: any AISecretStore,
+                modelCatalogProvider: (any AIModelCatalogProvider)? = nil,
+                usageStore: AIUsageStore? = nil) {
+        self.providers = providers
+        self.secrets = secrets
+        self.modelCatalogProvider = modelCatalogProvider
+        self.usageStore = usageStore
     }
 
     public func check(_ connection: AIConnection) async throws -> String {
         try Task.checkCancellation()
         return try await provider(for: connection.kind).check(connection)
+    }
+
+    /// 只发送 API 密钥和连接配置以读取模型清单，不会发送代码或写入连接。
+    public func discoverModels(for connection: AIConnection, apiKey: String? = nil) async throws -> AIModelCatalog {
+        guard connection.kind.isAPI else {
+            throw AIError.invalidConfiguration("本地命令行连接没有可读取的远程模型列表。")
+        }
+        guard let modelCatalogProvider else {
+            throw AIError.unavailable("当前应用没有注册模型发现适配器。")
+        }
+        let key = try apiKey ?? secrets.read(for: connection.id)
+        do {
+            return try await modelCatalogProvider.models(for: connection, apiKey: key)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw sanitized(error, key: key)
+        }
     }
 
     public func execute(_ request: AIExecutionRequest, progress: @escaping AIProgressHandler) async throws -> String {
@@ -29,12 +55,22 @@ public struct AIService: Sendable {
         }
         let provider = try provider(for: request.connection.kind)
         let key = request.connection.kind.isAPI ? try secrets.read(for: request.connection.id) : nil
-        await progress(.status("正在连接 \(request.connection.name)…"))
+        var resolvedConnection = request.connection
+        resolvedConnection.model = request.effectiveModel
+        let resolvedRequest = AIExecutionRequest(connection: resolvedConnection, scene: request.scene, context: request.context)
+        let timeoutSeconds = resolvedConnection.timeoutSeconds
+        let startedAt = Date()
+        let usage = UsageAccumulator()
+        let collectingProgress: AIProgressHandler = { event in
+            if case .usage(let value) = event { await usage.replace(with: value) }
+            await progress(event)
+        }
+        await collectingProgress(.status("正在连接 \(resolvedConnection.name)…"))
         do {
             let response = try await withThrowingTaskGroup(of: String.self) { group in
-                group.addTask { try await provider.execute(request, apiKey: key, progress: progress) }
+                group.addTask { try await provider.execute(resolvedRequest, apiKey: key, progress: collectingProgress) }
                 group.addTask {
-                    try await Task.sleep(for: .seconds(request.connection.timeoutSeconds))
+                    try await Task.sleep(for: .seconds(timeoutSeconds))
                     throw AIError.failed("AI 执行超时，请缩小差异范围或调整连接超时时间。")
                 }
                 defer { group.cancelAll() }
@@ -45,15 +81,51 @@ public struct AIService: Sendable {
             let result = response.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !result.isEmpty else { throw AIError.emptyOutput }
             guard result.utf8.count <= 1024 * 1024 else { throw AIError.failed("模型输出超过 1 MB，请缩小输入范围。") }
+            await saveUsage(request: resolvedRequest, startedAt: startedAt, outcome: .succeeded, usage: usage)
             return result
-        } catch is CancellationError { throw CancellationError() }
-        catch {
-            if Task.isCancelled { throw CancellationError() }
-            // 提供者不应回显凭据；服务层再遮蔽当前密钥，防止第三方错误文本泄漏。
-            var message = error.localizedDescription
-            if let key, !key.isEmpty { message = message.replacingOccurrences(of: key, with: "***") }
-            throw AIError.failed(String(message.prefix(2000)))
+        } catch is CancellationError {
+            await saveUsage(request: resolvedRequest, startedAt: startedAt, outcome: .cancelled, usage: usage)
+            throw CancellationError()
         }
+        catch {
+            if Task.isCancelled {
+                await saveUsage(request: resolvedRequest, startedAt: startedAt, outcome: .cancelled, usage: usage)
+                throw CancellationError()
+            }
+            await saveUsage(request: resolvedRequest, startedAt: startedAt, outcome: .failed, usage: usage)
+            throw sanitized(error, key: key)
+        }
+    }
+
+    private func saveUsage(request: AIExecutionRequest, startedAt: Date, outcome: AIUsageOutcome,
+                           usage: UsageAccumulator) async {
+        guard let usageStore else { return }
+        let latest = await usage.value
+        let value = latest?.hasReportedTokens == true ? latest : nil
+        let reportedModel = latest?.model?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = (reportedModel?.isEmpty == false ? reportedModel : nil) ?? request.connection.model
+        let record = AIUsageRecord(date: startedAt,
+                                   connectionID: request.connection.id,
+                                   connectionName: request.connection.name,
+                                   sceneID: request.scene.id,
+                                   sceneName: request.scene.name,
+                                   model: model,
+                                   durationSeconds: max(0, Date().timeIntervalSince(startedAt)),
+                                   outcome: outcome,
+                                   usage: value)
+        await usageStore.record(record)
+    }
+
+    private func sanitized(_ error: Error, key: String?) -> AIError {
+        var message = error.localizedDescription
+        if let key, !key.isEmpty {
+            message = message.replacingOccurrences(of: key, with: "***")
+            let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty, trimmed != key {
+                message = message.replacingOccurrences(of: trimmed, with: "***")
+            }
+        }
+        return .failed(String(message.prefix(2_000)))
     }
 
     private func provider(for kind: AIConnectionKind) throws -> any AIProvider {
@@ -62,4 +134,10 @@ public struct AIService: Sendable {
         }
         return provider
     }
+}
+
+private actor UsageAccumulator {
+    private var latest: AITokenUsage?
+    func replace(with value: AITokenUsage) { latest = value }
+    var value: AITokenUsage? { latest }
 }

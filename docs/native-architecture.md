@@ -63,6 +63,8 @@
 
 - `AICore` 定义连接、场景、所选差异快照、进度、提供者及凭据契约；不依赖 SwiftUI、HTTP、进程或具体 Git/SVN 实现。
 - `AIApplication` 持久化非密钥配置，编排提供者选择、范围上限、取消和超时。`AIAdapters` 分别实现 Chat Completions、OpenAI Responses、Anthropic Messages、本机 Codex/Claude 及钥匙串，由应用入口统一组装；协议选择不由 API 地址猜测。
+- 厂商预设不新增协议类型。`AIModelCatalogProvider` 独立查询模型元数据，`AIExecutionRequest.effectiveModel` 根据场景与当前连接解析模型；跨连接执行不会沿用其他厂商的场景模型。
+- `AIProgress.usage` 是当前请求的完整累计快照，由适配器按实际协议归一化。`AIService` 在终态将最新快照记录至 `AIUsageStore`，不重复相加、不估算缺失值；统计存储不含输入、输出和凭据。
 - `RepositoryAIContextService` 只通过版本控制业务读取所选文件，前后复核基准和文件指纹。AI 面板保存场景、连接、范围及内容快照；生成结束和填入前重新核对。
 - 用户点击后才执行 AI；结果可编辑，AI 不能触发提交。Git/SVN 提交说明按目标独立保存。协议与 CLI 权限边界见 [AI 功能说明](ai.md)。
 

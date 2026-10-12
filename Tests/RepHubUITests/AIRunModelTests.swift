@@ -90,6 +90,35 @@ final class AIRunModelTests: XCTestCase {
         XCTAssertEqual(model.progress, "场景、连接或文件范围已变化，请重新运行。")
     }
 
+    func testUsageAndSceneModelAreShownAndResetForNextContext() async throws {
+        let usage = AITokenUsage(inputTokens: 100, outputTokens: 20, cachedInputTokens: 40, model: "response-model")
+        let model = makeModel(provider: FixtureProvider(usage: usage), withConnection: true)
+        let connection = try XCTUnwrap(model.connections.first)
+        var scene = try XCTUnwrap(model.settings.scenes.first { $0.kind == .codeReview })
+        scene.connectionID = connection.id
+        scene.modelOverride = "review-model"
+        try model.settings.saveScene(scene)
+        model.prepare(kind: .codeReview, sourceLabel: "工作区", paths: ["A.swift"]) { makeContext($0) }
+        XCTAssertEqual(model.effectiveModel, "review-model")
+
+        model.run()
+        try await waitUntil { !model.isBusy }
+        XCTAssertEqual(model.tokenUsage, usage)
+        XCTAssertTrue(model.hasStartedRequest)
+
+        var other = connection
+        other.id = UUID(); other.name = "另一连接"; other.model = "other-model"
+        try model.settings.saveConnection(other)
+        model.selectConnection(other.id)
+        XCTAssertEqual(model.effectiveModel, "other-model")
+        XCTAssertTrue(model.isStale)
+        XCTAssertEqual(model.tokenUsage, usage, "已执行请求的真实用量保留在旧结果旁")
+
+        model.prepare(kind: .codeReview, sourceLabel: "工作区", paths: ["B.swift"]) { makeContext($0) }
+        XCTAssertNil(model.tokenUsage)
+        XCTAssertFalse(model.hasStartedRequest)
+    }
+
     private func makeModel(provider: FixtureProvider, withConnection: Bool = false) -> AIRunModel {
         let defaults = UserDefaults(suiteName: "AIRunModelTests.\(UUID().uuidString)")!
         let settings = AISettingsStore(secrets: EmptySecrets(), defaults: defaults)
@@ -116,9 +145,10 @@ private struct FixtureProvider: AIProvider {
     let kind: AIConnectionKind = .openAICompatible
     let log: FixtureLog?
     let waitForGate: ResponseGate?
+    let usage: AITokenUsage?
 
-    init(log: FixtureLog? = nil, waitForGate: ResponseGate? = nil) {
-        self.log = log; self.waitForGate = waitForGate
+    init(log: FixtureLog? = nil, waitForGate: ResponseGate? = nil, usage: AITokenUsage? = nil) {
+        self.log = log; self.waitForGate = waitForGate; self.usage = usage
     }
 
     func execute(_ request: AIExecutionRequest, apiKey: String?, progress: @escaping AIProgressHandler) async throws -> String {
@@ -129,6 +159,7 @@ private struct FixtureProvider: AIProvider {
             await waitForGate.wait()
         }
         try Task.checkCancellation()
+        if let usage { await progress(.usage(usage)) }
         return "审查完成"
     }
 

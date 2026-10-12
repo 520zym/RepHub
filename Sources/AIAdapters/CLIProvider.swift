@@ -1,4 +1,5 @@
 import AICore
+import CoreFoundation
 import Foundation
 import ToolExecution
 
@@ -265,6 +266,7 @@ private actor CLIOutputCollector {
             return
         }
         if event == "turn.completed" {
+            if let usage = tokenUsage(in: object, protocol: .codex) { await progress(.usage(usage)) }
             if let status = object["status"] as? String, !["completed", "success"].contains(status.lowercased()) {
                 terminalFailure = "Codex CLI 分析未成功完成（\(status)）。"
             } else {
@@ -282,6 +284,7 @@ private actor CLIOutputCollector {
 
     private func acceptClaude(event: String, object: [String: Any]) async {
         if event == "result" {
+            if let usage = tokenUsage(in: object, protocol: .claude) { await progress(.usage(usage)) }
             if (object["is_error"] as? Bool) != false || (object["subtype"] as? String) != "success" {
                 terminalFailure = "Claude Code 未成功完成本次分析。"
             } else if let result = object["result"] as? String {
@@ -313,5 +316,69 @@ private actor CLIOutputCollector {
             await progress(.textDelta(text))
         }
         if let last = orderedItemIDs.last, let value = textByItemID[last] { finalText = value }
+    }
+
+    /// CLI 事件格式会随版本演进；只接受明确给出的计数，字段缺失时不估算。
+    private enum CLIUsageProtocol { case codex, claude }
+
+    private func tokenUsage(in object: [String: Any], protocol kind: CLIUsageProtocol) -> AITokenUsage? {
+        let source = (object["usage"] as? [String: Any]) ?? (object["token_usage"] as? [String: Any])
+        guard let source else { return nil }
+        func integer(_ names: [String]) -> Int? {
+            for name in names {
+                if let value = strictUnsignedInteger(source[name]) { return value }
+            }
+            return nil
+        }
+        let directInput = integer(["input_tokens", "prompt_tokens"])
+        let cacheRead: Int?
+        let cacheCreation: Int?
+        let cachedInput: Int?
+        switch kind {
+        case .codex:
+            // Codex terminal 事件使用 cached_input_tokens；它已包含在 input_tokens 中。
+            cacheRead = nil
+            cacheCreation = nil
+            cachedInput = integer(["cached_input_tokens"])
+        case .claude:
+            // Claude 的 input_tokens 不含两类缓存 token，和 Anthropic Messages API 的口径一致。
+            cacheRead = integer(["cache_read_input_tokens"])
+            cacheCreation = integer(["cache_creation_input_tokens"])
+            cachedInput = cacheRead
+        }
+        let input: Int?
+        switch kind {
+        case .codex:
+            input = directInput
+        case .claude:
+            // Claude 的 input_tokens 是基数；只有缓存字段时不能冒充完整输入。
+            input = directInput.flatMap { safelyAdd([$0, cacheRead, cacheCreation]) }
+        }
+        let usage = AITokenUsage(inputTokens: input, outputTokens: integer(["output_tokens", "completion_tokens"]),
+                                 totalTokens: integer(["total_tokens"]), cachedInputTokens: cachedInput,
+                                 cacheCreationInputTokens: cacheCreation, reasoningTokens: integer(["reasoning_tokens"]),
+                                 model: object["model"] as? String)
+        return usage.hasReportedTokens ? usage : nil
+    }
+
+    /// JSON 里的 token 只能是非负整数。拒绝 Bool、浮点、负数及溢出值，绝不使用 intValue 截断。
+    private func strictUnsignedInteger(_ raw: Any?) -> Int? {
+        guard let number = raw as? NSNumber else { return nil }
+        if CFGetTypeID(number) == CFBooleanGetTypeID() { return nil }
+        let encoding = String(cString: number.objCType)
+        guard ["c", "C", "s", "S", "i", "I", "l", "L", "q", "Q"].contains(encoding) else { return nil }
+        let text = number.stringValue
+        guard let value = UInt64(text), value <= UInt64(Int.max) else { return nil }
+        return Int(value)
+    }
+
+    private func safelyAdd(_ values: [Int?]) -> Int? {
+        let existing = values.compactMap { $0 }
+        guard !existing.isEmpty else { return nil }
+        return existing.reduce(into: Optional(0)) { partial, value in
+            guard let existing = partial else { return }
+            let result = existing.addingReportingOverflow(value)
+            partial = result.overflow ? nil : result.partialValue
+        }
     }
 }

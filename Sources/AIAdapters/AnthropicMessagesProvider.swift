@@ -35,6 +35,7 @@ public struct AnthropicMessagesProvider: AIProvider, Sendable {
         if let key { wire.setValue(key, forHTTPHeaderField: "x-api-key") }
         await progress(.status("正在发送已选差异…"))
         let data = try await APIProviderSupport.data(session: session, request: wire, maximumBytes: maximumResponseBytes)
+        if let usage = usage(from: data) { await progress(.usage(usage)) }
         let text = try decode(data).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { throw AIError.emptyOutput }
         await progress(.textDelta(text)); await progress(.status("已生成"))
@@ -76,5 +77,35 @@ public struct AnthropicMessagesProvider: AIProvider, Sendable {
             return values.joined()
         } catch let error as AIError { throw error }
         catch { throw AIError.failed("模型服务返回了无法识别的 Messages 结果。") }
+    }
+
+    private func usage(from data: Data) -> AITokenUsage? {
+        struct Usage: Decodable {
+            let inputTokens: Int?; let outputTokens: Int?; let cacheReadInputTokens: Int?; let cacheCreationInputTokens: Int?
+            enum CodingKeys: String, CodingKey {
+                case inputTokens = "input_tokens", outputTokens = "output_tokens"
+                case cacheReadInputTokens = "cache_read_input_tokens", cacheCreationInputTokens = "cache_creation_input_tokens"
+            }
+        }
+        struct Envelope: Decodable { let usage: Usage?; let model: String? }
+        guard let response = try? JSONDecoder().decode(Envelope.self, from: data), let value = response.usage else { return nil }
+        let baseInput = nonnegative(value.inputTokens)
+        let cacheRead = nonnegative(value.cacheReadInputTokens)
+        let cacheCreation = nonnegative(value.cacheCreationInputTokens)
+        // input_tokens 是总输入量的基数；单独出现缓存字段不能冒充完整输入量。
+        let totalInput = baseInput.flatMap { safelyAdd([$0, cacheRead, cacheCreation]) }
+        let reported = AITokenUsage(inputTokens: totalInput, outputTokens: nonnegative(value.outputTokens),
+                                    cachedInputTokens: cacheRead, cacheCreationInputTokens: cacheCreation, model: response.model)
+        return reported.hasReportedTokens ? reported : nil
+    }
+
+    private func nonnegative(_ value: Int?) -> Int? { value.flatMap { $0 >= 0 ? $0 : nil } }
+
+    private func safelyAdd(_ values: [Int?]) -> Int? {
+        values.compactMap { $0 }.reduce(into: Optional(0)) { partial, value in
+            guard let existing = partial else { return }
+            let result = existing.addingReportingOverflow(value)
+            partial = result.overflow ? nil : result.partialValue
+        }
     }
 }

@@ -90,6 +90,38 @@ struct ResponsesAndMessagesProviderTests {
         catch { Issue.record("应传递取消，实际为：\(error)") }
     }
 
+    @Test("Responses 和 Messages 只上报服务端实际返回的 token 用量")
+    func reportsProtocolUsage() async throws {
+        let recorder = ProtocolUsageRecorder()
+        ProtocolMockURLProtocol.handler = { _ in
+            .init(status: 200, body: #"{"model":"response-model","usage":{"input_tokens":9,"output_tokens":4,"input_tokens_details":{"cached_tokens":2},"output_tokens_details":{"reasoning_tokens":1}},"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}"#)
+        }
+        defer { ProtocolMockURLProtocol.handler = nil }
+        _ = try await OpenAIResponsesProvider(session: protocolSession()).execute(protocolRequest(kind: .openAIResponses), apiKey: "key") { update in
+            if case .usage(let usage) = update { recorder.record(usage) }
+        }
+        let responses = try #require(recorder.first())
+        #expect(responses.inputTokens == 9)
+        #expect(responses.totalTokens == 13)
+        #expect(responses.cachedInputTokens == 2)
+        #expect(responses.reasoningTokens == 1)
+
+        ProtocolMockURLProtocol.handler = { _ in
+            .init(status: 200, body: #"{"model":"claude-test","usage":{"input_tokens":5,"cache_read_input_tokens":3,"cache_creation_input_tokens":2,"output_tokens":4},"stop_reason":"max_tokens","content":[{"type":"text","text":"partial"}]}"#)
+        }
+        await protocolExpectAIError(containing: "正常状态") {
+            try await AnthropicMessagesProvider(session: protocolSession()).execute(protocolRequest(kind: .anthropicMessages), apiKey: "key") { update in
+                if case .usage(let usage) = update { recorder.record(usage) }
+            }
+        }
+        let anthropic = try #require(recorder.last())
+        #expect(anthropic.inputTokens == 10)
+        #expect(anthropic.outputTokens == 4)
+        #expect(anthropic.totalTokens == 14)
+        #expect(anthropic.cachedInputTokens == 3)
+        #expect(anthropic.cacheCreationInputTokens == 2)
+    }
+
     @Test("端点末段必须精确匹配，密钥换行不可被静默裁剪")
     func endpointAndKeyValidationAreStrict() async throws {
         let recorder = ProtocolRequestRecorder()
@@ -127,6 +159,14 @@ struct ResponsesAndMessagesProviderTests {
         #expect(try await messages.execute(protocolRequest(kind: .anthropicMessages, baseURL: "https://api.anthropic.com/v1/messages"), apiKey: "key") { _ in } == "ok")
         #expect(recorder.latest()?.url?.absoluteString == "https://api.anthropic.com/v1/messages")
     }
+}
+
+private final class ProtocolUsageRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [AITokenUsage] = []
+    func record(_ usage: AITokenUsage) { lock.withLock { values.append(usage) } }
+    func first() -> AITokenUsage? { lock.withLock { values.first } }
+    func last() -> AITokenUsage? { lock.withLock { values.last } }
 }
 
 private func protocolRequest(kind: AIConnectionKind, baseURL: String = "https://model.example/v1") -> AIExecutionRequest {

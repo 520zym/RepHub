@@ -14,13 +14,16 @@ struct RepHubApp: App {
     @State private var appearance = AppearanceStore()
     @State private var workspace: WorkspaceModel
     @State private var aiSettings: AISettingsStore
+    @State private var aiUsage: AIUsageStore
     private let aiService: AIService
 
     init() {
         let secrets = KeychainAISecretStore()
         let settings = AISettingsStore(secrets: secrets)
+        let usage = AIUsageStore()
         let service = AIService(providers: [OpenAICompatibleProvider(), OpenAIResponsesProvider(), AnthropicMessagesProvider(),
-                                            CLIProvider(kind: .codexCLI), CLIProvider(kind: .claudeCLI)], secrets: secrets)
+                                            CLIProvider(kind: .codexCLI), CLIProvider(kind: .claudeCLI)], secrets: secrets,
+                                modelCatalogProvider: HTTPAIModelCatalogProvider(), usageStore: usage)
         self.aiService = service
         let svn = SVNProvider()
         let repositories = RepositoryService(providers: [GitProvider(), svn])
@@ -28,6 +31,7 @@ struct RepHubApp: App {
         let migrations = RepositoryMigrationService(sources: [svn], targets: [migrationTarget])
         let workingCopyMigrations = WorkingCopyMigrationService(source: svn, target: migrationTarget)
         _aiSettings = State(initialValue: settings)
+        _aiUsage = State(initialValue: usage)
         _workspace = State(initialValue: WorkspaceModel(service: repositories,
                                                         aiSettings: settings, aiService: service,
                                                         recentRepositories: RecentRepositoryStore(defaults: .standard),
@@ -76,7 +80,7 @@ struct RepHubApp: App {
             TabView {
                 ThemeSettingsView(appearance: appearance)
                     .tabItem { Label("外观", systemImage: "paintpalette") }
-                AISettingsView(store: aiSettings, service: aiService)
+                AISettingsView(store: aiSettings, service: aiService, usageStore: aiUsage)
                     .tabItem { Label("AI 与场景", systemImage: "sparkles") }
             }
             .frame(width: 760, height: 600)

@@ -17,6 +17,8 @@ public final class AIRunModel {
     public private(set) var errorMessage: String?
     public private(set) var isStale = false
     public private(set) var completedSnapshotID: String?
+    public private(set) var tokenUsage: AITokenUsage?
+    public private(set) var hasStartedRequest = false
 
     /// `nil` 代表尚未选择场景或连接。
     public private(set) var sceneID: UUID?
@@ -55,6 +57,13 @@ public final class AIRunModel {
 
     public var selectedConnection: AIConnection? {
         connections.first { $0.id == connectionID }
+    }
+
+    public var effectiveModel: String {
+        guard let connection = selectedConnection else { return "" }
+        if let scene = selectedScene, scene.connectionID == connection.id,
+           let model = scene.modelOverride?.trimmingCharacters(in: .whitespacesAndNewlines), !model.isEmpty { return model }
+        return connection.model
     }
 
     public var canRun: Bool {
@@ -143,6 +152,8 @@ public final class AIRunModel {
         isStale = false
         completedSnapshotID = nil
         completedBasis = nil
+        tokenUsage = nil
+        hasStartedRequest = false
 
         task = Task { [weak self, service] in
             do {
@@ -154,6 +165,7 @@ public final class AIRunModel {
                 }
                 self.progress = "正在请求 \(connection.kind.title)…"
                 let request = AIExecutionRequest(connection: connection, scene: scene, context: context)
+                self.hasStartedRequest = true
                 let result = try await service.execute(request) { [weak self] update in
                     await self?.consume(update, token: token, basis: basis)
                 }
@@ -299,6 +311,7 @@ public final class AIRunModel {
         guard accepts(token, basis: basis) else { return }
         switch update {
         case .status(let value): progress = value
+        case .usage(let value): tokenUsage = value
         case .textDelta(let value):
             let remaining = Self.outputLimit - output.utf8.count
             guard remaining > 0 else { return }
@@ -322,6 +335,8 @@ public final class AIRunModel {
         isStale = false
         completedSnapshotID = nil
         completedBasis = nil
+        tokenUsage = nil
+        hasStartedRequest = false
     }
 
     /// `apply` 和 `revalidate` 也会异步读取差异；用户改范围后不能让旧读取落回当前状态。

@@ -50,6 +50,13 @@ public final class AISettingsStore {
         let connection = normalized(value)
         try validate(connection)
 
+        if let previous = connections.first(where: { $0.id == connection.id }),
+           apiKey == nil,
+           try hasSecret(for: connection.id),
+           requiresNewSecret(previous: previous, replacement: connection) {
+            throw AIError.invalidConfiguration("更换服务地址后请填写新密钥，或先移除原密钥。")
+        }
+
         var next = connections
         if let index = next.firstIndex(where: { $0.id == connection.id }) {
             next[index] = connection
@@ -74,7 +81,10 @@ public final class AISettingsStore {
         let nextConnections = connections.filter { $0.id != id }
         let nextScenes = scenes.map { scene in
             var copy = scene
-            if copy.connectionID == id { copy.connectionID = nil }
+            if copy.connectionID == id {
+                copy.connectionID = nil
+                copy.modelOverride = nil
+            }
             return copy
         }
         let connectionsData = try Self.encode(nextConnections)
@@ -146,6 +156,9 @@ public final class AISettingsStore {
     private func validate(_ scene: AIScene) throws {
         guard !scene.name.isEmpty else { throw AIError.invalidConfiguration("请填写场景名称。") }
         guard !scene.prompt.isEmpty else { throw AIError.invalidConfiguration("请填写场景提示词。") }
+        if scene.modelOverride != nil, scene.connectionID == nil {
+            throw AIError.invalidConfiguration("指定场景模型前，请先选择默认连接。")
+        }
     }
 
     private func normalized(_ connection: AIConnection) -> AIConnection {
@@ -161,12 +174,23 @@ public final class AISettingsStore {
         var result = scene
         result.name = result.name.trimmingCharacters(in: .whitespacesAndNewlines)
         result.prompt = result.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        result.modelOverride = result.modelOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if result.modelOverride?.isEmpty == true { result.modelOverride = nil }
         return result
     }
 
     private static func isLoopback(_ host: String) -> Bool {
         let lower = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
         return lower == "localhost" || lower == "::1" || lower == "127.0.0.1"
+    }
+
+    /// 密钥与服务地址绑定。只允许同一主机调整 API 路径，以免把旧服务的密钥发送给新主机。
+    private func requiresNewSecret(previous: AIConnection, replacement: AIConnection) -> Bool {
+        guard replacement.kind.isAPI else { return false }
+        guard previous.kind.isAPI else { return true }
+        let previousHost = URLComponents(string: previous.baseURL)?.host?.lowercased()
+        let replacementHost = URLComponents(string: replacement.baseURL)?.host?.lowercased()
+        return previousHost != replacementHost
     }
 
     private static func load<T: Decodable>(_ type: T.Type, key: String, from defaults: UserDefaults) -> (value: T?, error: String?) {

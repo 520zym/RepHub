@@ -160,9 +160,9 @@ public struct AIRunView: View {
         let text: String
         switch connection.kind {
         case .openAICompatible, .openAIResponses, .anthropicMessages:
-            text = "\(connection.kind.title) · \(connection.baseURL) · \(connection.model)"
+            text = "\(connection.preset?.title ?? connection.kind.title) · \(model.effectiveModel) · \(connection.baseURL)"
         case .codexCLI, .claudeCLI:
-            text = "本机 CLI · 客户端仅提供所选差异，并按只读配置在临时目录运行"
+            text = "本机 CLI · \(model.effectiveModel.isEmpty ? "工具默认模型" : model.effectiveModel) · 仅提供所选差异"
         }
         return Label(text, systemImage: connection.kind.isAPI ? "network" : "terminal")
             .font(.system(size: 11)).foregroundStyle(palette.secondaryText).lineLimit(1).truncationMode(.middle)
@@ -202,9 +202,40 @@ public struct AIRunView: View {
                 }
             }
             .background(palette.surface.opacity(0.65), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            if model.hasStartedRequest { usageSummary }
         }
         .padding(18)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    private var usageSummary: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let usage = model.tokenUsage, usage.hasReportedTokens {
+                Text("Token · 输入 \(count(usage.inputTokens)) · 输出 \(count(usage.outputTokens)) · 合计 \(count(usage.totalTokens))")
+                    .monospacedDigit()
+                if usage.cachedInputTokens != nil || usage.cacheCreationInputTokens != nil || usage.reasoningTokens != nil {
+                    Text("其中：\(usageDetails(usage))").monospacedDigit()
+                }
+                if let actualModel = usage.model, !actualModel.isEmpty {
+                    Text("响应模型：\(actualModel)").lineLimit(1).truncationMode(.middle)
+                }
+            } else {
+                Text(model.isBusy ? "Token 用量将在响应返回后显示" : "服务未返回 Token 用量，未计为零")
+            }
+        }
+        .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 3).padding(.top, 2)
+    }
+
+    private func count(_ value: Int?) -> String { value.map { $0.formatted() } ?? "未返回" }
+
+    private func usageDetails(_ usage: AITokenUsage) -> String {
+        var parts: [String] = []
+        if let value = usage.cachedInputTokens { parts.append("缓存命中 \(value.formatted())") }
+        if let value = usage.cacheCreationInputTokens { parts.append("缓存写入 \(value.formatted())") }
+        if let value = usage.reasoningTokens { parts.append("推理 \(value.formatted())") }
+        return parts.joined(separator: " · ")
     }
 
     private var footer: some View {

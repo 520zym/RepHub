@@ -144,6 +144,67 @@ struct OpenAICompatibleProviderTests {
             // 预期：上层可据此停止进度状态。
         }
     }
+
+    @Test("报告 Chat 用量，且长度截断时仍先上报真实计费结果")
+    func reportsUsageBeforeRejectingTruncatedOutput() async throws {
+        MockURLProtocol.handler = { _ in
+            .init(status: 200, body: #"{"model":"deepseek-test","usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18,"prompt_tokens_details":{"cached_tokens":3},"completion_tokens_details":{"reasoning_tokens":2}},"choices":[{"message":{"content":"partial"},"finish_reason":"length"}]}"#)
+        }
+        defer { MockURLProtocol.handler = nil }
+        let recorder = UsageRecorder()
+        await expectAIError(containing: "长度限制") {
+            try await OpenAICompatibleProvider(session: makeSession()).execute(request(), apiKey: "key") { event in
+                if case .usage(let usage) = event { recorder.record(usage) }
+            }
+        }
+        let usage = try #require(recorder.first())
+        #expect(usage.inputTokens == 11)
+        #expect(usage.outputTokens == 7)
+        #expect(usage.totalTokens == 18)
+        #expect(usage.cachedInputTokens == 3)
+        #expect(usage.reasoningTokens == 2)
+        #expect(usage.model == "deepseek-test")
+    }
+
+    @Test("MiniMax HTTP 200 中的 base_resp 业务错误不会被当作成功")
+    func rejectsMiniMaxBusinessError() async throws {
+        MockURLProtocol.handler = { _ in
+            .init(status: 200, body: #"{"base_resp":{"status_code":1004},"usage":{"prompt_tokens":6,"completion_tokens":1}}"#)
+        }
+        defer { MockURLProtocol.handler = nil }
+        let recorder = UsageRecorder()
+        await expectAIError(containing: "服务状态 1004") {
+            try await OpenAICompatibleProvider(session: makeSession()).execute(request(), apiKey: "key") { event in
+                if case .usage(let usage) = event { recorder.record(usage) }
+            }
+        }
+        #expect(recorder.first()?.totalTokens == 7)
+    }
+
+    @Test("模型列表复用安全边界，GLM 返回官方预设且不会联网")
+    func modelCatalogDiscoveryAndGLMFallback() async throws {
+        let recorder = RequestRecorder()
+        MockURLProtocol.handler = { wire in
+            recorder.record(wire)
+            return .init(status: 200, body: #"{"data":[{"id":"deepseek-v4-pro","name":"Pro"},{"id":"deepseek-flash"}]}"#)
+        }
+        defer { MockURLProtocol.handler = nil }
+        let connection = AIConnection(name: "DeepSeek", baseURL: "https://api.deepseek.com", model: "deepseek-flash")
+        let catalog = try await HTTPAIModelCatalogProvider(session: makeSession()).models(for: connection, apiKey: "key")
+        if case .remote = catalog.source { } else { Issue.record("应来自远端模型列表") }
+        #expect(catalog.models.map(\.id) == ["deepseek-flash", "deepseek-v4-pro"])
+        #expect(recorder.latest()?.url?.absoluteString == "https://api.deepseek.com/models")
+        #expect(recorder.latest()?.value(forHTTPHeaderField: "Authorization") == "Bearer key")
+
+        MockURLProtocol.handler = { _ in
+            Issue.record("GLM 预设不应发起网络请求")
+            return .init(status: 500, body: "")
+        }
+        let glm = AIConnection(name: "GLM", baseURL: AIProviderPreset.glm.baseURL, model: "glm-5", preset: .glm)
+        let preset = try await HTTPAIModelCatalogProvider(session: makeSession()).models(for: glm, apiKey: "key")
+        if case .officialPreset = preset.source { } else { Issue.record("GLM 应明确标识为官方预设") }
+        #expect(preset.models.map(\.id) == ["glm-5"])
+    }
 }
 
 private func request(baseURL: String = "https://model.example/v1") -> AIExecutionRequest {
@@ -181,6 +242,13 @@ private final class RequestRecorder: @unchecked Sendable {
     }
     func latest() -> URLRequest? { lock.withLock { request } }
     func latestBody() -> Data? { lock.withLock { body } }
+}
+
+private final class UsageRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [AITokenUsage] = []
+    func record(_ usage: AITokenUsage) { lock.withLock { values.append(usage) } }
+    func first() -> AITokenUsage? { lock.withLock { values.first } }
 }
 
 private func requestBodyData(_ request: URLRequest) -> Data? {

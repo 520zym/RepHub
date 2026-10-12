@@ -34,6 +34,33 @@ final class CLIProviderTests: XCTestCase {
         XCTAssertEqual(delivered, "Claude 草稿")
     }
 
+    func testCLIUsageUsesProtocolSpecificCacheAccounting() async throws {
+        let codex = try makeCLI(mode: "codex-success")
+        defer { try? FileManager.default.removeItem(at: codex.deletingLastPathComponent()) }
+        let codexUsage = UsageLog()
+        _ = try await CLIProvider(kind: .codexCLI).execute(request(kind: .codexCLI, executable: codex.path), apiKey: nil) { event in
+            if case .usage(let usage) = event { await codexUsage.append(usage) }
+        }
+        let codexValue = await codexUsage.last()
+        let codexReported = try XCTUnwrap(codexValue)
+        XCTAssertEqual(codexReported.inputTokens, 12)
+        XCTAssertEqual(codexReported.cachedInputTokens, 5)
+        XCTAssertEqual(codexReported.totalTokens, 15)
+
+        let claude = try makeCLI(mode: "claude-success")
+        defer { try? FileManager.default.removeItem(at: claude.deletingLastPathComponent()) }
+        let claudeUsage = UsageLog()
+        _ = try await CLIProvider(kind: .claudeCLI).execute(request(kind: .claudeCLI, executable: claude.path), apiKey: nil) { event in
+            if case .usage(let usage) = event { await claudeUsage.append(usage) }
+        }
+        let claudeValue = await claudeUsage.last()
+        let claudeReported = try XCTUnwrap(claudeValue)
+        XCTAssertEqual(claudeReported.inputTokens, 10) // 5 + 3 + 2
+        XCTAssertEqual(claudeReported.cachedInputTokens, 3)
+        XCTAssertEqual(claudeReported.cacheCreationInputTokens, 2)
+        XCTAssertEqual(claudeReported.totalTokens, 14)
+    }
+
     func testClaudeCheckAcceptsCurrentSafetyOptions() async throws {
         let script = try makeCLI(mode: "claude-success")
         defer { try? FileManager.default.removeItem(at: script.deletingLastPathComponent()) }
@@ -172,14 +199,14 @@ final class CLIProviderTests: XCTestCase {
             print -- '{"type":"item.updated","item":{"id":"r","type":"reasoning","text":"不要展示"}}'
             print -- '{"type":"item.updated","item":{"id":"a","type":"agent_message","text":"提交"}}'
             print -- '{"type":"item.completed","item":{"id":"a","type":"agent_message","text":"提交说明"}}'
-            print -- '{"type":"turn.completed","status":"completed"}'
+            print -- '{"type":"turn.completed","status":"completed","usage":{"input_tokens":12,"output_tokens":3,"cached_input_tokens":5}}'
             ;;
           claude-success)
             [[ "$args" == *"--model fixture-model"* && "$args" == *"--safe-mode"* && "$args" == *"--tools  --disallowedTools mcp__*"* && "$args" == *"--permission-mode dontAsk"* && "$args" == *"--output-format stream-json"* ]] || { print -u2 'unsafe claude flags'; exit 94; }
             payload=$(cat)
             [[ "$payload" == *"secret diff"* ]] || { print -u2 'stdin missing diff'; exit 95; }
             print -- '{"type":"assistant","message":{"content":[{"type":"thinking","text":"不要展示"},{"type":"text","text":"Claude 草稿"}]}}'
-            print -- '{"type":"result","subtype":"success","is_error":false,"result":"Claude 最终结果"}'
+            print -- '{"type":"result","subtype":"success","is_error":false,"result":"Claude 最终结果","usage":{"input_tokens":5,"cache_read_input_tokens":3,"cache_creation_input_tokens":2,"output_tokens":4}}'
             ;;
           nonzero)
             print -- '{"type":"item.completed","item":{"id":"a","type":"agent_message","text":"不能当成功"}}'
@@ -230,4 +257,10 @@ private actor ProgressLog {
     private var values: [String] = []
     func append(_ value: String) { values.append(value) }
     func text() -> String { values.joined() }
+}
+
+private actor UsageLog {
+    private var values: [AITokenUsage] = []
+    func append(_ usage: AITokenUsage) { values.append(usage) }
+    func last() -> AITokenUsage? { values.last }
 }

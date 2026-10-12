@@ -110,6 +110,85 @@ struct AISettingsStoreTests {
         #expect(store.connections.map(\.id) == [cli.id])
     }
 
+    @Test("场景固定模型必须绑定连接，删除连接后会一并清除")
+    func sceneModelOverrideLifecycle() throws {
+        let (defaults, suite) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = AISettingsStore(secrets: MemorySecrets(), defaults: defaults)
+        let connection = AIConnection(name: "API", baseURL: "https://example.com/v1", model: "default")
+        try store.saveConnection(connection)
+        let scene = AIScene(name: "审查", kind: .codeReview, prompt: "审查", connectionID: connection.id, modelOverride: "  focused-model  ")
+        try store.saveScene(scene)
+        #expect(store.scenes.last?.modelOverride == "focused-model")
+        try store.deleteConnection(id: connection.id)
+        #expect(store.scenes.last?.connectionID == nil)
+        #expect(store.scenes.last?.modelOverride == nil)
+    }
+
+    @Test("用量记录限制容量且不保存内容字段")
+    func usageStorePersistsSafeBoundedRecords() {
+        let (defaults, suite) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let usage = AIUsageStore(defaults: defaults)
+        let connectionID = UUID()
+        let sceneID = UUID()
+        for index in 0...(AIUsageStore.maximumRecords + 2) {
+            usage.record(.init(date: Date(timeIntervalSince1970: TimeInterval(index)), connectionID: connectionID,
+                               connectionName: "连接", sceneID: sceneID, sceneName: "场景", model: "model",
+                               durationSeconds: 1, outcome: .succeeded,
+                               usage: .init(inputTokens: index, outputTokens: 1)))
+        }
+        #expect(usage.records.count == AIUsageStore.maximumRecords)
+        #expect(usage.records.first?.usage?.inputTokens == AIUsageStore.maximumRecords + 2)
+        let raw = String(decoding: defaults.data(forKey: "rephub.ai.usage.v1")!, as: UTF8.self)
+        #expect(!raw.contains("prompt"))
+        #expect(!raw.contains("/private/repository"))
+    }
+
+    @Test("保留旧密钥时不能将它带到新的服务主机")
+    func changingServiceHostRequiresNewKeyButChangingPathDoesNot() throws {
+        let (defaults, suite) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let secrets = MemorySecrets()
+        let store = AISettingsStore(secrets: secrets, defaults: defaults)
+        let old = AIConnection(name: "旧服务", baseURL: "https://old.example/v1", model: "model")
+        try store.saveConnection(old, apiKey: "old-key")
+
+        var sameHost = old
+        sameHost.baseURL = "https://old.example/v2"
+        try store.saveConnection(sameHost)
+        #expect(store.connections.count == 1)
+        #expect(store.connections.first?.baseURL == "https://old.example/v2")
+        #expect(try store.hasSecret(for: old.id))
+
+        var newHost = sameHost
+        newHost.baseURL = "https://new.example/v1"
+        do {
+            try store.saveConnection(newHost)
+            Issue.record("切换主机且未填写密钥时必须拒绝保存")
+        } catch {
+            #expect(error.localizedDescription == "更换服务地址后请填写新密钥，或先移除原密钥。")
+        }
+        #expect(store.connections.first?.baseURL == "https://old.example/v2")
+        #expect(try store.hasSecret(for: old.id))
+    }
+
+    @Test("带有旧密钥的命令行连接改为 API 时需要新密钥")
+    func changingCLIConnectionToAPIRequiresNewKey() throws {
+        let (defaults, suite) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = AISettingsStore(secrets: MemorySecrets(), defaults: defaults)
+        let cli = AIConnection(name: "本地命令", kind: .codexCLI, timeoutSeconds: 30)
+        try store.saveConnection(cli, apiKey: "legacy-secret")
+        var api = cli
+        api.kind = .openAICompatible
+        api.baseURL = "https://api.example/v1"
+        api.model = "model"
+        #expect(throws: AIError.self) { try store.saveConnection(api) }
+        #expect(store.connections.count == 1)
+        #expect(store.connections.first?.kind == .codexCLI)
+    }
+
     private func makeDefaults() -> (UserDefaults, String) {
         let suite = "RepHub.AISettingsStoreTests.\(UUID().uuidString)"
         return (UserDefaults(suiteName: suite)!, suite)
