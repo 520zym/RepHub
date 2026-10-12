@@ -318,3 +318,31 @@ Claude Code 2.1.177 不再提供旧的 `--permission-prompts` 和 `--max-turns` 
 - 最终版另用同一隔离来源和新的空 Git 目标验证快照模式：固定 r4，只生成 1 条 Git 提交；发布前远端无引用，发布后本地与远端 `main` 一致，末端为 `26651e1755f6bbd2794f55eb80125a2c37acc1a6`。实窗确认来源／目标摘要、作者占位说明、双侧二进制摘要及发布结果提示；文件栏缩窄后为双侧内容留出空间。
 - 最终 `scripts/build-app.sh` 编译、打包、临时签名和 `codesign --verify --deep --strict build/RepHub.app` 均通过。验收后退出 QA 应用；截图仅通过原生工具即时查看，未声明归档截图文件。
 - 首版仅支持所选 SVN 目录可读取的线性历史或显式快照。Git→Git、Git→SVN、SVN→SVN、已有目标历史合并和持续同步尚未实现；单个对象超过 16 MiB 时会阻断核对与发布。具体功能与恢复边界见[仓库迁移设计](repository-migration.md)。
+
+## 2026-10-12：兼容当前 SVN 工作副本与增量补迁
+
+原有“新目录迁移”保留，另增“当前工作副本”入口。首次在原目录保留 `.svn` 并安装已核对的 `.git`；后续从记录的 SVN 截止修订继续补迁。两种模式共享原生迁移入口，但各自保留执行和恢复边界。
+
+本轮定向命令 `swift test --filter 'Migration|WorkspaceModelTests'` 覆盖 **68 个不同测试，全部通过，无跳过**，日志为 `/tmp/rephub-working-copy-final-tests.log`：
+
+| 范围 | 通过数 | 主要核对项 |
+| --- | ---: | --- |
+| SVN 迁移适配器 | 8 | 固定修订、分页、完整工作副本检查、混合修订与嵌套目录拒绝 |
+| Git 迁移目标 | 10 | 旧模式回归、原地安装、提交来源标记、三方应用、发布条件与重试 |
+| SVN→Git 集成 | 8 | 首次迁移、后续补迁、独立 Git 提交保留、冲突隔离、远端变化及应用成功后响应丢失 |
+| 迁移编排与恢复 | 8 | 旧检查点恢复、接管记录校验、历史起点与源身份 |
+| 迁移 UI 模型 | 5 | 预览失效、工作区写锁、退出取消 |
+| 工作区及关联模型 | 29 | 原有仓库打开、刷新、关联和操作互斥回归 |
+
+测试还覆盖两个实际发现的问题：父目录检查在文件系统根目录必须停止；SVN 空目录对应的 Git 空树必须真实写入对象库，以通过对象核对和远端发布。修复后上述组合测试全部通过。
+
+原生验收仅使用 `scripts/create-working-copy-migration-fixtures.py` 创建的本地 `file://` SVN、临时 Git bare 远端和独立应用标识 `com.zym.RepHub.workingCopyMigrationQA`。夹具清单为 `/tmp/rephub-working-copy-migration-fixtures.json`，测试根目录为 `RepHub-Migration-QA-8700b0ee-ed90-4bf6-a1a3-39f704362ac8`；没有打开、读取或写入正式业务仓库和远端。
+
+1. 在原 SVN 工作副本 BASE r4 上预检并转换 r2～r4 共 3 条历史。预览期间原目录未创建 `.git`，文件摘要不变，目标 Git 无引用。原生概览、文件树、中文／二进制预览、历史与删除文件差异均已检查。
+2. 确认应用并发布后，本地与远端 `main` 均为 `59de9b0aae52f47a0fd50aee56982abc0dfa9233`。原文件及未跟踪文件保留，`.svn` 保留且 BASE 仍为 r4。生成提交写入源 URL、UUID、各自修订、历史起点 r2、截止 r4 和接管 BASE r4。
+3. 用另一个临时 SVN 工作副本提交 r5，原目录不执行 SVN 更新；在原目录 Git 独立提交并推送 `Git独立开发.txt`。重新进入当前工作副本迁移后，自动读取原目标与分支，预检只列出本次新增 r5。预览时本地 HEAD 和 `.svn/wc.db` 均未变化，Git 独立文件在转换前后内容一致。
+4. 确认补迁并发布后，本地与远端 `main` 均为 `297f02ff923cd59592999dca28a884082e3058af`。结果共 5 条 Git 提交，其中 4 条为 SVN 映射、1 条为独立 Git 提交；最后 SVN 锚点 r5，接管点仍为 r4，原 SVN BASE 仍为 r4。`.svn/wc.db` SHA-256 前后均为 `a6fc4f60cb6952b127b17e982212ae6fab878d72ffc6c51c56a3e998cad9db6d`，独立 Git 文件与未跟踪文件保留。
+
+本地验收截图保存在 `build/verification/working-copy-supplement-preview.png` 和 `build/verification/working-copy-supplement-published.png`（构建目录不纳入版本管理）。随后仅调整文件提示、空目录省略徽标与关闭说明；最终 `scripts/build-app.sh` 编译、打包、临时签名及 `codesign --verify --deep --strict build/RepHub.app` 通过，构建日志为 `/tmp/rephub-working-copy-package.log`。
+
+当前工作副本模式不承诺未应用预览跨重启恢复；已应用但未发布时保留 `origin` 和分支关联，可通过仓库管理继续 Git 推送。补迁不自动更新或提交 SVN，不提供持续双向同步。真实旧 TLS SVN 迁移及 Git→Git、Git→SVN、SVN→SVN 不在本轮验证范围内。

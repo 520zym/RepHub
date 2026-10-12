@@ -24,14 +24,17 @@ struct RepHubApp: App {
         self.aiService = service
         let svn = SVNProvider()
         let repositories = RepositoryService(providers: [GitProvider(), svn])
-        let migrations = RepositoryMigrationService(sources: [svn], targets: [GitMigrationTargetProvider()])
+        let migrationTarget = GitMigrationTargetProvider()
+        let migrations = RepositoryMigrationService(sources: [svn], targets: [migrationTarget])
+        let workingCopyMigrations = WorkingCopyMigrationService(source: svn, target: migrationTarget)
         _aiSettings = State(initialValue: settings)
         _workspace = State(initialValue: WorkspaceModel(service: repositories,
                                                         aiSettings: settings, aiService: service,
                                                         recentRepositories: RecentRepositoryStore(defaults: .standard),
                                                         workspaceLinks: WorkspaceLinkStore(defaults: .standard),
                                                         monitor: WorkspaceMonitor(service: repositories, defaults: .standard),
-                                                        migrationService: migrations))
+                                                        migrationService: migrations,
+                                                        workingCopyMigrationService: workingCopyMigrations))
     }
 
     var body: some Scene {

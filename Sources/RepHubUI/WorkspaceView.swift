@@ -13,6 +13,7 @@ public struct WorkspaceView: View {
     @State private var commitTargets: Set<String> = []
     @State private var showsOperationSheet = false
     @State private var showsCommitSheet = false
+    @State private var migrationResultToOpen: URL?
     @FocusState private var commitMessageFocused: Bool
 
     public init(model: WorkspaceModel, appearance: AppearanceStore) {
@@ -114,15 +115,26 @@ public struct WorkspaceView: View {
                 model.open(result.directory)
             })
         }
-        .sheet(isPresented: $model.showsRepositoryMigration, onDismiss: { model.repositoryMigration?.dismiss() }) {
+        .sheet(isPresented: $model.showsRepositoryMigration, onDismiss: {
+            model.repositoryMigration?.dismiss()
+            model.workingCopyMigration?.dismiss()
+            if let directory = migrationResultToOpen {
+                migrationResultToOpen = nil
+                model.open(directory)
+            } else {
+                model.refresh()
+            }
+        }) {
             if let migration = model.repositoryMigration {
-                RepositoryMigrationView(model: migration, palette: palette, dismiss: {
+                RepositoryMigrationView(model: migration, workingCopyModel: model.workingCopyMigration, palette: palette, dismiss: {
                     migration.dismiss()
+                    model.workingCopyMigration?.dismiss()
                     model.showsRepositoryMigration = false
                 }, openResult: { result in
+                    migrationResultToOpen = result
                     migration.dismiss()
+                    model.workingCopyMigration?.dismiss()
                     model.showsRepositoryMigration = false
-                    model.open(result)
                 })
             }
         }

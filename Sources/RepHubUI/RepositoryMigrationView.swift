@@ -5,14 +5,46 @@ import VersionControlCore
 /// SVN → Git 迁移窗口。预览完成前不会调用远端发布。
 struct RepositoryMigrationView: View {
     @Bindable var model: RepositoryMigrationModel
+    let workingCopyModel: WorkingCopyMigrationModel?
     let palette: AppPalette
     let dismiss: () -> Void
     let openResult: (URL) -> Void
     @State private var previewTab: PreviewTab = .overview
+    @State private var route: Route = .newDirectory
 
     private enum PreviewTab: Hashable { case overview, files, history }
+    private enum Route: Hashable { case newDirectory, workingCopy }
+
+    init(model: RepositoryMigrationModel, workingCopyModel: WorkingCopyMigrationModel? = nil,
+         palette: AppPalette, dismiss: @escaping () -> Void, openResult: @escaping (URL) -> Void) {
+        self._model = Bindable(wrappedValue: model)
+        self.workingCopyModel = workingCopyModel
+        self.palette = palette
+        self.dismiss = dismiss
+        self.openResult = openResult
+    }
 
     var body: some View {
+        VStack(spacing: 0) {
+            if let workingCopyModel {
+                WorkbenchSegmentedPicker(title: "迁移路径", selection: $route,
+                                         options: [.init(.newDirectory, "新目录迁移"), .init(.workingCopy, "当前工作副本")], palette: palette)
+                    .frame(width: 310).padding(.vertical, 10)
+                    .disabled(model.isBusy || workingCopyModel.isBusy)
+                Divider().opacity(0.2)
+            }
+            if route == .workingCopy, let workingCopyModel {
+                WorkingCopyMigrationView(model: workingCopyModel, palette: palette, dismiss: dismiss, completed: openResult)
+            } else {
+                newDirectoryContent
+            }
+        }
+        .background(palette.background)
+        .foregroundStyle(palette.text)
+        .interactiveDismissDisabled(model.isBusy || workingCopyModel?.isBusy == true)
+    }
+
+    private var newDirectoryContent: some View {
         VStack(spacing: 0) {
             header
             Divider().opacity(0.25)
@@ -26,9 +58,6 @@ struct RepositoryMigrationView: View {
             footer
         }
         .frame(minWidth: 760, idealWidth: 930, minHeight: 580, idealHeight: 710)
-        .background(palette.background)
-        .foregroundStyle(palette.text)
-        .interactiveDismissDisabled(model.isBusy)
     }
 
     private var header: some View {
