@@ -7,7 +7,7 @@ import VersionControlCore
 
 /// 通过 Subversion 命令行读取工作副本，并执行受限的更新、远端浏览和检出操作。
 /// 用户输入的认证信息只保留在当前进程内存中，不写入 SVN 认证缓存。
-public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingProvider, RepositoryAcquisitionProvider, RepositoryCommitProvider, RepositorySetupProvider, RepositoryManagementProvider, RepositoryComparisonProvider {
+public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingProvider, RepositoryAcquisitionProvider, RepositoryCommitProvider, RepositorySetupProvider, RepositoryManagementProvider, RepositoryComparisonProvider, RepositoryMigrationSourceProvider {
     public let runner: CommandRunner
     private let tlsFallback: SVNAutomaticTLSFallback
     private let commandExecutor: @Sendable ([String], URL, URL?) async throws -> CommandResult
@@ -1151,6 +1151,221 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         let target = try repositoryFileURL(path: normalized, in: binding)
         let result = try await svn(["diff", "-r", "\(from):\(to)", "--", "\(target)@\(peg)"], directory: binding.root, remoteURL: binding.remoteURL)
         return RepositoryPatch(text: result.output)
+    }
+
+    // MARK: - Repository migration source
+
+    /// 迁移计划始终先把远端 HEAD 固定为一个数值修订。后续历史读取和每一次导出都使用
+    /// 同一个 peg，避免迁移过程中有新提交时把不同版本混在同一条 Git 历史里。
+    public func planMigration(
+        from location: RemoteRepositoryLocation,
+        mode: MigrationMode,
+        progress: @escaping RepositoryOperationProgressHandler
+    ) async throws -> MigrationSourcePlan {
+        let address = try normalizedRemoteAddress(location.url)
+        try await rememberCredentials(location.credentials, for: address)
+        await progress(RepositoryOperationProgress("固定 SVN 来源版本…"))
+
+        let info = try await runRemoteRead(["info", "--xml", "-r", "HEAD", svnRemoteTarget(address)], remoteURL: address)
+        guard let entry = try SVNXMLDocument(data: info.data).infoEntry,
+              entry.kind == "dir",
+              let rawAnchor = entry.revision,
+              let anchorNumber = Int(rawAnchor), anchorNumber > 0 else {
+            throw VersionControlError.invalidRepository("SVN 迁移来源必须是已有修订的目录。")
+        }
+        let anchor = String(anchorNumber)
+        let target = migrationTarget(address, pegRevision: anchor)
+
+        switch mode {
+        case .snapshot:
+            // 不读取仓库根目录：只对已获授权的选定目录查询，避免子目录权限用户在
+            // 实际导出前就被根目录日志拒绝。该记录仅提供快照上下文，不能伪装成 rN 本身。
+            let metadata = try await runRemoteRead(
+                ["log", "--xml", "--limit", "1", "-r", "\(anchor):1", target],
+                remoteURL: address
+            )
+            guard let log = try SVNXMLDocument(data: metadata.data).logEntries.first else {
+                throw VersionControlError.invalidData("无法读取选定 SVN 目录在固定版本 r\(anchor) 的提交上下文。")
+            }
+            let revision = try migrationSnapshotRevision(anchor: anchor, context: log)
+            var warnings = migrationWarnings()
+            if revision.author.isEmpty {
+                warnings.append("SVN 快照上下文未包含作者；发布前需为该提交指定 Git 作者。")
+            }
+            await progress(RepositoryOperationProgress("已固定 SVN r\(anchor)，将仅导出当前快照。"))
+            return MigrationSourcePlan(
+                providerID: id, location: RemoteRepositoryLocation(url: address, credentials: location.credentials), anchor: "r\(anchor)",
+                mode: mode, revisions: [revision], warnings: warnings
+            )
+
+        case .history:
+            await progress(RepositoryOperationProgress("读取 SVN 目录历史…", detail: "已固定到 r\(anchor)，正在分页读取。"))
+            let revisions = try await migrationHistory(target: target, address: address, anchor: anchor, progress: progress)
+            guard !revisions.isEmpty else {
+                throw VersionControlError.invalidData("SVN 目录没有可迁移的提交历史。")
+            }
+            var warnings = migrationWarnings()
+            if revisions.contains(where: { $0.author.isEmpty }) {
+                warnings.append("部分 SVN 提交未包含作者；发布前需为这些提交指定 Git 作者。")
+            }
+            return MigrationSourcePlan(
+                providerID: id, location: RemoteRepositoryLocation(url: address, credentials: location.credentials), anchor: "r\(anchor)",
+                mode: mode, revisions: revisions, warnings: warnings
+            )
+        }
+    }
+
+    /// 导出始终写入业务层已分配的全新目录。SVN 远端和源工作副本均不会被写入。
+    public func exportMigrationSnapshot(
+        plan: MigrationSourcePlan,
+        revision: MigrationRevision,
+        to directory: URL,
+        progress: @escaping RepositoryOperationProgressHandler
+    ) async throws {
+        guard plan.providerID == id else {
+            throw VersionControlError.invalidData("迁移计划不属于 SVN 来源适配器。")
+        }
+        let address = try normalizedRemoteAddress(plan.location.url)
+        try await rememberCredentials(plan.location.credentials, for: address)
+        let anchor = try migrationAnchor(plan.anchor)
+        guard plan.revisions.contains(revision) else {
+            throw VersionControlError.invalidData("请求导出的修订不在当前固定迁移计划中。")
+        }
+        let exportRevision = try numericSVNRevision(revision.id)
+        guard exportRevision > 0, exportRevision <= anchor else {
+            throw VersionControlError.invalidData("SVN 导出修订超出固定迁移范围。")
+        }
+
+        let destination = directory.standardizedFileURL
+        let manager = FileManager.default
+        let isLink = (try? manager.destinationOfSymbolicLink(atPath: destination.path)) != nil
+        guard !manager.fileExists(atPath: destination.path), !isLink else {
+            throw VersionControlError.invalidRepository("迁移快照目标已存在：\(destination.path)")
+        }
+        var parentIsDirectory = ObjCBool(false)
+        let parent = destination.deletingLastPathComponent().standardizedFileURL
+        guard manager.fileExists(atPath: parent.path, isDirectory: &parentIsDirectory), parentIsDirectory.boolValue else {
+            throw VersionControlError.invalidRepository("迁移快照目标的父目录不存在：\(parent.path)")
+        }
+
+        await progress(RepositoryOperationProgress("检查 SVN r\(exportRevision) 导出连接…"))
+        let tlsMode = try await probeRemoteTLSMode(address)
+        try Task.checkCancellation()
+
+        await progress(RepositoryOperationProgress("导出 SVN r\(exportRevision)…", detail: "正在生成隔离迁移快照。"))
+        let reporter = SVNTransferProgressReporter(root: destination, operationName: "正在导出 SVN 快照…", progress: progress)
+        let output: CommandOutputHandler = { lines in
+            await reporter.receive(lines: lines.compactMap { $0.stream == .stdout ? $0.text : nil })
+        }
+        let command = [
+            "--non-interactive", "--no-auth-cache", "export", "--ignore-externals",
+            "-r", String(exportRevision), migrationTarget(address, pegRevision: String(anchor)), destination.path
+        ]
+        do {
+            let result = try await runRemoteWrite(command, remoteURL: address, tlsMode: tlsMode, timeout: 600, onOutput: output)
+            _ = try requireSuccess(result, tool: "svn")
+            await reporter.finish()
+        } catch {
+            await reporter.finish()
+            // 复制/改名祖先、删除节点等导致的历史路径不可导出时，必须阻断整个迁移，
+            // 不能跳过该修订后继续生成一条看似完整的 Git 历史。
+            if isMissingSVNPath(error) {
+                throw VersionControlError.invalidData("SVN r\(exportRevision) 无法从固定来源路径导出；该目录可能在此修订尚不存在、已删除，或需要无法解析的复制/改名祖先。请改用快照模式或调整迁移范围。")
+            }
+            throw error
+        }
+        try Task.checkCancellation()
+        await progress(RepositoryOperationProgress("SVN r\(exportRevision) 快照导出完成。"))
+    }
+
+    private func migrationHistory(
+        target: String,
+        address: String,
+        anchor: String,
+        progress: @escaping RepositoryOperationProgressHandler
+    ) async throws -> [MigrationRevision] {
+        // 与普通界面分页不同，迁移不允许为了响应速度静默停在 150 条。每轮由 SVN
+        // 返回最多 500 条，下一轮严格从上一批最旧修订的前一个数值继续。
+        let pageSize = 500
+        var upper = try numericSVNRevision(anchor)
+        var result: [MigrationRevision] = []
+        var seen = Set<String>()
+        while upper > 0 {
+            try Task.checkCancellation()
+            let response = try await runRemoteRead(
+                ["log", "--xml", "-v", "--limit", String(pageSize), "-r", "\(upper):1", target],
+                remoteURL: address
+            )
+            let entries = try SVNXMLDocument(data: response.data).logEntries
+            guard !entries.isEmpty else { break }
+            for entry in entries {
+                let revision = try migrationRevision(from: entry, fallbackRevision: entry.revision)
+                guard seen.insert(revision.id).inserted else {
+                    throw VersionControlError.invalidData("SVN 迁移历史出现重复修订：\(revision.id)")
+                }
+                result.append(revision)
+            }
+            guard let last = entries.last, let lastNumber = Int(last.revision), lastNumber > 0 else {
+                throw VersionControlError.invalidData("SVN 返回了无效的迁移历史修订号。")
+            }
+            await progress(RepositoryOperationProgress("读取 SVN 目录历史…", detail: "已读取 \(result.count) 条提交，当前到 r\(lastNumber)。"))
+            if entries.count < pageSize || lastNumber == 1 { break }
+            upper = lastNumber - 1
+        }
+        // SVN 按从新到旧返回；Git 目标需要从旧到新逐个重建快照提交。
+        return result.reversed()
+    }
+
+    private func migrationRevision(from entry: SVNXMLDocument.LogEntry, fallbackRevision: String) throws -> MigrationRevision {
+        let raw = entry.revision.isEmpty ? fallbackRevision : entry.revision
+        return MigrationRevision(
+            id: "r\(normalizedRevision(raw))", author: entry.author ?? "",
+            date: try migrationDate(entry.date, revision: raw), message: entry.message ?? ""
+        )
+    }
+
+    private func migrationSnapshotRevision(anchor: String, context: SVNXMLDocument.LogEntry) throws -> MigrationRevision {
+        let contextRevision = normalizedRevision(context.revision)
+        let originalMessage = (context.message ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let contextDescription = originalMessage.isEmpty
+            ? "目录最近相关提交 r\(contextRevision)"
+            : "目录最近相关提交 r\(contextRevision)：\(originalMessage)"
+        return MigrationRevision(
+            // 快照内容始终来自固定锚点；不能用目录最近提交的 rM 冒充实际导出版本。
+            id: "r\(anchor)", author: context.author ?? "",
+            date: try migrationDate(context.date, revision: contextRevision),
+            message: "SVN 快照 r\(anchor)（\(contextDescription)）"
+        )
+    }
+
+    private func migrationDate(_ value: String?, revision: String) throws -> Date {
+        guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw VersionControlError.invalidData("SVN r\(normalizedRevision(revision)) 缺少提交时间，无法如实保留迁移历史。")
+        }
+        let date = parseDate(value)
+        guard date != .distantPast else {
+            throw VersionControlError.invalidData("SVN r\(normalizedRevision(revision)) 的提交时间无法解析，无法如实保留迁移历史。")
+        }
+        return date
+    }
+
+    private func migrationAnchor(_ raw: String) throws -> Int {
+        let anchor = try numericSVNRevision(raw)
+        guard anchor > 0 else { throw VersionControlError.invalidData("SVN 迁移锚点必须是正整数修订号。") }
+        return anchor
+    }
+
+    private func migrationTarget(_ address: String, pegRevision: String) -> String {
+        "\(address)@\(normalizedRevision(pegRevision))"
+    }
+
+    private func migrationWarnings() -> [String] {
+        [
+            "仅迁移当前账号在所选 SVN 目录可读取的线性历史；服务端权限或保留策略导致不可读取的历史不会被伪称已迁移。跨目录复制、改名或删除导致任一历史修订无法导出时会停止，不会跳过。",
+            "SVN 的自定义属性、锁、权限与目录属性不能完整映射到 Git；可执行位和符号链接由 SVN 导出结果保留。",
+            "SVN externals 不会随迁移导出；请在预览中单独处理外部依赖。",
+            "迁移过程中本地未提交修改不属于远端 SVN 历史，不会被包含。"
+        ]
     }
 
     private func svn(_ arguments: [String], directory: URL, remoteURL: String? = nil) async throws -> CommandResult {
