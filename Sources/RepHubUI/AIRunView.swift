@@ -159,12 +159,12 @@ public struct AIRunView: View {
     private func connectionDescription(_ connection: AIConnection) -> some View {
         let text: String
         switch connection.kind {
-        case .openAICompatible:
-            text = "API · \(connection.baseURL) · \(connection.model)"
+        case .openAICompatible, .openAIResponses, .anthropicMessages:
+            text = "\(connection.kind.title) · \(connection.baseURL) · \(connection.model)"
         case .codexCLI, .claudeCLI:
             text = "本机 CLI · 客户端仅提供所选差异，并按只读配置在临时目录运行"
         }
-        return Label(text, systemImage: connection.kind == .openAICompatible ? "network" : "terminal")
+        return Label(text, systemImage: connection.kind.isAPI ? "network" : "terminal")
             .font(.system(size: 11)).foregroundStyle(palette.secondaryText).lineLimit(1).truncationMode(.middle)
     }
 

@@ -116,7 +116,8 @@ public struct AISettingsView: View {
 
     private func detail(for connection: AIConnection) -> String {
         switch connection.kind {
-        case .openAICompatible: return connection.model + " · " + connection.baseURL
+        case .openAICompatible, .openAIResponses, .anthropicMessages:
+            return connection.kind.title + " · " + connection.model + " · " + connection.baseURL
         case .codexCLI, .claudeCLI: return connection.executablePath.isEmpty ? "自动检测本机命令" : connection.executablePath
         }
     }
@@ -128,7 +129,7 @@ public struct AISettingsView: View {
 
     private func icon(for kind: AIConnectionKind) -> String {
         switch kind {
-        case .openAICompatible: "network"
+        case .openAICompatible, .openAIResponses, .anthropicMessages: "network"
         case .codexCLI: "terminal"
         case .claudeCLI: "command"
         }
@@ -162,10 +163,12 @@ private struct ConnectionEditor: View {
                     }
                     TextField("超时（秒）", value: $connection.timeoutSeconds, format: .number)
                 }
-                if connection.kind == .openAICompatible {
+                if connection.kind.isAPI {
                     Section("模型 API") {
                         TextField("API 地址", text: $connection.baseURL, prompt: Text("https://api.example.com/v1"))
-                        TextField("模型", text: $connection.model, prompt: Text("例如 gpt-5"))
+                        TextField("模型", text: $connection.model, prompt: Text("填写服务提供的模型标识"))
+                        Text(apiDescription)
+                            .font(.caption).foregroundStyle(.secondary)
                         SecureField("API 密钥", text: $apiKey, prompt: Text("留空则保持原密钥"))
                         if (try? store.hasSecret(for: connection.id)) == true {
                             HStack {
@@ -214,6 +217,17 @@ private struct ConnectionEditor: View {
         } catch {
             notice = Notice(title: "无法保存连接", message: error.localizedDescription)
         }
+    }
+
+    private var apiDescription: String {
+        let endpoint: String
+        switch connection.kind {
+        case .openAICompatible: endpoint = "chat/completions"
+        case .openAIResponses: endpoint = "responses"
+        case .anthropicMessages: endpoint = "messages"
+        case .codexCLI, .claudeCLI: return ""
+        }
+        return "填写服务基础地址（通常以 /v1 结尾）或完整 /\(endpoint) 地址。检查配置只校验格式，运行场景时才调用模型。"
     }
 
     private func check() {

@@ -5,6 +5,21 @@ import Testing
 
 @MainActor
 struct AISettingsStoreTests {
+    @Test("旧连接 JSON 仍可解码，新 API 种类统一需要模型与地址")
+    func connectionKindsRemainCodableAndValidateAsAPI() throws {
+        let oldJSON = #"{"id":"00000000-0000-0000-0000-000000000001","name":"旧 Chat","kind":"openAICompatible","baseURL":"https://example.com/v1","model":"old","executablePath":"","timeoutSeconds":30}"#
+        let old = try JSONDecoder().decode(AIConnection.self, from: Data(oldJSON.utf8))
+        #expect(old.kind == .openAICompatible)
+        #expect(AIConnectionKind.openAIResponses.isAPI)
+        #expect(AIConnectionKind.anthropicMessages.isAPI)
+        #expect(!AIConnectionKind.codexCLI.isAPI)
+        let (defaults, suite) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = AISettingsStore(secrets: MemorySecrets(), defaults: defaults)
+        try store.saveConnection(.init(name: "Responses", kind: .openAIResponses, baseURL: "https://api.example/v1", model: "gpt"))
+        try store.saveConnection(.init(name: "Messages", kind: .anthropicMessages, baseURL: "https://api.example/v1", model: "claude"))
+        #expect(store.connections.count == 2)
+    }
     @Test("连接 JSON 不包含 API 密钥，密钥只交给 SecretStore")
     func secretNeverAppearsInStoredJSON() throws {
         let (defaults, suite) = makeDefaults()

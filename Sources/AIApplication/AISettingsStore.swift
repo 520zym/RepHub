@@ -127,14 +127,16 @@ public final class AISettingsStore {
               (10...1_800).contains(connection.timeoutSeconds) else {
             throw AIError.invalidConfiguration("超时时间需在 10 秒至 1800 秒之间。")
         }
-        guard connection.kind == .openAICompatible else { return }
+        guard connection.kind.isAPI else { return }
         guard !connection.model.isEmpty else { throw AIError.invalidConfiguration("模型 API 连接需要填写模型名称。") }
         guard !connection.baseURL.isEmpty,
-              let url = URL(string: connection.baseURL),
-              let scheme = url.scheme?.lowercased(),
-              let host = url.host, !host.isEmpty,
+              let components = URLComponents(string: connection.baseURL),
+              let scheme = components.scheme?.lowercased(),
+              let host = components.host, !host.isEmpty,
+              components.user == nil, components.password == nil,
+              components.query == nil, components.fragment == nil,
               ["https", "http"].contains(scheme) else {
-            throw AIError.invalidConfiguration("请填写有效的模型 API 地址。")
+            throw AIError.invalidConfiguration("请填写有效的模型 API 地址，不能包含账号、查询参数或片段。")
         }
         if scheme == "http", !Self.isLoopback(host) {
             throw AIError.invalidConfiguration("非本机模型 API 必须使用 HTTPS；localhost 可使用 HTTP。")

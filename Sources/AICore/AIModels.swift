@@ -2,10 +2,21 @@ import Foundation
 import CryptoKit
 
 public enum AIConnectionKind: String, Codable, CaseIterable, Identifiable, Sendable {
-    case openAICompatible, codexCLI, claudeCLI
+    // 保留原有枚举值，已有连接配置仍可解码。
+    case openAICompatible, openAIResponses, anthropicMessages, codexCLI, claudeCLI
     public var id: String { rawValue }
     public var title: String {
-        switch self { case .openAICompatible: "模型 API（Chat Completions）"; case .codexCLI: "Codex CLI"; case .claudeCLI: "Claude Code" }
+        switch self {
+        case .openAICompatible: "模型 API（Chat Completions）"
+        case .openAIResponses: "OpenAI Responses API"
+        case .anthropicMessages: "Anthropic Messages API"
+        case .codexCLI: "Codex CLI"
+        case .claudeCLI: "Claude Code"
+        }
+    }
+    /// API 连接共用钥匙串密钥、地址与模型校验；CLI 登录令牌不由 RepHub 管理。
+    public var isAPI: Bool {
+        switch self { case .openAICompatible, .openAIResponses, .anthropicMessages: true; case .codexCLI, .claudeCLI: false }
     }
 }
 

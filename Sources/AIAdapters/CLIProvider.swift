@@ -85,7 +85,7 @@ public struct CLIProvider: AIProvider {
         switch kind {
         case .codexCLI: ["exec", "--help"]
         case .claudeCLI: ["--help"]
-        case .openAICompatible: []
+        case .openAICompatible, .openAIResponses, .anthropicMessages: []
         }
     }
 
@@ -95,7 +95,7 @@ public struct CLIProvider: AIProvider {
             ["--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--sandbox", "--ask-for-approval", "--color", "--json"]
         case .claudeCLI:
             ["--safe-mode", "--no-session-persistence", "--tools", "--disallowedTools", "--permission-mode", "--no-chrome", "--output-format", "stream-json", "--input-format", "--verbose"]
-        case .openAICompatible: []
+        case .openAICompatible, .openAIResponses, .anthropicMessages: []
         }
     }
 
@@ -118,7 +118,7 @@ public struct CLIProvider: AIProvider {
             ]
             if !model.isEmpty { arguments.insert(contentsOf: ["--model", model], at: 0) }
             return arguments
-        case .openAICompatible:
+        case .openAICompatible, .openAIResponses, .anthropicMessages:
             return []
         }
     }
@@ -247,7 +247,7 @@ private actor CLIOutputCollector {
         switch kind {
         case .codexCLI: await acceptCodex(event: event, object: object)
         case .claudeCLI: await acceptClaude(event: event, object: object)
-        case .openAICompatible: break
+        case .openAICompatible, .openAIResponses, .anthropicMessages: break
         }
     }
 

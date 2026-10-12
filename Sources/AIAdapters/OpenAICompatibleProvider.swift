@@ -120,7 +120,7 @@ public struct OpenAICompatibleProvider: AIProvider, Sendable {
         guard !raw.isEmpty,
               var components = URLComponents(string: raw),
               let scheme = components.scheme?.lowercased(),
-              let host = components.host?.lowercased(),
+              let host = components.host?.lowercased(), !host.isEmpty,
               components.user == nil, components.password == nil,
               components.query == nil, components.fragment == nil else {
             throw AIError.invalidConfiguration("模型 API 地址无效，不能包含账号、查询参数或片段。")
@@ -132,7 +132,12 @@ public struct OpenAICompatibleProvider: AIProvider, Sendable {
         var path = components.percentEncodedPath
         if !path.hasSuffix("/chat/completions") {
             path = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            path = "/" + (path.isEmpty ? "chat/completions" : path + "/chat/completions")
+            let isOfficialAPIHost = host == "api.openai.com"
+            if path.isEmpty && isOfficialAPIHost {
+                path = "/v1/chat/completions"
+            } else {
+                path = "/" + (path.isEmpty ? "chat/completions" : path + "/chat/completions")
+            }
         }
         components.percentEncodedPath = path
         guard let endpoint = components.url else {

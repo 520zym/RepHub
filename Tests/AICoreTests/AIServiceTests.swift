@@ -26,6 +26,16 @@ final class AIServiceTests: XCTestCase {
         do { _ = try await service.execute(.init(connection:.init(),scene:AIScene.defaults[0],context:context)) { _ in }; XCTFail("必须报错") }
         catch { XCTAssertFalse(error.localizedDescription.contains("synthetic-secret")); XCTAssertTrue(error.localizedDescription.contains("***")) }
     }
+
+    func testNewAPIKindsReadKeyFromSecretStore() async throws {
+        let provider = KeyCapturingProvider(kind: .anthropicMessages)
+        let service = AIService(providers: [provider], secrets: TestSecrets())
+        let connection = AIConnection(name: "Claude", kind: .anthropicMessages, baseURL: "https://api.example/v1", model: "claude", timeoutSeconds: 10)
+        let context = AIContext(sourceLabel: "Git", basis: "HEAD", files: [.init(path: "a", patch: "+text")])
+        let result = try await service.execute(.init(connection: connection, scene: AIScene.defaults[0], context: context)) { _ in }
+        XCTAssertEqual(result, "ok")
+        XCTAssertEqual(provider.key, "synthetic-secret")
+    }
 }
 private struct TestSecrets: AISecretStore {
     func read(for connectionID: UUID) throws -> String? { "synthetic-secret" }
@@ -37,5 +47,17 @@ private struct EchoProvider: AIProvider {
     func check(_ connection: AIConnection) async throws -> String { "fixture" }
     func execute(_ request: AIExecutionRequest, apiKey: String?, progress: @escaping AIProgressHandler) async throws -> String {
         throw AIError.failed("fixture error \(apiKey ?? "")")
+    }
+}
+
+private final class KeyCapturingProvider: AIProvider, @unchecked Sendable {
+    let kind: AIConnectionKind
+    private let lock = NSLock()
+    private var capturedKey: String?
+    init(kind: AIConnectionKind) { self.kind = kind }
+    var key: String? { lock.withLock { capturedKey } }
+    func check(_ connection: AIConnection) async throws -> String { "fixture" }
+    func execute(_ request: AIExecutionRequest, apiKey: String?, progress: @escaping AIProgressHandler) async throws -> String {
+        lock.withLock { capturedKey = apiKey }; return "ok"
     }
 }

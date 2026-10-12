@@ -44,6 +44,17 @@ struct OpenAICompatibleProviderTests {
         #expect(value == "ok")
     }
 
+    @Test("OpenAI 官方根地址会补全 v1 Chat Completions 路径")
+    func officialRootAddsV1Path() async throws {
+        MockURLProtocol.handler = { request in
+            #expect(request.url?.absoluteString == "https://api.openai.com/v1/chat/completions")
+            return .init(status: 200, body: #"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}"#)
+        }
+        defer { MockURLProtocol.handler = nil }
+        let provider = OpenAICompatibleProvider(session: makeSession())
+        #expect(try await provider.execute(request(baseURL: "https://api.openai.com"), apiKey: "key") { _ in } == "ok")
+    }
+
     @Test("拒绝不安全 URL，检查不会访问模型")
     func configurationValidationDoesNotMakeRequest() async throws {
         let provider = OpenAICompatibleProvider(session: makeSession())

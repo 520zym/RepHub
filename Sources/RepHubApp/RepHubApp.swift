@@ -19,7 +19,8 @@ struct RepHubApp: App {
     init() {
         let secrets = KeychainAISecretStore()
         let settings = AISettingsStore(secrets: secrets)
-        let service = AIService(providers: [OpenAICompatibleProvider(), CLIProvider(kind: .codexCLI), CLIProvider(kind: .claudeCLI)], secrets: secrets)
+        let service = AIService(providers: [OpenAICompatibleProvider(), OpenAIResponsesProvider(), AnthropicMessagesProvider(),
+                                            CLIProvider(kind: .codexCLI), CLIProvider(kind: .claudeCLI)], secrets: secrets)
         self.aiService = service
         let repositories = RepositoryService(providers: [GitProvider(), SVNProvider()])
         _aiSettings = State(initialValue: settings)

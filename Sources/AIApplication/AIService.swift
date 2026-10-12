@@ -28,7 +28,7 @@ public struct AIService: Sendable {
             throw AIError.invalidConfiguration("超时时间应在 10～1800 秒之间。")
         }
         let provider = try provider(for: request.connection.kind)
-        let key = request.connection.kind == .openAICompatible ? try secrets.read(for: request.connection.id) : nil
+        let key = request.connection.kind.isAPI ? try secrets.read(for: request.connection.id) : nil
         await progress(.status("正在连接 \(request.connection.name)…"))
         do {
             let response = try await withThrowingTaskGroup(of: String.self) { group in
