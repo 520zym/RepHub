@@ -23,6 +23,7 @@ public struct WorkspaceView: View {
 
     public var body: some View {
         let palette = appearance.palette(for: appearance.preferredColorScheme ?? systemColorScheme)
+        let codePalette = appearance.codePalette(for: appearance.preferredColorScheme ?? systemColorScheme)
         GeometryReader { geometry in
             VStack(spacing: 0) {
                 if model.workspace == nil || model.workspace?.bindings.isEmpty == true {
@@ -140,7 +141,7 @@ public struct WorkspaceView: View {
         }
         .sheet(isPresented: $model.showsAIReview) {
             if let ai = model.aiReview {
-                AIRunView(model: ai, palette: palette, dismiss: { model.showsAIReview = false })
+                AIRunView(model: ai, palette: palette, codePalette: codePalette, dismiss: { model.showsAIReview = false })
             }
         }
         .alert("无法打开仓库", isPresented: Binding(

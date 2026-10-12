@@ -2,7 +2,7 @@ import Foundation
 import VersionControlCore
 
 /// 可跨差异布局和外观复用的、与颜色无关的差异数据。
-/// 解析结果只保存结构、行号和估算宽度，实际配色仍在 SwiftUI 渲染时从当前主题读取。
+/// 解析结果保存结构、行号、词法 token 和估算宽度，配色在渲染时从当前主题读取。
 struct PreparedDiff: Sendable {
     enum Content: Sendable {
         case unified(PreparedUnifiedDiff)
@@ -38,6 +38,7 @@ struct PreparedDiffLine: Sendable {
     let number: Int?
     let text: String
     let kind: PreparedDiffSideKind
+    var tokens: [SyntaxHighlighting.Token] = []
 }
 
 enum PreparedDiffSideKind: Sendable {
@@ -52,6 +53,8 @@ actor PreparedDiffCache {
 
     private struct Entry: Sendable {
         let source: String
+        let language: SyntaxHighlighting.Language
+        let usesPatchPaths: Bool
         let prepared: PreparedDiff
         let estimatedCost: Int
     }
@@ -68,9 +71,11 @@ actor PreparedDiffCache {
         self.maximumCachedBytes = max(1, maximumCachedBytes)
     }
 
-    func prepare(_ text: String) throws -> PreparedDiff {
+    func prepare(_ text: String, path: String? = nil) throws -> PreparedDiff {
         try Task.checkCancellation()
-        if let index = entries.firstIndex(where: { $0.source == text }) {
+        let language = SyntaxHighlighting.language(for: path)
+        let usesPatchPaths = path == nil
+        if let index = entries.firstIndex(where: { $0.source == text && $0.language == language && $0.usesPatchPaths == usesPatchPaths }) {
             let entry = entries.remove(at: index)
             entries.append(entry)
             hits += 1
@@ -78,7 +83,7 @@ actor PreparedDiffCache {
         }
 
         builds += 1
-        let prepared = try Self.build(text)
+        let prepared = try Self.build(text, language: language, usesPatchPaths: usesPatchPaths)
         try Task.checkCancellation()
         let estimatedCost = prepared.estimatedStorageBytes
         // 单个超大输出只交给当前视图，不占用缓存；避免几个大型 patch 长期驻留内存。
@@ -87,7 +92,7 @@ actor PreparedDiffCache {
             let removed = entries.removeFirst()
             cachedBytes -= removed.estimatedCost
         }
-        entries.append(Entry(source: text, prepared: prepared, estimatedCost: estimatedCost))
+        entries.append(Entry(source: text, language: language, usesPatchPaths: usesPatchPaths, prepared: prepared, estimatedCost: estimatedCost))
         cachedBytes += estimatedCost
         return prepared
     }
@@ -96,7 +101,7 @@ actor PreparedDiffCache {
         PreparedDiffCacheStatistics(entries: entries.count, bytes: cachedBytes, hits: hits, builds: builds)
     }
 
-    private static func build(_ text: String) throws -> PreparedDiff {
+    private static func build(_ text: String, language: SyntaxHighlighting.Language, usesPatchPaths: Bool) throws -> PreparedDiff {
         try Task.checkCancellation()
         guard containsUnifiedHunk(text) else {
             if isBinary(text) { return PreparedDiff(content: .binary(text), estimatedStorageBytes: estimatedTextCost(text)) }
@@ -105,7 +110,32 @@ actor PreparedDiffCache {
         // Parser 本身不依赖 AppKit / SwiftUI；它在 actor 上执行，避免 TAB 重建时在主线程重复拆分大文本。
         let parsedRows = SideBySideDiffParser.parse(text)
         try Task.checkCancellation()
-        let rows = parsedRows.map(makePreparedRow)
+        var oldState = SyntaxHighlighting.State()
+        var newState = SyntaxHighlighting.State()
+        var currentLanguage = language
+        var tokenCost = 0
+        var rows: [PreparedDiffRow] = []
+        rows.reserveCapacity(parsedRows.count)
+        for row in parsedRows {
+            try Task.checkCancellation()
+            switch row {
+            case let .metadata(text, isHunk):
+                if usesPatchPaths {
+                    if text.hasPrefix("diff ") || text.hasPrefix("Index: ") { currentLanguage = .plain }
+                    if let path = sourcePath(from: text) { currentLanguage = SyntaxHighlighting.language(for: path) }
+                }
+                // hunk 之间省略了源码，不能把前一段未闭合的注释状态带到另一段。
+                if isHunk || text.hasPrefix("diff ") || text.hasPrefix("Index: ") {
+                    oldState = SyntaxHighlighting.State(); newState = SyntaxHighlighting.State()
+                }
+                rows.append(.metadata(text, isHunk: isHunk))
+            case let .paired(old, new):
+                let oldLine = makePreparedLine(old, language: currentLanguage, state: &oldState)
+                let newLine = makePreparedLine(new, language: currentLanguage, state: &newState)
+                tokenCost += ((oldLine?.tokens.count ?? 0) + (newLine?.tokens.count ?? 0)) * 64
+                rows.append(.paired(old: oldLine, new: newLine))
+            }
+        }
         let columnRows = rows.filter { row in
             if case let .metadata(_, isHunk) = row { return isHunk }
             return true
@@ -132,7 +162,7 @@ actor PreparedDiffCache {
         )
         return PreparedDiff(
             content: .unified(prepared),
-            estimatedStorageBytes: estimatedTextCost(text) + rows.count * 112 + columnRows.count * 24
+            estimatedStorageBytes: estimatedTextCost(text) + text.utf8.count + rows.count * 112 + columnRows.count * 24 + tokenCost
         )
     }
 
@@ -140,25 +170,31 @@ actor PreparedDiffCache {
         text.split(whereSeparator: \.isNewline).contains { $0.hasPrefix("@@ ") }
     }
 
+    private static func sourcePath(from header: String) -> String? {
+        guard header.hasPrefix("+++ ") || header.hasPrefix("--- ") else { return nil }
+        // Git 的引号路径与 SVN 的 tab 修订后缀；这里只取扩展名，不访问文件系统。
+        var path = String(header.dropFirst(4).split(separator: "\t", maxSplits: 1).first ?? "")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+        if let suffix = path.range(of: #" \((?:revision [0-9]+|working copy|nonexistent)\)$"#, options: .regularExpression) {
+            path.removeSubrange(suffix)
+        }
+        return path.isEmpty || path == "/dev/null" ? nil : path
+    }
+
     private static func isBinary(_ text: String) -> Bool {
         text.localizedCaseInsensitiveContains("binary files") || text.localizedCaseInsensitiveContains("二进制文件")
     }
 
-    private static func makePreparedRow(_ row: DiffRow) -> PreparedDiffRow {
-        switch row {
-        case let .metadata(text, isHunk): .metadata(text, isHunk: isHunk)
-        case let .paired(old, new): .paired(old: makePreparedLine(old), new: makePreparedLine(new))
-        }
-    }
-
-    private static func makePreparedLine(_ line: DiffSideLine?) -> PreparedDiffLine? {
+    private static func makePreparedLine(_ line: DiffSideLine?, language: SyntaxHighlighting.Language,
+                                         state: inout SyntaxHighlighting.State) -> PreparedDiffLine? {
         guard let line else { return nil }
         let kind: PreparedDiffSideKind = switch line.kind {
         case .context: .context
         case .added: .added
         case .removed: .removed
         }
-        return PreparedDiffLine(number: line.number, text: line.text, kind: kind)
+        return PreparedDiffLine(number: line.number, text: line.text, kind: kind,
+                                tokens: SyntaxHighlighting.tokenize(line.text, language: language, state: &state))
     }
 
     /// SF Mono 对同一列大多为等宽；中文、全角符号和 emoji 按两格估算，组合标记不另占格。

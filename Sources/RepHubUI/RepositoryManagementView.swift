@@ -268,7 +268,7 @@ struct RepositoryManagementView: View {
                     .scrollContentBackground(.hidden)
                     .background(palette.sidebar)
                     .frame(width: 280)
-                    ScrollView { if model.isLoadingComparisonPatch { ProgressView().padding() } else if let patch = model.comparisonPatch { patchPreview(patch) } else { Text("选择一个文件查看真实差异。").font(.system(size: 12)).foregroundStyle(palette.secondaryText).padding() } }
+                    Group { if model.isLoadingComparisonPatch { ProgressView().padding() } else if let patch = model.comparisonPatch { patchPreview(patch) } else { Text("选择一个文件查看真实差异。").font(.system(size: 12)).foregroundStyle(palette.secondaryText).padding() } }
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         .background(codePalette.background)
                 }
@@ -313,31 +313,9 @@ struct RepositoryManagementView: View {
 
     private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View { VStack(alignment: .leading, spacing: 9) { Text(title).font(.system(size: 13, weight: .semibold)); content() }.padding(14).background(palette.sidebar.opacity(0.52), in: RoundedRectangle(cornerRadius: 10, style: .continuous)) }
     private func patchPreview(_ patch: RepositoryPatch) -> some View {
-        let lines = PatchLineParser.parse(patch.text)
-        return ScrollView(.horizontal) {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                if lines.isEmpty { Text("没有可展示的文本差异。").font(.system(size: 11)).foregroundStyle(palette.secondaryText).padding(10) }
-                ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                    HStack(spacing: 0) {
-                        Text(line.oldLine.map(String.init) ?? "").frame(width: 38, alignment: .trailing).padding(.trailing, 6).foregroundStyle(codePalette.lineNumber)
-                        Text(line.newLine.map(String.init) ?? "").frame(width: 38, alignment: .trailing)
-                            .padding(.trailing, 8).foregroundStyle(codePalette.lineNumber)
-                        SyntaxHighlighting.text(line.text, palette: codePalette)
-                            .lineLimit(1).fixedSize(horizontal: true, vertical: false)
-                            .textSelection(.enabled)
-                        Spacer(minLength: 8)
-                    }
-                    .font(.system(size: 11, design: .monospaced)).frame(minHeight: 20)
-                    .background(patchBackground(line.text))
-                }
-            }
-            .fixedSize(horizontal: true, vertical: false)
-            .padding(.vertical, 5)
-        }
-        .background(codePalette.background, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        HighlightedPatchPreview(text: patch.text, path: model.comparisonPath, palette: codePalette)
     }
     private var codePalette: CodePalette { appearance.codePalette(for: appearance.preferredColorScheme ?? systemColorScheme) }
-    private func patchBackground(_ text: String) -> Color { if text.hasPrefix("+") && !text.hasPrefix("+++") { return codePalette.addedBackground }; if text.hasPrefix("-") && !text.hasPrefix("---") { return codePalette.removedBackground }; if text.hasPrefix("@@") { return codePalette.selection.opacity(0.58) }; return .clear }
     private func execute(_ action: RepositoryManagementAction) { model.execute(action, completed: completed) }
     private func openConflict(_ path: String) {
         guard let binding = model.selectedBinding else { return }

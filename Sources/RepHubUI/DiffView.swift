@@ -11,6 +11,7 @@ public struct DiffView: View {
     @State private var presentation: DiffPresentation = .sideBySide
     @State private var preparedDiff: PreparedDiff?
     @State private var preparedSource: String?
+    @State private var preparedPath: String?
     @State private var isPreparingDiff = false
 
     public init(model: WorkspaceModel, appearance: AppearanceStore) {
@@ -29,7 +30,7 @@ public struct DiffView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(appPalette.surface)
-        .task(id: model.patch?.text ?? "") {
+        .task(id: HighlightedPatchIdentity(text: model.patch?.text ?? "", path: model.selectedPath)) {
             await prepareCurrentPatch()
         }
     }
@@ -39,7 +40,7 @@ public struct DiffView: View {
         if let preview = model.filePreview {
             filePreviewContent(preview, palette: codePalette)
         } else if let patch = model.patch, !patch.text.isEmpty {
-            if preparedSource == patch.text, let preparedDiff {
+            if preparedSource == patch.text, preparedPath == model.selectedPath, let preparedDiff {
                 switch preparedDiff.content {
                 case let .unified(diff):
                     SideBySideDiff(diff: diff, presentation: presentation, palette: codePalette)
@@ -109,25 +110,29 @@ public struct DiffView: View {
         guard let patch = model.patch, !patch.text.isEmpty else {
             preparedDiff = nil
             preparedSource = nil
+            preparedPath = nil
             isPreparingDiff = false
             return
         }
         let source = patch.text
+        let path = model.selectedPath
         preparedDiff = nil
         preparedSource = nil
         isPreparingDiff = true
         do {
-            let prepared = try await PreparedDiffCache.shared.prepare(source)
-            guard !Task.isCancelled, model.patch?.text == source else { return }
+            let prepared = try await PreparedDiffCache.shared.prepare(source, path: path)
+            guard !Task.isCancelled, model.patch?.text == source, model.selectedPath == path else { return }
             preparedDiff = prepared
             preparedSource = source
+            preparedPath = path
             isPreparingDiff = false
         } catch is CancellationError {
             // 新 patch 的 .task 会接管状态，旧任务不覆盖它。
         } catch {
-            guard !Task.isCancelled, model.patch?.text == source else { return }
+            guard !Task.isCancelled, model.patch?.text == source, model.selectedPath == path else { return }
             preparedDiff = PreparedDiff(content: .unsupported("差异准备失败：\(error.localizedDescription)"), estimatedStorageBytes: 1)
             preparedSource = source
+            preparedPath = path
             isPreparingDiff = false
         }
     }
@@ -145,7 +150,7 @@ public struct DiffView: View {
                         .padding(.vertical, 7)
                         .background(palette.secondary.opacity(0.06))
                 }
-                LocalFilePreviewView(text: text, palette: palette)
+                LocalFilePreviewView(text: text, palette: palette, language: SyntaxHighlighting.language(for: model.selectedPath))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .background(palette.background)
@@ -193,7 +198,6 @@ private struct SideBySideDiff: View {
             return true
         }
     }
-    private var usesPlainLargeFileRendering: Bool { pageCount > 1 }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -209,7 +213,7 @@ private struct SideBySideDiff: View {
 
     private var pageNavigation: some View {
         HStack(spacing: 10) {
-            Text("大型差异：第 \(displayedPage + 1) / \(pageCount) 段，每段最多 \(Self.rowsPerPage) 行；保留增删配色，暂不进行语法高亮")
+            Text("大型差异：第 \(displayedPage + 1) / \(pageCount) 段，每段最多 \(Self.rowsPerPage) 行")
                 .font(.caption)
                 .foregroundStyle(palette.secondary)
                 .lineLimit(1)
@@ -238,6 +242,8 @@ private struct SideBySideDiff: View {
         }
         .padding(.horizontal, 14)
         .frame(height: 28)
+        .foregroundStyle(palette.foreground)
+        .tint(palette.type)
         .background(palette.secondary.opacity(0.05))
     }
 
@@ -335,7 +341,8 @@ private struct SideBySideDiff: View {
         return HStack(spacing: 0) {
             Text(line?.number.map(String.init) ?? "").foregroundStyle(palette.lineNumber).frame(width: 45, alignment: .trailing).padding(.trailing, 8)
             Text(marker(for: line, alwaysShow: showMarker)).foregroundStyle(foreground(for: kind)).frame(width: 15)
-            codeText(line?.text ?? "").fixedSize(horizontal: true, vertical: false).textSelection(.enabled)
+            SyntaxHighlighting.text(tokens: line?.tokens ?? [], palette: palette)
+                .fixedSize(horizontal: true, vertical: false).textSelection(.enabled)
             Spacer(minLength: 12)
         }
         .font(.system(size: 13, design: .monospaced)).frame(height: 24)
@@ -346,15 +353,50 @@ private struct SideBySideDiff: View {
         guard let line else { return "" }
         return switch line.kind { case .added: "+"; case .removed: "-"; case .context: alwaysShow ? " " : "" }
     }
-    @ViewBuilder private func codeText(_ text: String) -> some View {
-        if usesPlainLargeFileRendering {
-            Text(text).foregroundStyle(palette.foreground)
-        } else {
-            SyntaxHighlighting.text(text, palette: palette)
-        }
-    }
     private func background(for kind: PreparedDiffSideKind) -> Color { switch kind { case .added: palette.addedBackground; case .removed: palette.removedBackground; case .context: palette.background } }
     private func foreground(for kind: PreparedDiffSideKind) -> Color { switch kind { case .added: palette.addedForeground; case .removed: palette.removedForeground; case .context: palette.foreground } }
 }
 
 private enum DiffColumn: Equatable { case old, new }
+
+private struct HighlightedPatchIdentity: Equatable {
+    let text: String
+    let path: String?
+}
+
+/// 管理窗口复用同一后台准备与分页渲染，避免另建逐行同步高亮路径。
+struct HighlightedPatchPreview: View {
+    let text: String
+    let path: String?
+    let palette: CodePalette
+    @State private var prepared: PreparedDiff?
+    @State private var preparedIdentity: HighlightedPatchIdentity?
+
+    var body: some View {
+        let identity = HighlightedPatchIdentity(text: text, path: path)
+        Group {
+            if preparedIdentity == identity, let prepared {
+                switch prepared.content {
+                case .unified(let diff):
+                    SideBySideDiff(diff: diff, presentation: .unified, palette: palette).id(identity.text)
+                case .binary(let message), .unsupported(let message):
+                    ScrollView { Text(message).font(.caption).textSelection(.enabled).padding(12) }
+                }
+            } else { ProgressView("正在准备差异…") }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(palette.background)
+        .task(id: identity) {
+            do {
+                let value = try await PreparedDiffCache.shared.prepare(text, path: path)
+                guard !Task.isCancelled else { return }
+                prepared = value; preparedIdentity = identity
+            } catch is CancellationError {
+            } catch {
+                guard !Task.isCancelled else { return }
+                prepared = PreparedDiff(content: .unsupported(error.localizedDescription), estimatedStorageBytes: 1)
+                preparedIdentity = identity
+            }
+        }
+    }
+}

@@ -6,12 +6,14 @@ import SwiftUI
 public struct AIRunView: View {
     @Bindable private var model: AIRunModel
     private let palette: AppPalette
+    private let codePalette: CodePalette
     private let dismiss: () -> Void
     private let applyOutput: ((String) -> Void)?
 
-    public init(model: AIRunModel, palette: AppPalette, dismiss: @escaping () -> Void, apply: ((String) -> Void)? = nil) {
+    public init(model: AIRunModel, palette: AppPalette, codePalette: CodePalette, dismiss: @escaping () -> Void, apply: ((String) -> Void)? = nil) {
         self.model = model
         self.palette = palette
+        self.codePalette = codePalette
         self.dismiss = dismiss
         self.applyOutput = apply
     }
@@ -194,10 +196,7 @@ public struct AIRunView: View {
                                             description: Text(model.isBusy ? "结果会在这里逐步显示。" : "确认场景、连接与文件范围后再开始。"))
                         .frame(maxWidth: .infinity, minHeight: 210)
                 } else {
-                    Text(model.output)
-                        .font(.system(.body, design: .monospaced))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    AICodeOutputView(output: model.output, palette: codePalette, isRunning: model.isBusy)
                         .padding(12)
                 }
             }

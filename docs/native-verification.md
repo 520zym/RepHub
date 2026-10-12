@@ -358,3 +358,17 @@ Claude Code 2.1.177 不再提供旧的 `--permission-prompts` 和 `--max-turns` 
 - `swift test --filter 'WorkspaceModelTests|WorkspaceFileServiceTests'` 共 35 项通过（26 项工作区、5 项关联工作区、4 项文件服务），日志 `/tmp/rephub-untracked-preview-tests.log`。新增回归在 Git／SVN 模拟适配器下验证实际临时文件内容，且确认不产生对应 VCS diff 请求；覆盖未跟踪目录内部文件及二进制提示。
 - 原生界面用独立标识 `com.zym.RepHub.filePreviewQA` 和 `RepHub-FilePreview-QA-ys34mz3i` 临时 `file://` SVN 验收：未跟踪 Java 内容直接显示，淡色徽标完整；历史详情八层目录、286pt 与缩窄至 254pt 的检查器中，M 徽标与文件名均不重叠。截图为 `build/verification/untracked-svn-preview.png`、`build/verification/history-status-badge-narrow.png`。未操作正式仓库。
 - `scripts/build-app.sh` 及 `codesign --verify --deep --strict build/RepHub.app` 通过，构建日志 `/tmp/rephub-file-preview-package.log`。
+
+
+## 2026-10-12：统一代码语法高亮
+
+- 工作区／提交历史差异、提交前预览、仓库版本比较、本地文件预览和 AI 围栏代码块共用轻量词法引擎及当前代码主题。支持 Java、Swift、Kotlin、JavaScript／TypeScript、Python、SQL、XML／HTML、JSON、YAML、properties 等识别，未知扩展名保持纯文本。
+- 差异按旧／新两侧独立保留多行注释状态，按 hunk 重置，避免省略源码导致错误状态跨段传播；合并 patch 可从 Git／SVN 文件头识别语言。差异缓存包含颜色无关的 token，300 行分页后仍着色。主题变化只替换颜色，保留页码和选择。
+- 本地文件使用 AppKit 文本系统；后台分词后按 UTF-16 范围着色，原文重建不一致时回退纯文本，取消及代次检查阻止旧文件结果覆盖新文件。主题切换使用最新配色。512 KiB 以上预览、256 KiB 以上单个 AI 代码块及超过 256 KiB 的单行源码保留完整已读取文本并降级着色；原有文件读取上限不变。
+- AI 输出只解析代码围栏，保留原始响应及提交说明应用行为；代码块有语言标识、复制按钮，未闭合时按运行状态显示提示，支持浅色界面搭配深色代码。
+
+定向命令 `swift test --filter 'SyntaxHighlightingTests|PreparedDiffCacheTests|LocalFileHighlightTests|AICodeOutputTests'` 共 **25 项通过，无跳过**：差异缓存 8 项、词法引擎 9 项、本地预览 4 项、AI 围栏 4 项。覆盖语言边界、旧／新多行状态隔离、650 行分页后的 token、Git／SVN 头部、Unicode／空行保真、配置键、三引号字符串、缓存命中及主题颜色。日志 `/tmp/rephub-syntax-qa/tests-final.log`；不是全量回归。
+
+原生验收仅使用 `/tmp/rephub-syntax-qa/repository` 临时 Git 仓库、独立标识 `com.zym.RepHub.syntaxQA` 以及仅监听本机的模拟 AI 服务。实窗核对了 Java 多行注释／URL 字符串、未跟踪 Java 全文、652 行差异第二段、浅色应用与深色代码组合、提交面板的统一差异、AI Java／SQL 围栏及复制入口；最终修正深色代码标题与分页按钮的颜色，并重新打包核对 AI 标题和 SQL 着色。没有调用真实模型、使用 API Key 或操作正式仓库；验收后退出 QA 应用并停止模拟服务。
+
+最终 `scripts/build-app.sh` 与 `codesign --verify --deep --strict build/RepHub.app` 通过，日志 `/tmp/rephub-syntax-qa/build-final.log`。高亮为阅读用词法着色，未接入语言服务器、类型推断或完整编译器语法分析；差异中省略的源码不能提供完整上下文。

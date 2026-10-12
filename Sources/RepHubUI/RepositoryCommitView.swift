@@ -42,7 +42,8 @@ struct RepositoryCommitView: View {
         .interactiveDismissDisabled(model.isBusy)
         .sheet(isPresented: $showsAI) {
             if let ai = model.ai {
-                AIRunView(model: ai, palette: palette, dismiss: { showsAI = false }, apply: { text in
+                AIRunView(model: ai, palette: palette,
+                          codePalette: appearance.codePalette(for: appearance.preferredColorScheme ?? systemColorScheme), dismiss: { showsAI = false }, apply: { text in
                     guard let id = aiBindingID, model.phase == .ready,
                           model.enabledBindingIDs.contains(id), model.selectedFiles(for: id) == aiSelectedPaths else {
                         ai.markStale()
@@ -177,7 +178,8 @@ struct RepositoryCommitView: View {
             }
             Group {
                 if let patch = model.patch, !patch.text.isEmpty {
-                    CommitPatchPreview(text: patch.text, palette: codePalette)
+                    HighlightedPatchPreview(text: patch.text, path: model.selectedFile?.change.path, palette: codePalette)
+                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                 } else if model.isLoadingPreview {
                     ProgressView("正在读取差异…").frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if let error = model.previewError {
@@ -303,50 +305,6 @@ private struct CommitFileTree: View {
         ForEach(CommitTreeNode.make(files: files)) { node in
             CommitTreeRow(node: node, depth: 0, selected: selected, palette: palette, toggle: toggle, preview: preview)
         }
-    }
-}
-
-/// 复用工作区差异的解析规则与代码主题，只在提交窗口中以紧凑的统一视图呈现。
-private struct CommitPatchPreview: View {
-    let text: String
-    let palette: CodePalette
-
-    var body: some View {
-        GeometryReader { geometry in
-            let lines = PatchLineParser.parse(text)
-            let columns = lines.map { $0.text.utf16.count }.max() ?? 0
-            let contentWidth = max(geometry.size.width, CGFloat(columns) * 7 + 24)
-            ScrollView([.horizontal, .vertical]) {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(lines.enumerated()), id: \.offset) { indexed in
-                        let line = indexed.element
-                        Text(line.text.isEmpty ? " " : line.text)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(foreground(for: line.text))
-                            .fixedSize(horizontal: true, vertical: false)
-                            .padding(.horizontal, 10).padding(.vertical, 1)
-                            .frame(width: contentWidth, alignment: .leading)
-                            .background(background(for: line.text))
-                    }
-                }
-                .padding(.vertical, 9)
-                .frame(width: contentWidth, alignment: .topLeading)
-                .frame(minHeight: geometry.size.height, alignment: .topLeading)
-            }
-        }
-        .background(palette.background, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-    }
-
-    private func foreground(for line: String) -> Color {
-        if line.hasPrefix("+") && !line.hasPrefix("+++") { return palette.addedForeground }
-        if line.hasPrefix("-") && !line.hasPrefix("---") { return palette.removedForeground }
-        return palette.foreground
-    }
-
-    private func background(for line: String) -> Color {
-        if line.hasPrefix("+") && !line.hasPrefix("+++") { return palette.addedBackground }
-        if line.hasPrefix("-") && !line.hasPrefix("---") { return palette.removedBackground }
-        return .clear
     }
 }
 
