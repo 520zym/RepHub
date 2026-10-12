@@ -6,6 +6,121 @@ import ToolExecution
 import VersionControlCore
 
 final class SVNMigrationTests: XCTestCase {
+    func testWorkingCopyMigrationSourceRejectsRepositoryReplacementAtSameURL() async throws {
+        let address = "file:///migration-fixture/trunk"
+        let provider = SVNProvider(
+            runner: CommandRunner(),
+            tlsFallback: SVNAutomaticTLSFallback(),
+            commandExecutor: { _, _, _ in
+                CommandResult(data: Data("""
+                <?xml version="1.0"?><info><entry kind="dir" path="" revision="9"><url>\(address)</url><repository><root>file:///migration-fixture</root><uuid>replacement-uuid</uuid></repository></entry></info>
+                """.utf8), exitCode: 0)
+            }
+        )
+
+        do {
+            try await provider.verifyWorkingCopyMigrationSource(
+                RemoteRepositoryLocation(url: address), repositoryUUID: "original-uuid", revision: "r9"
+            )
+            XCTFail("同一 URL 被替换为另一 SVN 仓库时必须拒绝迁移")
+        } catch let error as VersionControlError {
+            guard case let .invalidRepository(message) = error else { return XCTFail("错误类型不正确：\(error)") }
+            XCTAssertTrue(message.contains("UUID"))
+        }
+    }
+
+    func testInspectWorkingCopyRequiresCleanManagedStateButKeepsUntrackedFiles() async throws {
+        try requireSVN()
+        let fixture = try await LocalRepositoryFixture.create()
+        defer { try? fixture.remove() }
+        let provider = SVNProvider(runner: fixture.runner)
+
+        try "not versioned\n".write(to: fixture.svnReader.appendingPathComponent("local-note.txt"), atomically: true, encoding: .utf8)
+        let info = try await provider.inspectMigrationWorkingCopy(at: fixture.svnReader, requireClean: true)
+        XCTAssertEqual(info.directory.standardizedFileURL, fixture.svnReader.standardizedFileURL)
+        XCTAssertEqual(info.sourceURL, fixture.svnURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")))
+        XCTAssertFalse(info.repositoryUUID.isEmpty)
+        XCTAssertEqual(info.baseRevision, "r2")
+
+        try "managed modification\n".write(to: fixture.svnReader.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        do {
+            _ = try await provider.inspectMigrationWorkingCopy(at: fixture.svnReader, requireClean: true)
+            XCTFail("首次工作副本迁移必须拒绝已管修改")
+        } catch let error as VersionControlError {
+            guard case .invalidRepository = error else { return XCTFail("错误类型不正确：\(error)") }
+        }
+
+        // 补迁预检不把 Git 产生的本地差异当成 SVN update，也不修改 .svn。
+        let supplement = try await provider.inspectMigrationWorkingCopy(at: fixture.svnReader, requireClean: false)
+        XCTAssertEqual(supplement.sourceURL, info.sourceURL)
+        XCTAssertEqual(supplement.repositoryUUID, info.repositoryUUID)
+    }
+
+    func testInspectWorkingCopyRejectsInternalDirectoryInsteadOfExpandingScope() async throws {
+        try requireSVN()
+        let fixture = try await LocalRepositoryFixture.create()
+        defer { try? fixture.remove() }
+        let subtree = fixture.svnWriter.appendingPathComponent("selected-subtree", isDirectory: true)
+        try FileManager.default.createDirectory(at: subtree, withIntermediateDirectories: true)
+        try "owned by the root checkout\n".write(to: subtree.appendingPathComponent("file.txt"), atomically: true, encoding: .utf8)
+        try await success(fixture, "svn", ["add", "selected-subtree"], directory: fixture.svnWriter)
+        try await success(fixture, "svn", ["commit", "-m", "add selected subtree"], directory: fixture.svnWriter)
+        try await success(fixture, "svn", ["update"], directory: fixture.svnReader)
+
+        let provider = SVNProvider(runner: fixture.runner)
+        let nested = fixture.svnReader.appendingPathComponent("selected-subtree", isDirectory: true)
+        do {
+            _ = try await provider.inspectMigrationWorkingCopy(at: nested, requireClean: false)
+            XCTFail("选择 SVN 工作副本内部目录不应静默迁移整个父工作副本")
+        } catch let error as VersionControlError {
+            guard case let .invalidRepository(message) = error else { return XCTFail("错误类型不正确：\(error)") }
+            XCTAssertTrue(message.contains(fixture.svnReader.path))
+        }
+
+        // 单独检出的子目录本身是工作副本根，仍可作为迁移范围。
+        let standalone = fixture.root.appendingPathComponent("selected-subtree-checkout", isDirectory: true)
+        let standaloneURL = fixture.svnURL.appendingPathComponent("selected-subtree", isDirectory: true).absoluteString
+        try await success(fixture, "svn", ["checkout", standaloneURL, standalone.path], directory: fixture.root)
+        let isolated = try await provider.inspectMigrationWorkingCopy(at: standalone, requireClean: true)
+        XCTAssertEqual(isolated.directory.standardizedFileURL, standalone.standardizedFileURL)
+
+        // 根工作副本同样保持可用。
+        let root = try await provider.inspectMigrationWorkingCopy(at: fixture.svnReader, requireClean: true)
+        XCTAssertEqual(root.directory.standardizedFileURL, fixture.svnReader.standardizedFileURL)
+    }
+
+    func testWorkingCopyHistoryHonorsLocalBaseAndSupplementOnlyReadsLaterRevisions() async throws {
+        try requireSVN()
+        let fixture = try await LocalRepositoryFixture.create()
+        defer { try? fixture.remove() }
+        let provider = SVNProvider(runner: fixture.runner)
+        let info = try await provider.inspectMigrationWorkingCopy(at: fixture.svnReader, requireClean: true)
+
+        try "remote r3\n".write(to: fixture.svnWriter.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try await success(fixture, "svn", ["commit", "-m", "remote r3"], directory: fixture.svnWriter)
+        try "remote r4\n".write(to: fixture.svnWriter.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try await success(fixture, "svn", ["commit", "-m", "remote r4"], directory: fixture.svnWriter)
+
+        let initial = try await provider.planWorkingCopyHistory(
+            from: RemoteRepositoryLocation(url: info.sourceURL), mode: .history,
+            through: info.baseRevision, after: nil, progress: { _ in }
+        )
+        XCTAssertEqual(initial.anchor, "r2")
+        XCTAssertFalse(initial.revisions.contains { $0.id == "r3" || $0.id == "r4" })
+
+        let supplement = try await provider.planWorkingCopyHistory(
+            from: RemoteRepositoryLocation(url: info.sourceURL), mode: .history,
+            through: nil, after: info.baseRevision, progress: { _ in }
+        )
+        XCTAssertEqual(supplement.anchor, "r4")
+        XCTAssertEqual(supplement.revisions.map(\.id), ["r3", "r4"])
+        let none = try await provider.planWorkingCopyHistory(
+            from: RemoteRepositoryLocation(url: info.sourceURL), mode: .history,
+            through: "r4", after: "r4", progress: { _ in }
+        )
+        XCTAssertTrue(none.revisions.isEmpty)
+    }
+
     func testHistoryPlanPaginatesMoreThanFiveHundredUsingOneFixedPeg() async throws {
         let capture = MigrationCommandCapture()
         let address = "file:///migration-fixture/trunk/module"

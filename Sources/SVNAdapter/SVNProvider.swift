@@ -7,7 +7,7 @@ import VersionControlCore
 
 /// 通过 Subversion 命令行读取工作副本，并执行受限的更新、远端浏览和检出操作。
 /// 用户输入的认证信息只保留在当前进程内存中，不写入 SVN 认证缓存。
-public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingProvider, RepositoryAcquisitionProvider, RepositoryCommitProvider, RepositorySetupProvider, RepositoryManagementProvider, RepositoryComparisonProvider, RepositoryMigrationSourceProvider {
+public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingProvider, RepositoryAcquisitionProvider, RepositoryCommitProvider, RepositorySetupProvider, RepositoryManagementProvider, RepositoryComparisonProvider, RepositoryMigrationSourceProvider, RepositoryWorkingCopyMigrationSourceProvider {
     public let runner: CommandRunner
     private let tlsFallback: SVNAutomaticTLSFallback
     private let commandExecutor: @Sendable ([String], URL, URL?) async throws -> CommandResult
@@ -1278,22 +1278,190 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         await progress(RepositoryOperationProgress("SVN r\(exportRevision) 快照导出完成。"))
     }
 
+    /// 只读取已有工作副本。首次迁移要求一个完整、单一 BASE、没有已管改动的 SVN
+    /// 工作副本；补迁阶段由 Git 侧负责冲突处理，因此不触碰 SVN 本地状态。
+    public func inspectMigrationWorkingCopy(
+        at directory: URL,
+        requireClean: Bool
+    ) async throws -> MigrationWorkingCopyInfo {
+        guard let binding = try await detect(at: directory) else {
+            throw VersionControlError.invalidRepository("所选目录不是 SVN 工作副本。")
+        }
+        let root = binding.root.standardizedFileURL
+        // detect 会沿父目录查找 `.svn`，因此内部目录会得到父工作副本根。迁移若接受
+        // 该结果会无声扩大范围，必须要求用户显式选择根目录。解析链接后比较，避免 /var
+        // 等系统别名或指向根目录的链接被误判成内部目录。
+        let selectedPath = directory.standardizedFileURL.resolvingSymlinksInPath().path
+        let rootPath = root.resolvingSymlinksInPath().path
+        guard selectedPath == rootPath else {
+            throw VersionControlError.invalidRepository("请选择 SVN 工作副本根目录：\(root.path)")
+        }
+        let info = try await svn(["info", "--xml", "--depth", "empty"], directory: root, remoteURL: binding.remoteURL)
+        guard let entry = try SVNXMLDocument(data: info.data).infoEntry,
+              entry.kind == "dir",
+              let rawURL = entry.url,
+              let rawUUID = entry.repositoryUUID, !rawUUID.isEmpty,
+              let revision = entry.revision, Int(revision) != nil else {
+            throw VersionControlError.invalidRepository("SVN 工作副本缺少 URL、仓库 UUID 或 BASE 修订号。")
+        }
+        let sourceURL = try normalizedRemoteAddress(rawURL)
+
+        guard requireClean else {
+            return MigrationWorkingCopyInfo(directory: root, sourceURL: sourceURL, repositoryUUID: rawUUID, baseRevision: "r\(normalizedRevision(revision))")
+        }
+
+        let status = try await svn(
+            ["status", "--xml", "--no-ignore", "--ignore-externals"], directory: root, remoteURL: sourceURL
+        )
+        let statuses = try SVNXMLDocument(data: status.data).statusEntries
+        let managedChanges = statuses.filter { entry in
+            // 未跟踪/已忽略文件不会被 SVN 或 Git 的首次历史提交隐式纳入，允许原样留在目录。
+            guard entry.item != "unversioned", entry.item != "ignored" else { return false }
+            return entry.item != "normal" || !["normal", "none", ""].contains(entry.properties) || entry.treeConflicted
+        }
+        guard managedChanges.isEmpty else {
+            let paths = managedChanges.prefix(8).map { relativePath($0.path, root: root) }.joined(separator: "、")
+            throw VersionControlError.invalidRepository("首次迁移要求 SVN 工作副本没有已管修改或冲突：\(paths)")
+        }
+
+        let versionResult = try await runner.run(executable: "svnversion", arguments: [], directory: root)
+        _ = try requireSuccess(versionResult, tool: "svnversion")
+        let version = try parseWorkingCopyVersion(versionResult.output, path: nil)
+        guard version.minimum == version.maximum else {
+            throw VersionControlError.invalidRepository("首次迁移不支持混合 SVN 修订（\(version.description)）。请先在其他工具中统一工作副本。")
+        }
+        guard !version.hasUncertainLayout else {
+            throw VersionControlError.invalidRepository("首次迁移不支持切换或稀疏 SVN 工作副本（\(version.description)）。")
+        }
+        guard entry.depth == "infinity" else {
+            throw VersionControlError.invalidRepository("首次迁移不支持稀疏 SVN 工作副本（depth: \(entry.depth ?? "unknown")）。")
+        }
+        let externals = try await svn(["propget", "svn:externals", "-R"], directory: root, remoteURL: sourceURL)
+        guard externals.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw VersionControlError.invalidRepository("首次迁移不支持包含 svn:externals 的工作副本，请先拆分外部依赖。")
+        }
+        return MigrationWorkingCopyInfo(directory: root, sourceURL: sourceURL, repositoryUUID: rawUUID, baseRevision: "r\(version.maximum)")
+    }
+
+    /// URL 相同不足以证明仍是同一 SVN 仓库：服务端可能在相同地址恢复、替换了仓库。
+    /// 因此每次准备和应用迁移前，都在固定修订读取仓库 UUID 进行精确身份复核。
+    public func verifyWorkingCopyMigrationSource(
+        _ location: RemoteRepositoryLocation,
+        repositoryUUID: String,
+        revision: String
+    ) async throws {
+        let address = try normalizedRemoteAddress(location.url)
+        try await rememberCredentials(location.credentials, for: address)
+        let fixed = try numericSVNRevision(revision)
+        guard fixed > 0 else {
+            throw VersionControlError.invalidData("SVN 迁移来源复核必须使用正整数修订号。")
+        }
+        let response = try await runRemoteRead(
+            ["info", "--xml", "-r", String(fixed), migrationTarget(address, pegRevision: String(fixed))],
+            remoteURL: address
+        )
+        guard let entry = try SVNXMLDocument(data: response.data).infoEntry,
+              entry.kind == "dir",
+              let actualURL = entry.url,
+              let actualUUID = entry.repositoryUUID, !actualUUID.isEmpty else {
+            throw VersionControlError.invalidRepository("无法读取固定 SVN r\(fixed) 的来源身份信息。")
+        }
+        guard try normalizedRemoteAddress(actualURL) == address else {
+            throw VersionControlError.invalidRepository("SVN 来源 URL 与迁移记录不一致，已停止迁移。")
+        }
+        guard actualUUID == repositoryUUID else {
+            throw VersionControlError.invalidRepository("SVN 来源仓库 UUID 与迁移记录不一致；该 URL 可能已被替换，已停止迁移。")
+        }
+    }
+
+    /// 首次迁移通常传入本地 BASE，补迁传入 nil 以固定当次远端 HEAD；两种情况都不会
+    /// 让后续分页重新解析 HEAD。after 仅作为严格下界，因而补迁不会重复旧修订。
+    public func planWorkingCopyHistory(
+        from location: RemoteRepositoryLocation,
+        mode: MigrationMode,
+        through revision: String?,
+        after previousRevision: String?,
+        progress: @escaping RepositoryOperationProgressHandler
+    ) async throws -> MigrationSourcePlan {
+        let address = try normalizedRemoteAddress(location.url)
+        try await rememberCredentials(location.credentials, for: address)
+        let anchor: String
+        if let revision, !revision.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            anchor = String(try numericSVNRevision(revision))
+            let info = try await runRemoteRead(
+                ["info", "--xml", "-r", anchor, migrationTarget(address, pegRevision: anchor)], remoteURL: address
+            )
+            guard try SVNXMLDocument(data: info.data).infoEntry?.kind == "dir" else {
+                throw VersionControlError.invalidRepository("指定的 SVN 迁移修订不是可导出的目录。")
+            }
+        } else {
+            await progress(RepositoryOperationProgress("固定 SVN 来源版本…"))
+            let info = try await runRemoteRead(["info", "--xml", "-r", "HEAD", svnRemoteTarget(address)], remoteURL: address)
+            guard let raw = try SVNXMLDocument(data: info.data).infoEntry?.revision,
+                  let value = Int(raw), value > 0 else {
+                throw VersionControlError.invalidRepository("SVN 迁移来源必须是已有修订的目录。")
+            }
+            anchor = String(value)
+        }
+        let lowerBound: Int
+        if let previousRevision, !previousRevision.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            guard mode == .history else {
+                throw VersionControlError.unsupported("SVN 补迁只能按提交历史执行，不能使用单快照模式。")
+            }
+            let previous = try numericSVNRevision(previousRevision)
+            let fixed = try numericSVNRevision(anchor)
+            guard previous <= fixed else {
+                throw VersionControlError.invalidData("补迁起点 r\(previous) 高于当前固定 SVN r\(fixed)。")
+            }
+            // after == anchor 是合法的“无新增”状态，必须让业务层可正常展示。
+            if previous == fixed {
+                return MigrationSourcePlan(providerID: id, location: RemoteRepositoryLocation(url: address, credentials: location.credentials),
+                                           anchor: "r\(anchor)", mode: mode, revisions: [], warnings: migrationWarnings(mode: mode))
+            }
+            lowerBound = previous + 1
+        } else {
+            lowerBound = 1
+        }
+        let target = migrationTarget(address, pegRevision: anchor)
+        switch mode {
+        case .history:
+            await progress(RepositoryOperationProgress("读取 SVN 目录历史…", detail: "已固定到 r\(anchor)，正在分页读取。"))
+            let revisions = try await migrationHistory(target: target, address: address, anchor: anchor, lowerBound: lowerBound, progress: progress)
+            var warnings = migrationWarnings(mode: mode)
+            if revisions.contains(where: { $0.author.isEmpty }) {
+                warnings.append("部分 SVN 提交未包含作者；发布前需为这些提交指定 Git 作者。")
+            }
+            return MigrationSourcePlan(providerID: id, location: RemoteRepositoryLocation(url: address, credentials: location.credentials),
+                                       anchor: "r\(anchor)", mode: mode, revisions: revisions, warnings: warnings)
+        case .snapshot:
+            let metadata = try await runRemoteRead(["log", "--xml", "--limit", "1", "-r", "\(anchor):1", target], remoteURL: address)
+            guard let context = try SVNXMLDocument(data: metadata.data).logEntries.first else {
+                throw VersionControlError.invalidData("无法读取固定 SVN r\(anchor) 的快照上下文。")
+            }
+            let revision = try migrationSnapshotRevision(anchor: anchor, context: context)
+            return MigrationSourcePlan(providerID: id, location: RemoteRepositoryLocation(url: address, credentials: location.credentials),
+                                       anchor: "r\(anchor)", mode: mode, revisions: [revision], warnings: migrationWarnings(mode: mode))
+        }
+    }
+
     private func migrationHistory(
         target: String,
         address: String,
         anchor: String,
+        lowerBound: Int = 1,
         progress: @escaping RepositoryOperationProgressHandler
     ) async throws -> [MigrationRevision] {
         // 与普通界面分页不同，迁移不允许为了响应速度静默停在 150 条。每轮由 SVN
         // 返回最多 500 条，下一轮严格从上一批最旧修订的前一个数值继续。
         let pageSize = 500
         var upper = try numericSVNRevision(anchor)
+        guard lowerBound > 0, lowerBound <= upper else { return [] }
         var result: [MigrationRevision] = []
         var seen = Set<String>()
         while upper > 0 {
             try Task.checkCancellation()
             let response = try await runRemoteRead(
-                ["log", "--xml", "-v", "--limit", String(pageSize), "-r", "\(upper):1", target],
+                ["log", "--xml", "-v", "--limit", String(pageSize), "-r", "\(upper):\(lowerBound)", target],
                 remoteURL: address
             )
             let entries = try SVNXMLDocument(data: response.data).logEntries
@@ -1309,7 +1477,7 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
                 throw VersionControlError.invalidData("SVN 返回了无效的迁移历史修订号。")
             }
             await progress(RepositoryOperationProgress("读取 SVN 目录历史…", detail: "已读取 \(result.count) 条提交，当前到 r\(lastNumber)。"))
-            if entries.count < pageSize || lastNumber == 1 { break }
+            if entries.count < pageSize || lastNumber <= lowerBound { break }
             upper = lastNumber - 1
         }
         // SVN 按从新到旧返回；Git 目标需要从旧到新逐个重建快照提交。
@@ -2155,6 +2323,7 @@ private final class SVNXMLDocument: NSObject, XMLParserDelegate {
         var kind: String?
         var url: String?
         var repositoryRoot: String?
+        var repositoryUUID: String?
         var workingCopyRoot: String?
         var revision: String?
         var depth: String?
@@ -2244,6 +2413,7 @@ private final class SVNXMLDocument: NSObject, XMLParserDelegate {
         let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if elementName == "url", currentLog == nil { infoEntry?.url = value }
         if elementName == "root", currentLog == nil { infoEntry?.repositoryRoot = value }
+        if elementName == "uuid", currentLog == nil { infoEntry?.repositoryUUID = value }
         if elementName == "wcroot-abspath" { infoEntry?.workingCopyRoot = value }
         if elementName == "depth", currentLog == nil { infoEntry?.depth = value }
         if elementName == "author" { currentLog?.author = value }
