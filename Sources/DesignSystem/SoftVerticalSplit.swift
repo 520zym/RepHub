@@ -6,6 +6,8 @@ public struct SoftVerticalSplit<Top: View, Bottom: View>: View {
     private let fixedSide: VerticalEdge
     private let minimumFixed: CGFloat
     private let flexibleMinimum: CGFloat
+    private let storageKey: String?
+    private let storage: SplitLayoutStore
     private let top: () -> Top
     private let bottom: () -> Bottom
 
@@ -18,15 +20,20 @@ public struct SoftVerticalSplit<Top: View, Bottom: View>: View {
         initialHeight: CGFloat,
         minimumFixed: CGFloat = 100,
         flexibleMinimum: CGFloat,
+        storageKey: String? = nil,
+        storage: SplitLayoutStore = SplitLayoutStore(),
         @ViewBuilder top: @escaping () -> Top,
         @ViewBuilder bottom: @escaping () -> Bottom
     ) {
         self.fixedSide = fixedSide
         self.minimumFixed = minimumFixed
         self.flexibleMinimum = flexibleMinimum
+        self.storageKey = storageKey
+        self.storage = storage
         self.top = top
         self.bottom = bottom
-        _height = State(initialValue: initialHeight)
+        let restoredHeight = storageKey.flatMap { storage.value(for: $0) } ?? initialHeight
+        _height = State(initialValue: restoredHeight)
     }
 
     public var body: some View {
@@ -49,9 +56,6 @@ public struct SoftVerticalSplit<Top: View, Bottom: View>: View {
                 resizeHandle(bounds: bounds)
                     .offset(y: fixedSide == .top ? fixedHeight - 5 : -fixedHeight + 5)
             }
-            .onChange(of: proxy.size.height) { _, newHeight in
-                height = clamp(height, to: resolvedBounds(for: newHeight))
-            }
         }
         .onDisappear {
             if isHoveringHandle {
@@ -73,7 +77,10 @@ public struct SoftVerticalSplit<Top: View, Bottom: View>: View {
                         let delta = fixedSide == .top ? value.translation.height : -value.translation.height
                         height = clamp(origin + delta, to: bounds)
                     }
-                    .onEnded { _ in dragOrigin = nil }
+                    .onEnded { _ in
+                        dragOrigin = nil
+                        persistHeight()
+                    }
             )
             .onHover { hovering in
                 guard hovering != isHoveringHandle else { return }
@@ -85,8 +92,12 @@ public struct SoftVerticalSplit<Top: View, Bottom: View>: View {
             .accessibilityValue("\(Int(clamp(height, to: bounds))) 点")
             .accessibilityAdjustableAction { direction in
                 switch direction {
-                case .increment: height = clamp(height + 16, to: bounds)
-                case .decrement: height = clamp(height - 16, to: bounds)
+                case .increment:
+                    height = clamp(height + 16, to: bounds)
+                    persistHeight()
+                case .decrement:
+                    height = clamp(height - 16, to: bounds)
+                    persistHeight()
                 @unknown default: break
                 }
             }
@@ -101,5 +112,10 @@ public struct SoftVerticalSplit<Top: View, Bottom: View>: View {
 
     private func clamp(_ value: CGFloat, to bounds: ClosedRange<CGFloat>) -> CGFloat {
         min(max(value, bounds.lowerBound), bounds.upperBound)
+    }
+
+    private func persistHeight() {
+        guard let storageKey else { return }
+        storage.save(height, for: storageKey)
     }
 }

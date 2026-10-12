@@ -19,7 +19,8 @@ struct HistoryWorkspaceView: View {
             if supportsBranches {
                 SoftHorizontalSplit(initialWidth: showAsMainView ? 220 : 190,
                     minimumFixed: showAsMainView ? 110 : 100,
-                    flexibleMinimum: showAsMainView ? 260 : 180) {
+                    flexibleMinimum: showAsMainView ? 260 : 180,
+                    storageKey: showAsMainView ? "history.main.branches" : "history.compact.branches") {
                     HistoryBranchSidebar(
                         snapshot: model.snapshot,
                         selectedReference: model.historyReference,
@@ -54,8 +55,10 @@ struct HistoryWorkspaceView: View {
     @ViewBuilder
     private func historyContent(palette: AppPalette) -> some View {
         if showAsMainView {
-            SoftVerticalSplit(fixedSide: .bottom, initialHeight: 390, minimumFixed: 120, flexibleMinimum: 180) {
-                SoftHorizontalSplit(fixedSide: .trailing, initialWidth: 286, minimumFixed: 120, flexibleMinimum: 220) {
+            SoftVerticalSplit(fixedSide: .bottom, initialHeight: 390, minimumFixed: 120, flexibleMinimum: 180,
+                storageKey: "history.main.diff") {
+                SoftHorizontalSplit(fixedSide: .trailing, initialWidth: 286, minimumFixed: 120, flexibleMinimum: 220,
+                    storageKey: "history.main.inspector") {
                     revisionTable(palette: palette)
                 } trailing: {
                     HistoryRevisionInspector(model: model, palette: palette, isCompact: false)
@@ -67,7 +70,8 @@ struct HistoryWorkspaceView: View {
             }
             .background(palette.background)
         } else {
-            SoftHorizontalSplit(fixedSide: .trailing, initialWidth: 270, minimumFixed: 100, flexibleMinimum: 160) {
+            SoftHorizontalSplit(fixedSide: .trailing, initialWidth: 270, minimumFixed: 100, flexibleMinimum: 160,
+                storageKey: "history.compact.inspector") {
                 revisionTable(palette: palette)
             } trailing: {
                 HistoryRevisionInspector(model: model, palette: palette, isCompact: true)
@@ -567,9 +571,8 @@ private struct HistoryRevisionTable: View {
 
     @ViewBuilder private var bindingSource: some View {
         if bindings.count > 1 {
-            WorkbenchSegmentedPicker(title: "版本控制", selection: $selectedBindingID,
-                options: bindings.map { .init(Optional($0.id), $0.providerID == .svn ? "SVN" : $0.providerName) }, palette: palette)
-                .frame(width: 130)
+            RepositorySourcePicker(bindings: bindings, selectedID: selectedBindingID, select: { selectedBindingID = $0.id }, palette: palette)
+                .frame(width: 160)
         } else if let binding = bindings.first {
             Label(binding.providerName, systemImage: binding.providerID == .git ? "arrow.triangle.branch" : "point.3.connected.trianglepath.dotted")
                 .font(.system(size: 12, weight: .medium)).foregroundStyle(palette.secondaryText)
@@ -635,6 +638,12 @@ private struct HistoryRevisionInspector: View {
                     Button { model.showAIReview(revision: revision.id) } label: { Label("审查此提交", systemImage: "sparkles") }
                         .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
                         .disabled(model.aiReview == nil || model.isInteractionLocked).help("选择文件并审查此提交的差异")
+                    if model.selectedBinding?.capabilities.contains(.revisionComparison) == true {
+                        Button { model.prepareComparison(revision: revision) } label: { Label("比较版本", systemImage: "arrow.left.arrow.right") }
+                            .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
+                            .disabled(model.isInteractionLocked)
+                            .help("打开版本比较并选择两个固定修订")
+                    }
                 }
                 HStack {
                     Text(model.historyFilePath == nil ? "变更的文件  \(model.revisionFiles.count)" : "历史文件")

@@ -55,6 +55,12 @@ public final class WorkspaceModel {
     public private(set) var isOperationCancelling = false
     public var showsRepositoryAcquisition = false
     public let recentRepositories: RecentRepositoryStore
+    public let workspaceLinks: WorkspaceLinkStore
+    public let monitor: WorkspaceMonitor?
+    public let repositoryManagement: RepositoryManagementModel
+    public let repositorySetup: RepositorySetupModel
+    public var showsRepositoryManagement = false
+    public var showsRepositorySetup = false
     public var recentRepositoryError: String?
     public var showsAIReview = false
     public let aiReview: AIRunModel?
@@ -82,9 +88,14 @@ public final class WorkspaceModel {
     }
 
     public init(service: RepositoryService, aiSettings: AISettingsStore? = nil, aiService: AIService? = nil,
-                recentRepositories: RecentRepositoryStore = RecentRepositoryStore()) {
+                recentRepositories: RecentRepositoryStore = RecentRepositoryStore(),
+                workspaceLinks: WorkspaceLinkStore = WorkspaceLinkStore(), monitor: WorkspaceMonitor? = nil) {
         self.service = service
         self.recentRepositories = recentRepositories
+        self.workspaceLinks = workspaceLinks
+        self.monitor = monitor
+        self.repositoryManagement = RepositoryManagementModel(service: service)
+        self.repositorySetup = RepositorySetupModel(service: service)
         self.repositoryAcquisition = RepositoryAcquisitionModel(service: service)
         if let aiSettings, let aiService {
             self.aiReview = AIRunModel(settings: aiSettings, service: aiService)
@@ -117,8 +128,11 @@ public final class WorkspaceModel {
     /// 版本控制写操作期间，所有会改变所选工作区或读取范围的入口均应保持锁定。
     public var isOperationInProgress: Bool { operationKind != nil && operationResult == nil }
     /// 供应用退出保护使用；操作后的状态核对同样属于进行中状态。
-    public var isOperating: Bool { isOperationInProgress || repositoryAcquisition.isAcquiring || repositoryCommit.isBusy }
-    public var isInteractionLocked: Bool { isOperationInProgress || repositoryAcquisition.isAcquiring || repositoryCommit.isBusy }
+    public var isOperating: Bool {
+        isOperationInProgress || repositoryAcquisition.isAcquiring || repositoryCommit.isBusy
+            || repositoryManagement.isBusy || repositorySetup.isBusy
+    }
+    public var isInteractionLocked: Bool { isOperating }
     public var operationRefreshIssues: [String] {
         var seen = Set<String>()
         return ((workspace?.issues ?? []) + snapshots.values.flatMap(\.issues)).filter { seen.insert($0).inserted }
@@ -154,6 +168,150 @@ public final class WorkspaceModel {
         repositoryCommit.prepare(in: workspace, initialTargets: initialTargets, initialMessage: initialMessage)
     }
 
+    public func prepareManagement() {
+        prepareManagement(comparing: nil)
+    }
+
+    public func prepareComparison(revision: Revision) {
+        prepareManagement(comparing: revision)
+    }
+
+    private func prepareManagement(comparing revision: Revision?) {
+        guard !isInteractionLocked, let workspace, let binding = selectedBinding else { return }
+        cancelReading()
+        cancelHistoryPage()
+        let comparisonSeed = revision.map { revision in
+            RepositoryComparisonSeed(
+                fromRevision: revision.parents.first ?? previousRevisionIdentifier(for: revision, binding: binding),
+                toRevision: revision.id
+            )
+        }
+        repositoryManagement.prepare(in: workspace, binding: binding, comparisonSeed: comparisonSeed)
+        showsRepositoryManagement = true
+    }
+
+    private func previousRevisionIdentifier(for revision: Revision, binding: RepositoryBinding) -> String? {
+        guard binding.providerID == .svn,
+              revision.id.first == "r",
+              let value = Int(revision.id.dropFirst()), value > 0 else { return nil }
+        return "r\(value - 1)"
+    }
+
+    public func prepareSetup() {
+        guard !isInteractionLocked, let workspace, workspace.isUnmanaged else { return }
+        repositorySetup.prepare(directory: workspace.directory)
+        showsRepositorySetup = true
+    }
+
+    public func applyManagementResponse(_ response: WorkspaceManagementResult) {
+        applyCommitResponse(WorkspaceCommitResult(results: [], workspace: response.workspace, snapshots: response.snapshots))
+    }
+
+    public func chooseLinkedFolder() {
+        guard !isInteractionLocked, workspace != nil else { return }
+        let panel = NSOpenPanel()
+        panel.title = "关联另一个工作副本"
+        panel.message = "关联已有 Git 或 SVN 工作副本，在当前项目中分别查看和操作；不会复制或同步两个目录的文件。"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        guard panel.runModal() == .OK, let directory = panel.url else { return }
+        attachDirectory(directory)
+    }
+
+    public func attachDirectory(_ directory: URL) {
+        guard !isInteractionLocked, let previous = workspace else { return }
+        cancelHistoryPage()
+        start { [weak self, service] token in
+            guard let self else { return }
+            let candidate = try await service.open(directory: directory)
+            guard self.accepts(token), self.workspace?.id == previous.id else { return }
+            guard !candidate.bindings.isEmpty, candidate.issues.isEmpty else {
+                throw VersionControlError.invalidRepository(candidate.issues.isEmpty
+                    ? "所选目录没有可关联的版本控制工作副本。" : candidate.issues.joined(separator: "\n"))
+            }
+            let directories = previous.linkedDirectories + [candidate.directory]
+            let updated = try await service.open(directory: previous.directory, linkedDirectories: directories)
+            guard self.accepts(token), self.workspace?.id == previous.id else { return }
+            self.workspaceLinks.setDirectories(updated.linkedDirectories, for: previous.directory)
+            self.workspace = updated
+            self.recentRepositories.record(updated)
+            self.restartMonitoring()
+        }
+    }
+
+    public func removeLinkedDirectory(_ directory: URL) {
+        guard !isInteractionLocked, let previous = workspace else { return }
+        let normalized = directory.standardizedFileURL.resolvingSymlinksInPath()
+        guard previous.linkedDirectories.contains(normalized) else { return }
+        cancelHistoryPage()
+        start { [weak self, service] token in
+            guard let self else { return }
+            let directories = previous.linkedDirectories.filter { $0 != normalized }
+            let updated = try await service.open(directory: previous.directory, linkedDirectories: directories)
+            guard self.accepts(token), self.workspace?.id == previous.id else { return }
+            self.workspaceLinks.setDirectories(updated.linkedDirectories, for: previous.directory)
+            self.workspace = updated
+            self.snapshots = self.snapshots.filter { key, _ in updated.bindings.contains { $0.id == key } }
+            self.recentRepositories.record(updated)
+            if !updated.bindings.contains(where: { $0.id == self.selectedBindingID }) {
+                self.invalidateReadingCache()
+                self.historyReference = nil
+                self.clearFileHistoryState()
+                self.selectedRevisionID = nil
+                self.selectedPath = nil
+                self.revisionFiles = []
+                self.patch = nil
+                self.selectedBindingID = updated.bindings.first?.id
+                self.fileBrowser.setRoot(updated.bindings.first?.root)
+                if let binding = updated.bindings.first {
+                    try await self.load(binding: binding, reference: nil, token: token)
+                }
+            }
+            self.restartMonitoring()
+        }
+    }
+
+    public func closeWorkspace() {
+        guard !isInteractionLocked else { return }
+        cancelReading()
+        invalidateReadingCache()
+        monitor?.stop()
+        repositoryManagement.dismiss()
+        repositorySetup.dismiss()
+        repositoryCommit.reset()
+        workspace = nil
+        snapshots = [:]
+        selectedBindingID = nil
+        historyReference = nil
+        clearFileHistoryState()
+        selectedPath = nil
+        selectedRevisionID = nil
+        revisionFiles = []
+        patch = nil
+        errorMessage = nil
+        fileBrowser.setRoot(nil)
+        showsRepositoryManagement = false
+        showsRepositorySetup = false
+        isHistoryVisible = false
+    }
+
+    private func restartMonitoring() {
+        guard let workspace else { monitor?.stop(); return }
+        monitor?.start(workspace: workspace) { [weak self] in
+            guard let self else { return false }
+            return NSApplication.shared.isActive && !self.isInteractionLocked && !self.isLoading
+                && !self.isLoadingMoreHistory && !self.showsRepositoryManagement && !self.showsRepositorySetup
+        }
+    }
+
+    public func refreshMonitoredChanges() {
+        guard !isInteractionLocked else { return }
+        monitor?.acknowledge()
+        refreshWorkspace(allBindings: true)
+    }
+
     /// 服务层提交结束后始终返回全工作区新快照，界面不自行猜测哪些文件已写入。
     public func applyCommitResponse(_ response: WorkspaceCommitResult) {
         // 提交前的工作区/历史差异读取可能仍在外部工具中执行。先增加读取令牌，
@@ -162,6 +320,7 @@ public final class WorkspaceModel {
         errorMessage = nil
         workspace = response.workspace
         snapshots = Dictionary(uniqueKeysWithValues: response.snapshots.map { ($0.binding.id, $0) })
+        restartMonitoring()
         fileBrowser.refresh()
         invalidateReadingCache()
         historyReference = nil
@@ -236,7 +395,8 @@ public final class WorkspaceModel {
         guard !isInteractionLocked else { return }
         cancelHistoryPage()
         start { [service] token in
-            let workspace = try await service.open(directory: url)
+            let linked = self.workspaceLinks.directories(for: url)
+            let workspace = try await service.open(directory: url, linkedDirectories: linked)
             guard self.accepts(token) else { return }
             if requiresManagedRepository, workspace.bindings.isEmpty {
                 let reason = workspace.issues.isEmpty ? "此文件夹已无法识别为受版本控制的仓库。" : workspace.issues.joined(separator: "\n")
@@ -246,6 +406,7 @@ public final class WorkspaceModel {
             self.invalidateReadingCache()
             self.fileBrowser.setRoot(nil)
             self.workspace = workspace
+            self.restartMonitoring()
             self.recentRepositories.record(workspace)
             self.snapshots = [:]
             self.patch = nil
@@ -263,8 +424,12 @@ public final class WorkspaceModel {
     }
 
     public func refresh() {
+        refreshWorkspace(allBindings: false)
+    }
+
+    private func refreshWorkspace(allBindings: Bool) {
         guard !isInteractionLocked else { return }
-        guard let binding = selectedBinding else { return }
+        guard let priorBinding = selectedBinding, let previous = workspace else { return }
         cancelHistoryPage()
         let revisionID = selectedRevisionID
         let reference = historyReference
@@ -279,6 +444,26 @@ public final class WorkspaceModel {
         patch = nil
         start { [weak self] token in
             guard let self else { return }
+            let updated = try await self.service.open(directory: previous.directory, linkedDirectories: previous.linkedDirectories)
+            guard self.accepts(token), self.workspace?.id == previous.id else { return }
+            self.workspace = updated
+            guard let binding = updated.bindings.first(where: { $0.id == priorBinding.id }) ?? updated.bindings.first else {
+                self.snapshots = [:]
+                self.selectedBindingID = nil
+                self.fileBrowser.setRoot(nil)
+                self.restartMonitoring()
+                return
+            }
+            self.selectedBindingID = binding.id
+            self.fileBrowser.setRoot(binding.root)
+            if allBindings {
+                for other in updated.bindings where other.id != binding.id {
+                    let snapshot = await self.service.load(other)
+                    guard self.accepts(token) else { return }
+                    self.snapshots[other.id] = snapshot
+                }
+            }
+            self.restartMonitoring()
             if let filePath {
                 try await self.reloadFileHistory(binding: binding, path: filePath, reference: fileReference,
                                                  preferredRevisionID: revisionID, token: token)
@@ -701,10 +886,14 @@ public final class WorkspaceModel {
         operationProgressMessage = response.result.summary
         operationTransferProgress.finish(response.result.summary)
         isOperationCancelling = false
+        restartMonitoring()
     }
 
     /// 取消并不回滚已由 Git/SVN 落地的步骤；仍等待服务层刷新真实状态。
     public func cancelOperation() {
+        if repositoryManagement.isBusy { repositoryManagement.cancel(); return }
+        if repositorySetup.isExecuting { repositorySetup.cancel(); return }
+        if repositoryCommit.isBusy { repositoryCommit.cancel(); return }
         if repositoryAcquisition.isAcquiring {
             repositoryAcquisition.cancel()
             return
@@ -1039,6 +1228,7 @@ public final class WorkspaceModel {
                 try await operation(token)
                 guard self?.accepts(token) == true else { return }
                 self?.isLoading = false
+                if self?.monitor?.lastCheckedAt == nil { self?.monitor?.checkNow() }
             } catch is CancellationError {
             } catch {
                 guard self?.accepts(token) == true else { return }

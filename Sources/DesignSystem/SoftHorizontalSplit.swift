@@ -6,6 +6,8 @@ public struct SoftHorizontalSplit<Leading: View, Trailing: View>: View {
     private let fixedSide: HorizontalEdge
     private let minimumFixed: CGFloat
     private let flexibleMinimum: CGFloat
+    private let storageKey: String?
+    private let storage: SplitLayoutStore
     private let leading: () -> Leading
     private let trailing: () -> Trailing
 
@@ -18,15 +20,20 @@ public struct SoftHorizontalSplit<Leading: View, Trailing: View>: View {
         initialWidth: CGFloat,
         minimumFixed: CGFloat = 100,
         flexibleMinimum: CGFloat,
+        storageKey: String? = nil,
+        storage: SplitLayoutStore = SplitLayoutStore(),
         @ViewBuilder leading: @escaping () -> Leading,
         @ViewBuilder trailing: @escaping () -> Trailing
     ) {
         self.fixedSide = fixedSide
         self.minimumFixed = minimumFixed
         self.flexibleMinimum = flexibleMinimum
+        self.storageKey = storageKey
+        self.storage = storage
         self.leading = leading
         self.trailing = trailing
-        _width = State(initialValue: initialWidth)
+        let restoredWidth = storageKey.flatMap { storage.value(for: $0) } ?? initialWidth
+        _width = State(initialValue: restoredWidth)
     }
 
     public var body: some View {
@@ -57,9 +64,6 @@ public struct SoftHorizontalSplit<Leading: View, Trailing: View>: View {
                 resizeHandle(bounds: bounds)
                     .offset(x: fixedSide == .leading ? fixedWidth - 5 : -fixedWidth + 5)
             }
-            .onChange(of: proxy.size.width) { _, newWidth in
-                width = clamp(width, to: resolvedBounds(for: newWidth))
-            }
         }
         .onDisappear {
             if isHoveringHandle {
@@ -85,6 +89,7 @@ public struct SoftHorizontalSplit<Leading: View, Trailing: View>: View {
                     }
                     .onEnded { _ in
                         dragOrigin = nil
+                        persistWidth()
                     }
             )
             .onHover { hovering in
@@ -103,8 +108,10 @@ public struct SoftHorizontalSplit<Leading: View, Trailing: View>: View {
                 switch direction {
                 case .increment:
                     width = clamp(width + 16, to: bounds)
+                    persistWidth()
                 case .decrement:
                     width = clamp(width - 16, to: bounds)
+                    persistWidth()
                 @unknown default:
                     break
                 }
@@ -121,5 +128,10 @@ public struct SoftHorizontalSplit<Leading: View, Trailing: View>: View {
 
     private func clamp(_ value: CGFloat, to bounds: ClosedRange<CGFloat>) -> CGFloat {
         min(max(value, bounds.lowerBound), bounds.upperBound)
+    }
+
+    private func persistWidth() {
+        guard let storageKey else { return }
+        storage.save(width, for: storageKey)
     }
 }

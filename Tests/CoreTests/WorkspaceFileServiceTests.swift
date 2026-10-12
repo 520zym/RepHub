@@ -79,6 +79,25 @@ struct WorkspaceFileServiceTests {
         #expect(large.message?.contains("1 MiB") == true)
     }
 
+    @Test("外部编辑只返回工作副本内普通文件，拒绝链接和元数据")
+    func externalEditingKeepsWorkspaceBoundary() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.write("resolved\n", path: "Sources/File.swift")
+        try fixture.write("metadata\n", path: ".git/config")
+        try FileManager.default.createSymbolicLink(at: fixture.root.appendingPathComponent("link"),
+                                                   withDestinationURL: fixture.root.appendingPathComponent("Sources/File.swift"))
+        let service = WorkspaceFileService()
+        let url = try await service.editableFileURL(in: fixture.root, path: "Sources/File.swift")
+        #expect(url == fixture.root.appendingPathComponent("Sources/File.swift").resolvingSymlinksInPath())
+        for path in ["link", ".git/config", "../outside", "Sources"] {
+            do {
+                _ = try await service.editableFileURL(in: fixture.root, path: path)
+                Issue.record("不应把此路径交给外部编辑器：\(path)")
+            } catch { }
+        }
+    }
+
     private final class Fixture {
         let root: URL
 

@@ -95,6 +95,25 @@ public struct WorkspaceView: View {
                 openRecentRepository: model.openRecentRepository
             )
         }
+        .sheet(isPresented: $model.showsRepositoryManagement, onDismiss: model.repositoryManagement.dismiss) {
+            RepositoryManagementView(model: model.repositoryManagement, palette: palette, appearance: appearance, dismiss: {
+                model.repositoryManagement.dismiss()
+                model.showsRepositoryManagement = false
+            }, completed: { response in
+                model.applyManagementResponse(response)
+            })
+        }
+        .sheet(isPresented: $model.showsRepositorySetup, onDismiss: model.repositorySetup.dismiss) {
+            RepositorySetupView(model: model.repositorySetup, palette: palette, dismiss: {
+                model.repositorySetup.dismiss()
+                model.showsRepositorySetup = false
+            }, completed: { result in
+                guard result.outcome == .succeeded else { return }
+                model.repositorySetup.dismiss()
+                model.showsRepositorySetup = false
+                model.open(result.directory)
+            })
+        }
         .sheet(isPresented: $model.showsAIReview) {
             if let ai = model.aiReview {
                 AIRunView(model: ai, palette: palette, dismiss: { model.showsAIReview = false })
@@ -115,7 +134,8 @@ public struct WorkspaceView: View {
         let initialHistoryHeight = min(290, max(210, size.height * 0.32))
         return Group {
             if historyExpanded {
-                SoftVerticalSplit(fixedSide: .bottom, initialHeight: initialHistoryHeight, minimumFixed: 120, flexibleMinimum: 180) {
+                SoftVerticalSplit(fixedSide: .bottom, initialHeight: initialHistoryHeight, minimumFixed: 120, flexibleMinimum: 180,
+                    storageKey: "workspace.history") {
                     workingCopyEditor(palette: palette, showsBindingPicker: false)
                         .padding(.bottom, inset / 2)
                 } bottom: {
@@ -131,7 +151,8 @@ public struct WorkspaceView: View {
     }
 
     private func workingCopyEditor(palette: AppPalette, showsBindingPicker: Bool) -> some View {
-        SoftHorizontalSplit(initialWidth: 240, minimumFixed: 110, flexibleMinimum: 200) {
+        SoftHorizontalSplit(initialWidth: 240, minimumFixed: 110, flexibleMinimum: 200,
+            storageKey: "workspace.files") {
             WorkspaceFileTreeView(model: model, palette: palette, showsBindingPicker: showsBindingPicker)
         } trailing: {
             VStack(spacing: 0) {
@@ -152,6 +173,32 @@ public struct WorkspaceView: View {
                     RecentRepositoriesMenu(model: model)
                     if let workspace = model.workspace {
                         Divider()
+                        if workspace.isUnmanaged {
+                            Button("初始化版本控制…", action: model.prepareSetup)
+                        } else {
+                            Button("管理当前仓库…", action: model.prepareManagement)
+                            Button("关联本地工作副本…", action: model.chooseLinkedFolder)
+                            if !workspace.linkedDirectories.isEmpty {
+                                Menu("已关联的工作副本") {
+                                    ForEach(workspace.linkedDirectories, id: \.self) { directory in
+                                        Button("移除 \(directory.lastPathComponent)") { model.removeLinkedDirectory(directory) }
+                                    }
+                                }
+                            }
+                        }
+                        if let monitor = model.monitor {
+                            Menu("本地监控") {
+                                Picker("检查间隔", selection: Binding(get: { monitor.intervalSeconds }, set: { monitor.intervalSeconds = $0 })) {
+                                    Text("关闭").tag(0)
+                                    Text("每 15 秒").tag(15)
+                                    Text("每 30 秒").tag(30)
+                                    Text("每分钟").tag(60)
+                                }
+                                Button("立即检查", action: monitor.checkNow)
+                            }
+                        }
+                        Divider()
+                        Button("关闭工作区", action: model.closeWorkspace)
                         Text(workspace.directory.path)
                     }
                 } label: {
@@ -198,6 +245,13 @@ public struct WorkspaceView: View {
                 .accessibilityLabel("更新工作区")
                 .disabled(model.workspace?.bindings.contains(where: { model.supports(.fetch, for: $0) || model.supports(.update, for: $0) }) != true || model.isInteractionLocked)
                 .help("获取远端或更新一个版本控制来源")
+                Button { model.prepareManagement() } label: {
+                    Label("管理仓库", systemImage: "slider.horizontal.3").labelStyle(.iconOnly)
+                }
+                .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
+                .accessibilityLabel("管理仓库")
+                .disabled(model.selectedBinding == nil || model.isInteractionLocked)
+                .help("推送、分支、暂存、冲突与版本比较")
                 if section == .workingCopy {
                     Button { historyExpanded.toggle() } label: {
                         Label(historyExpanded ? "收起历史" : "显示历史", systemImage: "rectangle.bottomthird.inset.filled").labelStyle(.iconOnly)
@@ -227,12 +281,7 @@ public struct WorkspaceView: View {
                 .overlay {
                     if commitMessageFocused { RoundedRectangle(cornerRadius: 7).stroke(palette.accent.opacity(0.85), lineWidth: 1) }
                 }
-            ForEach(model.workspace?.bindings ?? []) { binding in
-                Toggle(binding.providerName == "Subversion" ? "SVN" : binding.providerName, isOn: Binding(
-                    get: { commitTargets.contains(binding.id) },
-                    set: { if $0 { commitTargets.insert(binding.id) } else { commitTargets.remove(binding.id) } }
-                )).toggleStyle(.checkbox).font(.system(size: 12)).fixedSize()
-            }
+            commitTargetSelector
             Button {
                 model.prepareCommit(initialTargets: commitTargets, initialMessage: commitMessage)
                 showsCommitSheet = true
@@ -257,6 +306,36 @@ public struct WorkspaceView: View {
         (model.workspace?.bindings ?? []).contains { $0.capabilities.contains(.commit) }
     }
 
+    @ViewBuilder private var commitTargetSelector: some View {
+        let bindings = model.workspace?.bindings ?? []
+        if Set(bindings.map(\.root)).count > 1 || bindings.count > 2 {
+            Menu {
+                ForEach(bindings) { binding in
+                    Toggle(binding.displayLabel, isOn: Binding(
+                        get: { commitTargets.contains(binding.id) },
+                        set: { selected in if selected { commitTargets.insert(binding.id) } else { commitTargets.remove(binding.id) } }
+                    ))
+                    .help(binding.root.path)
+                }
+            } label: {
+                Label("提交目标 \(commitTargets.count)", systemImage: "checklist")
+            }
+            .buttonStyle(WorkbenchButtonStyle(palette: paletteForCommitBar, role: .quiet))
+            .help("选择要提交的版本控制来源")
+        } else {
+            ForEach(bindings) { binding in
+                Toggle(binding.displayLabel, isOn: Binding(
+                    get: { commitTargets.contains(binding.id) },
+                    set: { selected in if selected { commitTargets.insert(binding.id) } else { commitTargets.remove(binding.id) } }
+                )).toggleStyle(.checkbox).font(.system(size: 12)).fixedSize().help(binding.root.path)
+            }
+        }
+    }
+
+    private var paletteForCommitBar: AppPalette {
+        appearance.palette(for: appearance.preferredColorScheme ?? systemColorScheme)
+    }
+
     private func statusBar(palette: AppPalette) -> some View {
         let issues = (model.workspace?.issues ?? []) + (model.snapshot?.issues ?? [])
         let hasError = model.errorMessage != nil || !issues.isEmpty
@@ -273,6 +352,15 @@ public struct WorkspaceView: View {
                 Text("\(model.historyRevisions.count) 条历史")
             }
             if model.isOperationInProgress { Text("操作进行中").padding(.leading, 8) }
+            if let monitor = model.monitor, !monitor.pendingBindingIDs.isEmpty {
+                Button("检测到 \(monitor.pendingBindingIDs.count) 个来源变化") { model.refreshMonitoredChanges() }
+                    .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
+                    .disabled(model.isInteractionLocked)
+            }
+            if let message = model.monitor?.errorMessage {
+                Label("本地监控读取失败", systemImage: "exclamationmark.circle")
+                    .help(message).accessibilityValue(message)
+            }
         }
         .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
         .padding(.horizontal, 14).frame(height: 28)
@@ -294,14 +382,19 @@ public struct WorkspaceView: View {
     private func welcome(palette: AppPalette) -> some View {
         let issues = model.workspace?.issues ?? []
         let description = model.errorMessage ?? (!issues.isEmpty ? issues.joined(separator: "\n") :
-            (model.workspace?.isUnmanaged == true ? "未识别到 Git 或 Subversion 工作副本。初始化功能尚未接入。" : "从「项目」菜单打开仓库，或继续最近的工作。"))
+            (model.workspace?.isUnmanaged == true ? "未识别到 Git 或 Subversion 工作副本。可以初始化一种版本控制方式。" : "从「项目」菜单打开仓库，或继续最近的工作。"))
         return VStack(spacing: 24) {
             ContentUnavailableView {
                 Label(model.workspace?.isUnmanaged == true ? "此目录尚未受版本控制" : "打开一个工作区", systemImage: "folder")
             } description: {
                 Text(description)
             } actions: {
-                Button("打开仓库…", action: model.showRepositoryAcquisition).buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
+                HStack(spacing: 10) {
+                    Button("打开仓库…", action: model.showRepositoryAcquisition).buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
+                    if model.workspace?.isUnmanaged == true {
+                        Button("初始化版本控制…", action: model.prepareSetup).buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary))
+                    }
+                }
             }
             .fixedSize(horizontal: false, vertical: true)
             if !model.recentRepositories.entries.isEmpty {

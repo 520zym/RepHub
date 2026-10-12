@@ -117,7 +117,9 @@ struct RepositoryCommitView: View {
     }
 
     private func title(for preparation: RepositoryCommitPreparation) -> String {
-        let name = preparation.binding.providerID == .svn ? "SVN" : preparation.binding.providerName
+        let name = Set(model.preparations.map { $0.binding.root }).count > 1
+            ? preparation.binding.displayLabel
+            : (preparation.binding.providerID == .svn ? "SVN" : preparation.binding.providerName)
         return "\(name) \(preparation.files.count)"
     }
 
@@ -262,7 +264,7 @@ struct RepositoryCommitView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
                     ForEach(model.results, id: \.bindingID) { result in
-                        let title = model.preparations.first(where: { $0.binding.id == result.bindingID }).map { $0.binding.providerID == .svn ? "SVN" : $0.binding.providerName } ?? result.bindingID
+                        let title = model.preparations.first(where: { $0.binding.id == result.bindingID }).map { $0.binding.displayLabel } ?? result.bindingID
                         HStack(alignment: .top, spacing: 10) {
                             Image(systemName: result.outcome == .succeeded ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                                 .foregroundStyle(result.outcome == .succeeded ? palette.accent : palette.removed)

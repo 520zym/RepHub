@@ -21,10 +21,13 @@ struct RepHubApp: App {
         let settings = AISettingsStore(secrets: secrets)
         let service = AIService(providers: [OpenAICompatibleProvider(), CLIProvider(kind: .codexCLI), CLIProvider(kind: .claudeCLI)], secrets: secrets)
         self.aiService = service
+        let repositories = RepositoryService(providers: [GitProvider(), SVNProvider()])
         _aiSettings = State(initialValue: settings)
-        _workspace = State(initialValue: WorkspaceModel(service: RepositoryService(providers: [GitProvider(), SVNProvider()]),
+        _workspace = State(initialValue: WorkspaceModel(service: repositories,
                                                         aiSettings: settings, aiService: service,
-                                                        recentRepositories: RecentRepositoryStore(defaults: .standard)))
+                                                        recentRepositories: RecentRepositoryStore(defaults: .standard),
+                                                        workspaceLinks: WorkspaceLinkStore(defaults: .standard),
+                                                        monitor: WorkspaceMonitor(service: repositories, defaults: .standard)))
     }
 
     var body: some Scene {
@@ -50,6 +53,13 @@ struct RepHubApp: App {
                 Button("刷新仓库", action: workspace.refresh)
                     .keyboardShortcut("r")
                     .disabled(workspace.workspace == nil || workspace.isLoading || workspace.isOperating)
+                Button("仓库操作与版本比较…", action: workspace.prepareManagement)
+                    .disabled(workspace.selectedBinding == nil || workspace.isOperating)
+                Button("关联工作副本…", action: workspace.chooseLinkedFolder)
+                    .disabled(workspace.workspace?.bindings.isEmpty != false || workspace.isOperating)
+                Divider()
+                Button("关闭仓库", action: workspace.closeWorkspace)
+                    .disabled(workspace.workspace == nil || workspace.isOperating)
             }
         }
 

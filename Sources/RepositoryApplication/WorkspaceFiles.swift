@@ -108,6 +108,19 @@ public actor WorkspaceFileService {
         )
     }
 
+    /// 交给用户选择的外部编辑器前，复用工作区边界检查；不打开符号链接或管理元数据。
+    public func editableFileURL(in root: URL, path: String) async throws -> URL {
+        try Task.checkCancellation()
+        guard !path.split(separator: "/").contains(where: { isVersionControlMetadata(String($0)) }) else {
+            throw VersionControlError.invalidData("不能编辑版本管理元数据。")
+        }
+        let resolved = try resolve(root: root, path: path, allowRoot: false)
+        guard resolved.isRegularFile, !resolved.isSymbolicLink else {
+            throw VersionControlError.invalidData("只能在外部编辑器中打开工作副本内的普通文件。")
+        }
+        return resolved.url
+    }
+
     private func resolve(root: URL, path: String, allowRoot: Bool) throws -> ResolvedPath {
         let rootURL = root.standardizedFileURL.resolvingSymlinksInPath()
         var isDirectory: ObjCBool = false

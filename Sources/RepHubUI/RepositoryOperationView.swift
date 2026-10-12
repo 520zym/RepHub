@@ -80,14 +80,8 @@ struct RepositoryOperationView: View {
             if bindings.count > 1 {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("更新目标").font(.system(size: 12, weight: .medium)).foregroundStyle(palette.secondaryText)
-                    WorkbenchSegmentedPicker(
-                        title: "更新目标",
-                        selection: $selectedBindingID,
-                        options: bindings.map {
-                            .init($0.id, $0.providerName == "Subversion" ? "SVN" : $0.providerName)
-                        },
-                        palette: palette
-                    )
+                    RepositorySourcePicker(bindings: bindings, selectedID: selectedBindingID,
+                                           select: { selectedBindingID = $0.id }, palette: palette)
                     .accessibilityHint("一次只能选择一个版本控制来源")
                 }
             }

@@ -86,12 +86,8 @@ struct WorkspaceFileTreeView: View {
     }
 
     private func bindingPicker(_ bindings: [RepositoryBinding]) -> some View {
-        WorkbenchSegmentedPicker(title: "版本控制", selection: Binding(
-            get: { model.selectedBindingID },
-            set: { id in
-                if let binding = bindings.first(where: { $0.id == id }) { model.selectBinding(binding) }
-            }
-        ), options: bindings.map { .init(Optional($0.id), $0.providerID == .svn ? "SVN" : $0.providerName) }, palette: palette)
+        RepositorySourcePicker(bindings: bindings, selectedID: model.selectedBindingID,
+                               select: model.selectBinding, palette: palette)
             .padding(.horizontal, 10).padding(.bottom, 8)
     }
 
@@ -121,7 +117,7 @@ struct WorkspaceFileTreeView: View {
     private var rootRow: some View {
         HStack(spacing: 7) {
             Image(systemName: "folder.fill").foregroundStyle(palette.accent).frame(width: 16)
-            Text(model.workspace?.name ?? "工作区").fontWeight(.medium)
+            Text(model.selectedBinding?.root.lastPathComponent ?? model.workspace?.name ?? "工作区").fontWeight(.medium)
             Spacer(minLength: 0)
             if browser.isLoading("") { ProgressView().controlSize(.mini) }
         }
@@ -201,7 +197,7 @@ struct WorkspaceFileTreeView: View {
         HStack(spacing: 7) {
             Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
             Image(systemName: "folder.fill").foregroundStyle(palette.accent)
-            Text(model.workspace?.name ?? "工作区").fontWeight(.medium)
+            Text(model.selectedBinding?.root.lastPathComponent ?? model.workspace?.name ?? "工作区").fontWeight(.medium)
         }.font(.system(size: 13)).padding(.horizontal, 12).frame(height: 30)
         ForEach(cachedChangeRows) { row in
             Button {
