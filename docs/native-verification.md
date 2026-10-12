@@ -346,3 +346,7 @@ Claude Code 2.1.177 不再提供旧的 `--permission-prompts` 和 `--max-turns` 
 本地验收截图保存在 `build/verification/working-copy-supplement-preview.png` 和 `build/verification/working-copy-supplement-published.png`（构建目录不纳入版本管理）。随后仅调整文件提示、空目录省略徽标与关闭说明；最终 `scripts/build-app.sh` 编译、打包、临时签名及 `codesign --verify --deep --strict build/RepHub.app` 通过，构建日志为 `/tmp/rephub-working-copy-package.log`。
 
 当前工作副本模式不承诺未应用预览跨重启恢复；已应用但未发布时保留 `origin` 和分支关联，可通过仓库管理继续 Git 推送。补迁不自动更新或提交 SVN，不提供持续双向同步。真实旧 TLS SVN 迁移及 Git→Git、Git→SVN、SVN→SVN 不在本轮验证范围内。
+
+原生返回工作区时额外发现：补迁已发布，但历史仍显示“待推送 1 个”。原因是通过远端 URL 推送后，已有 `origin/main` 跟踪引用没有更新。已将两种迁移的首次发布、补迁及重试收敛到相同处理：只有远端读回确认末端提交后，才更新本地对应跟踪引用；刷新失败仍如实保留“已发布”结果并报告本地状态问题，不重新推送。
+
+该修复后定向重跑 `GitMigrationTargetProviderTests|GitWorkingCopyMigrationTests`，10 项全部通过，显式检查本地跟踪提交等于已确认远端提交且 ahead/behind 为 0／0；日志为 `/tmp/rephub-migration-tracking-tests.log`。它们属于上述 68 项中的重复回归，不额外累计测试数。最终重新执行 `scripts/build-app.sh` 和签名核验通过，日志 `/tmp/rephub-migration-package-final.log`；QA 应用已退出。

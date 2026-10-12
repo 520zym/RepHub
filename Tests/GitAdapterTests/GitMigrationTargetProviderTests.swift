@@ -41,6 +41,10 @@ struct GitMigrationTargetProviderTests {
         #expect(published.state == .published)
         let remoteTip = try requireSuccess(try await fixture.run(executable: "git", arguments: ["--git-dir", remote.path, "rev-parse", "refs/heads/main"]), tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
         #expect(remoteTip == tip)
+        let trackingTip = try requireSuccess(try await fixture.run(executable: "git", arguments: ["rev-parse", "refs/remotes/origin/main"], directory: preview), tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let divergence = try requireSuccess(try await fixture.run(executable: "git", arguments: ["rev-list", "--left-right", "--count", "main...origin/main"], directory: preview), tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(trackingTip == tip)
+        #expect(divergence.split(whereSeparator: \.isWhitespace).map(String.init) == ["0", "0"])
     }
 
     @Test("已有引用和快照元数据均被拒绝")

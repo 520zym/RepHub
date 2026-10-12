@@ -215,7 +215,7 @@ public final class GitMigrationTargetProvider: RepositoryMigrationTargetProvider
             // 上次推送可能在网络中断后实际成功；先仅读取目标分支，命中本次固定
             // 末端提交时不重推，也不因空仓库规则而误报失败。
             if let existing = try await probeRemoteBranch(remote, branch: branch, in: repository), existing == expectedTip {
-                return await publishedResult(repository: repository, remote: remote, branch: branch, prefix: "已确认目标 Git 已包含本次迁移提交。")
+                return await publishedResult(repository: repository, remote: remote, branch: branch, confirmedTip: expectedTip, prefix: "已确认目标 Git 已包含本次迁移提交。")
             }
             await progress(RepositoryOperationProgress("正在确认目标 Git 仓库为空…"))
             try await checkMigrationTarget(remoteURL: remote, branch: branch)
@@ -228,23 +228,23 @@ public final class GitMigrationTargetProvider: RepositoryMigrationTargetProvider
             guard push.exitCode == 0 else {
                 do {
                     let check = try await probeRemoteBranch(remote, branch: branch, in: repository)
-                    if check == expectedTip { return await publishedResult(repository: repository, remote: remote, branch: branch, prefix: "目标 Git 分支已确认到迁移末端提交。") }
+                    if check == expectedTip { return await publishedResult(repository: repository, remote: remote, branch: branch, confirmedTip: expectedTip, prefix: "目标 Git 分支已确认到迁移末端提交。") }
                     return MigrationPublicationResult(state: check == nil ? .notPublished : .unknown, message: check == nil ? "目标 Git 未接受迁移提交。" : "推送结果不明确，请先核对目标 Git。")
                 } catch { return MigrationPublicationResult(state: .unknown, message: "推送未完成且无法读取目标 Git，请先核对。") }
             }
             let confirmed = try await remoteBranch(remote, branch: branch, in: repository)
             guard confirmed == expectedTip else { return MigrationPublicationResult(state: .unknown, message: "推送已返回成功，但未能确认目标 Git 分支。") }
-            return await publishedResult(repository: repository, remote: remote, branch: branch, prefix: "已发布迁移历史并确认目标 Git 分支。")
+            return await publishedResult(repository: repository, remote: remote, branch: branch, confirmedTip: expectedTip, prefix: "已发布迁移历史并确认目标 Git 分支。")
         } catch is CancellationError {
             guard writeStarted else { return MigrationPublicationResult(state: .notPublished, message: "发布已取消，尚未写入目标 Git。") }
             if let check = try? await probeRemoteBranch(remote, branch: branch, in: repository), check == expectedTip {
-                return await publishedResult(repository: repository, remote: remote, branch: branch, prefix: "发布被取消后仍确认目标 Git 已收到迁移提交。")
+                return await publishedResult(repository: repository, remote: remote, branch: branch, confirmedTip: expectedTip, prefix: "发布被取消后仍确认目标 Git 已收到迁移提交。")
             }
             return MigrationPublicationResult(state: .unknown, message: "发布被取消，结果需要核对。")
         } catch {
             if writeStarted {
                 if let check = try? await probeRemoteBranch(remote, branch: branch, in: repository), check == expectedTip {
-                    return await publishedResult(repository: repository, remote: remote, branch: branch, prefix: "发布出现异常后仍确认目标 Git 已收到迁移提交。")
+                    return await publishedResult(repository: repository, remote: remote, branch: branch, confirmedTip: expectedTip, prefix: "发布出现异常后仍确认目标 Git 已收到迁移提交。")
                 }
                 return MigrationPublicationResult(state: .unknown, message: "发布过程异常，结果需要核对：\(error.localizedDescription)")
             }
@@ -403,7 +403,7 @@ extension GitMigrationTargetProvider: RepositoryWorkingCopyMigrationTargetProvid
             guard ancestor.exitCode == 0 else { throw VersionControlError.invalidRepository("补迁结果不是上一迁移提交的后代，拒绝发布。") }
             let currentRemote = try await probeRemoteBranch(remote, branch: branch, in: repository)
             if currentRemote == expectedTip {
-                return await publishedResult(repository: repository, remote: remote, branch: branch, prefix: "已确认目标 Git 已包含本次补迁提交。")
+                return await publishedResult(repository: repository, remote: remote, branch: branch, confirmedTip: expectedTip, prefix: "已确认目标 Git 已包含本次补迁提交。")
             }
             guard currentRemote == expectedBeforeTip else { throw VersionControlError.invalidRepository("目标 Git 已变化，拒绝补迁发布。") }
             try Task.checkCancellation()
@@ -412,23 +412,23 @@ extension GitMigrationTargetProvider: RepositoryWorkingCopyMigrationTargetProvid
                 let pushed = try await git(["push", "--porcelain", "--force-with-lease=refs/heads/\(branch):\(expectedBeforeTip)", "--", remote, "\(expectedTip):refs/heads/\(branch)"], in: repository, timeout: 600, remote: true)
                 if pushed.exitCode != 0 {
                     if let confirmed = try? await probeRemoteBranch(remote, branch: branch, in: repository), confirmed == expectedTip {
-                        return await publishedResult(repository: repository, remote: remote, branch: branch, prefix: "补迁推送返回异常后仍确认目标 Git 已收到提交。")
+                        return await publishedResult(repository: repository, remote: remote, branch: branch, confirmedTip: expectedTip, prefix: "补迁推送返回异常后仍确认目标 Git 已收到提交。")
                     }
                     return MigrationPublicationResult(state: .unknown, message: "补迁推送结果不明确，请先核对目标 Git。")
                 }
                 let confirmed = try await probeRemoteBranch(remote, branch: branch, in: repository)
                 if confirmed == expectedTip {
-                    return await publishedResult(repository: repository, remote: remote, branch: branch, prefix: "已发布补迁提交并确认目标 Git 分支。")
+                    return await publishedResult(repository: repository, remote: remote, branch: branch, confirmedTip: expectedTip, prefix: "已发布补迁提交并确认目标 Git 分支。")
                 }
                 return MigrationPublicationResult(state: .unknown, message: "补迁推送已返回成功，但远端分支尚未确认。")
             } catch is CancellationError {
                 if let confirmed = try? await probeRemoteBranch(remote, branch: branch, in: repository), confirmed == expectedTip {
-                    return await publishedResult(repository: repository, remote: remote, branch: branch, prefix: "补迁发布取消后仍确认目标 Git 已收到提交。")
+                    return await publishedResult(repository: repository, remote: remote, branch: branch, confirmedTip: expectedTip, prefix: "补迁发布取消后仍确认目标 Git 已收到提交。")
                 }
                 return MigrationPublicationResult(state: .unknown, message: "补迁发布被取消，结果需要核对。")
             } catch {
                 if let confirmed = try? await probeRemoteBranch(remote, branch: branch, in: repository), confirmed == expectedTip {
-                    return await publishedResult(repository: repository, remote: remote, branch: branch, prefix: "补迁发布异常后仍确认目标 Git 已收到提交。")
+                    return await publishedResult(repository: repository, remote: remote, branch: branch, confirmedTip: expectedTip, prefix: "补迁发布异常后仍确认目标 Git 已收到提交。")
                 }
                 return MigrationPublicationResult(state: .unknown, message: "补迁发布异常，结果需要核对。")
             }
@@ -518,14 +518,15 @@ private extension GitMigrationTargetProvider {
         }.value
     }
 
-    /// 这只写入刚生成的本地预览仓库；不改远端 HEAD、默认分支或任何远端设置。
+    /// 这只写入新目录迁移结果或已确认的当前工作副本；不改远端 HEAD、默认分支或任何远端设置。
     /// 远端已确认成功后才调用，因此本地配置失败也不能否定已完成的发布。
-    func publishedResult(repository: URL, remote: String, branch: String, prefix: String) async -> MigrationPublicationResult {
+    func publishedResult(repository: URL, remote: String, branch: String, confirmedTip: String, prefix: String) async -> MigrationPublicationResult {
         do {
             try await configureOrigin(in: repository, remote: remote, branch: branch)
-            return MigrationPublicationResult(state: .published, message: "\(prefix) 已为本地仓库设置 origin 和 \(branch) 上游；如远端是空裸仓库，必要时仍需在服务端将默认分支设为 \(branch)。")
+            _ = try requireSuccess(try await git(["update-ref", "--no-deref", "refs/remotes/origin/\(branch)", confirmedTip], in: repository), tool: "git")
+            return MigrationPublicationResult(state: .published, message: "\(prefix) 已为本地仓库设置 origin、\(branch) 上游并刷新远端跟踪引用；如远端是空裸仓库，必要时仍需在服务端将默认分支设为 \(branch)。")
         } catch {
-            return MigrationPublicationResult(state: .published, message: "\(prefix) 远端发布已确认；但本地 origin/上游配置失败（\(error.localizedDescription)），可在仓库设置中重试。空裸远端的默认分支仍可能需要在服务端设为 \(branch)。")
+            return MigrationPublicationResult(state: .published, message: "\(prefix) 远端发布已确认；但本地 origin/上游或远端跟踪引用刷新失败（\(error.localizedDescription)），可在仓库设置中重试。空裸远端的默认分支仍可能需要在服务端设为 \(branch)。")
         }
     }
 
@@ -710,7 +711,7 @@ private extension GitMigrationTargetProvider {
     func publishInitialWorkingCopyMigration(at repository: URL, remote: String, branch: String, expectedTip: String, progress: @escaping RepositoryOperationProgressHandler) async throws -> MigrationPublicationResult {
         try await verifyWorkingCopyMigration(at: repository, expectedTip: expectedTip, branch: branch)
         if let existing = try await probeRemoteBranch(remote, branch: branch, in: repository), existing == expectedTip {
-            return await publishedResult(repository: repository, remote: remote, branch: branch, prefix: "已确认目标 Git 已包含本次迁移提交。")
+            return await publishedResult(repository: repository, remote: remote, branch: branch, confirmedTip: expectedTip, prefix: "已确认目标 Git 已包含本次迁移提交。")
         }
         try await checkMigrationTarget(remoteURL: remote, branch: branch)
         try Task.checkCancellation()
@@ -719,23 +720,23 @@ private extension GitMigrationTargetProvider {
             let pushed = try await git(["push", "--porcelain", "--force-with-lease=refs/heads/\(branch):", "--", remote, "\(expectedTip):refs/heads/\(branch)"], in: repository, timeout: 600, remote: true)
             if pushed.exitCode != 0 {
                 if let confirmed = try? await probeRemoteBranch(remote, branch: branch, in: repository), confirmed == expectedTip {
-                    return await publishedResult(repository: repository, remote: remote, branch: branch, prefix: "迁移推送返回异常后仍确认目标 Git 已收到提交。")
+                    return await publishedResult(repository: repository, remote: remote, branch: branch, confirmedTip: expectedTip, prefix: "迁移推送返回异常后仍确认目标 Git 已收到提交。")
                 }
                 return MigrationPublicationResult(state: .unknown, message: "迁移推送结果不明确，请先核对目标 Git。")
             }
             let confirmed = try await probeRemoteBranch(remote, branch: branch, in: repository)
             if confirmed == expectedTip {
-                return await publishedResult(repository: repository, remote: remote, branch: branch, prefix: "已发布迁移历史并确认目标 Git 分支。")
+                return await publishedResult(repository: repository, remote: remote, branch: branch, confirmedTip: expectedTip, prefix: "已发布迁移历史并确认目标 Git 分支。")
             }
             return MigrationPublicationResult(state: .unknown, message: "推送已返回成功，但远端分支尚未确认。")
         } catch is CancellationError {
             if let confirmed = try? await probeRemoteBranch(remote, branch: branch, in: repository), confirmed == expectedTip {
-                return await publishedResult(repository: repository, remote: remote, branch: branch, prefix: "迁移发布取消后仍确认目标 Git 已收到提交。")
+                return await publishedResult(repository: repository, remote: remote, branch: branch, confirmedTip: expectedTip, prefix: "迁移发布取消后仍确认目标 Git 已收到提交。")
             }
             return MigrationPublicationResult(state: .unknown, message: "迁移发布被取消，结果需要核对。")
         } catch {
             if let confirmed = try? await probeRemoteBranch(remote, branch: branch, in: repository), confirmed == expectedTip {
-                return await publishedResult(repository: repository, remote: remote, branch: branch, prefix: "迁移发布异常后仍确认目标 Git 已收到提交。")
+                return await publishedResult(repository: repository, remote: remote, branch: branch, confirmedTip: expectedTip, prefix: "迁移发布异常后仍确认目标 Git 已收到提交。")
             }
             return MigrationPublicationResult(state: .unknown, message: "迁移发布异常，结果需要核对。")
         }

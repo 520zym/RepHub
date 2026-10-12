@@ -44,6 +44,10 @@ struct GitWorkingCopyMigrationTests {
         #expect(configuredUpstream == "refs/heads/main")
         let published = try await provider.publishWorkingCopyMigration(at: workingCopy, remoteURL: remote.path, branch: "main", expectedBeforeTip: nil, expectedTip: tip, progress: { _ in })
         #expect(published.state == .published)
+        let trackingTip = try requireSuccess(try await fixture.run(executable: "git", arguments: ["rev-parse", "refs/remotes/origin/main"], directory: workingCopy), tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let divergence = try requireSuccess(try await fixture.run(executable: "git", arguments: ["rev-list", "--left-right", "--count", "main...origin/main"], directory: workingCopy), tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(trackingTip == tip)
+        #expect(divergence.split(whereSeparator: \.isWhitespace).map(String.init) == ["0", "0"])
     }
 
     @Test("补迁要求目标远端正好位于当前 Git 提交")
@@ -74,6 +78,10 @@ struct GitWorkingCopyMigrationTests {
         #expect(second.state == .published)
         let remoteTip = try requireSuccess(try await fixture.run(executable: "git", arguments: ["--git-dir", fixture.gitRemote.path, "rev-parse", "refs/heads/main"]), tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
         #expect(remoteTip == newTip)
+        let trackingTip = try requireSuccess(try await fixture.run(executable: "git", arguments: ["rev-parse", "refs/remotes/origin/main"], directory: fixture.gitReader), tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let divergence = try requireSuccess(try await fixture.run(executable: "git", arguments: ["rev-list", "--left-right", "--count", "main...origin/main"], directory: fixture.gitReader), tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(trackingTip == newTip)
+        #expect(divergence.split(whereSeparator: \.isWhitespace).map(String.init) == ["0", "0"])
     }
 
     @Test("补迁预览只携带已提交 Git 树，拒绝不安全本地配置")
