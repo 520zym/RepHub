@@ -5,7 +5,7 @@ AI 功能只在点击“生成提交说明”或“开始审查”后运行，�
 ## 使用方式
 
 1. 在“RepHub → Settings… → AI 与场景”添加连接，并明确选择协议：Chat Completions、OpenAI Responses 或 Anthropic Messages。三者是独立适配器，不能仅凭同一个地址推断可互换。密钥保存到 macOS 钥匙串。本机 localhost / 127.0.0.1 / ::1 可以使用 HTTP 和无密钥服务。
-2. API 地址可以填完整端点、以 `/v1` 结尾的基地址，或适配器对应的根地址。`api.openai.com` 与 `api.anthropic.com` 的根地址会自动补为 `/v1/responses` 或 `/v1/messages`；自定义服务根地址则分别补 `/responses` 或 `/messages`，应按该服务文档填写其基路径。已是对应端点的完整路径不会重复追加。
+2. API 地址可以填完整端点、以 `/v1` 结尾的基地址，或适配器对应的根地址。`api.openai.com` 与 `api.anthropic.com` 的根地址会按所选协议自动补为 `/v1/chat/completions`、`/v1/responses` 或 `/v1/messages`；自定义服务根地址则按所选协议补 `/chat/completions`、`/responses` 或 `/messages`，应按该服务文档填写其基路径。已是对应端点的完整路径不会重复追加。
 3. CLI 连接可选 Codex CLI 或 Claude Code。路径留空时检测常用安装位置；找不到时填写可执行文件路径。模型留空沿用工具默认值。CLI 复用自身登录状态，RepHub 不读取登录令牌。
 4. 内置“生成提交说明”和“代码审查”两个场景；可编辑提示词、新建场景并指定默认连接。场景与连接相互独立，执行时也可切换连接。
 5. 工作区底部“AI 生成”先打开提交准备窗口；为 Git、SVN 分别选好文件，再点击相应说明旁的“AI 生成”。生成后点击“填入提交说明”，可继续手工编辑，最后才由原有提交按钮执行提交。
