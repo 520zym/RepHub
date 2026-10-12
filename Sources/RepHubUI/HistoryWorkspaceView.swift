@@ -894,12 +894,14 @@ private struct RevisionFileTreeNodeView: View {
                     Image(systemName: "folder").foregroundStyle(palette.accent).frame(width: 15)
                 } else {
                     Color.clear.frame(width: 9, height: 1)
-                    statusMark(for: node.payload).frame(width: 15)
+                    // 状态胶囊本身带有水平留白；15pt 会把单字母状态压到标题下面。
+                    // 给它稳定的占位，深层目录和窄检查器中也不会与文件名重叠。
+                    statusMark(for: node.payload).frame(width: 20, alignment: .center)
                 }
                 Text(node.title).lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 0)
                 if node.isDirectory, node.payload != nil {
-                    statusMark(for: node.payload).frame(width: 15)
+                    statusMark(for: node.payload).frame(width: 20, alignment: .center)
                 }
             }
             .font(.system(size: 12))
@@ -945,6 +947,7 @@ private struct RevisionFileTreeNodeView: View {
                 .foregroundStyle(changeColor(change.kind))
                 .padding(.horizontal, 4).padding(.vertical, 2)
                 .background(changeColor(change.kind).opacity(0.14), in: Capsule())
+                .fixedSize(horizontal: true, vertical: false)
         }
     }
 

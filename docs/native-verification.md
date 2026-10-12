@@ -350,3 +350,11 @@ Claude Code 2.1.177 不再提供旧的 `--permission-prompts` 和 `--max-turns` 
 原生返回工作区时额外发现：补迁已发布，但历史仍显示“待推送 1 个”。原因是通过远端 URL 推送后，已有 `origin/main` 跟踪引用没有更新。已将两种迁移的首次发布、补迁及重试收敛到相同处理：只有远端读回确认末端提交后，才更新本地对应跟踪引用；刷新失败仍如实保留“已发布”结果并报告本地状态问题，不重新推送。
 
 该修复后定向重跑 `GitMigrationTargetProviderTests|GitWorkingCopyMigrationTests`，10 项全部通过，显式检查本地跟踪提交等于已确认远端提交且 ahead/behind 为 0／0；日志为 `/tmp/rephub-migration-tracking-tests.log`。它们属于上述 68 项中的重复回归，不额外累计测试数。最终重新执行 `scripts/build-app.sh` 和签名核验通过，日志 `/tmp/rephub-migration-package-final.log`；QA 应用已退出。
+
+## 2026-10-12：未跟踪文件预览与历史徽标留白
+
+- Git／SVN 未跟踪文件复用有界只读文件预览，不再请求版本控制差异；顶部以淡色“未跟踪”徽标标识本地内容。首次打开、主动选择、TAB 往返、刷新及更新后的选择恢复保持同一行为。SVN 仅报告未跟踪目录时，内部文件同样标识未跟踪。二进制、符号链接、非 UTF-8 和超过 1 MiB 的现有限制仍保留。
+- 提交详情文件树的状态胶囊原本带有水平内边距，外层却仅留 15pt；现改为稳定的 20pt 占位并禁止水平压缩，避免 M 等标记被文件名遮住。
+- `swift test --filter 'WorkspaceModelTests|WorkspaceFileServiceTests'` 共 35 项通过（26 项工作区、5 项关联工作区、4 项文件服务），日志 `/tmp/rephub-untracked-preview-tests.log`。新增回归在 Git／SVN 模拟适配器下验证实际临时文件内容，且确认不产生对应 VCS diff 请求；覆盖未跟踪目录内部文件及二进制提示。
+- 原生界面用独立标识 `com.zym.RepHub.filePreviewQA` 和 `RepHub-FilePreview-QA-ys34mz3i` 临时 `file://` SVN 验收：未跟踪 Java 内容直接显示，淡色徽标完整；历史详情八层目录、286pt 与缩窄至 254pt 的检查器中，M 徽标与文件名均不重叠。截图为 `build/verification/untracked-svn-preview.png`、`build/verification/history-status-badge-narrow.png`。未操作正式仓库。
+- `scripts/build-app.sh` 及 `codesign --verify --deep --strict build/RepHub.app` 通过，构建日志 `/tmp/rephub-file-preview-package.log`。

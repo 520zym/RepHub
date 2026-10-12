@@ -63,6 +63,63 @@ final class WorkspaceModelTests: XCTestCase {
         XCTAssertFalse(requests.contains { $0.path == "Unchanged.txt" }, "本地普通文件预览不调用VCS差异工具")
     }
 
+    func testUntrackedFilesPreviewWithoutDiffAcrossOpenTabsRefreshAndUpdate() async throws {
+        for providerID in [ProviderID.git, .svn] {
+            let directory = try makeDirectory()
+            let file = directory.appendingPathComponent("scratch.swift")
+            try "let draft = 1\n".write(to: file, atomically: true, encoding: .utf8)
+            let change = FileChange(path: "scratch.swift", kind: .untracked)
+            let provider = WorkspaceFixtureProvider(providerID: providerID, workingChanges: [change])
+            let model = WorkspaceModel(service: RepositoryService(providers: [provider]))
+            model.open(directory)
+            try await waitUntil { !model.isLoading && model.filePreview?.text == "let draft = 1\n" }
+            XCTAssertTrue(model.isUntrackedFilePreview)
+            XCTAssertNil(model.patch)
+
+            model.setHistoryVisible(true)
+            try await waitUntil { !model.isLoading && model.selectedRevisionID != nil }
+            XCTAssertFalse(model.isUntrackedFilePreview)
+            model.setHistoryVisible(false)
+            XCTAssertEqual(model.filePreview?.text, "let draft = 1\n")
+            XCTAssertTrue(model.isUntrackedFilePreview)
+            try "let draft = 2\n".write(to: file, atomically: true, encoding: .utf8)
+            model.selectChange(change)
+            try await waitUntil { !model.isLoading && model.filePreview?.text == "let draft = 2\n" }
+            model.refresh()
+            try await waitUntil { !model.isLoading && model.filePreview?.text == "let draft = 2\n" }
+            model.performOperation(.update, on: try XCTUnwrap(model.selectedBinding))
+            try await waitUntil { model.operationResult != nil && !model.isOperating }
+            XCTAssertEqual(model.filePreview?.text, "let draft = 2\n")
+            XCTAssertTrue(model.isUntrackedFilePreview)
+            XCTAssertNil(model.patch)
+            let requests = await provider.log.diffRequests()
+            XCTAssertFalse(requests.contains { $0.path == "scratch.swift" }, "未跟踪内容不能当成版本控制差异请求")
+        }
+    }
+
+    func testUntrackedDirectoryChildrenRetainStatusAndBinaryPreviewMessage() async throws {
+        let directory = try makeDirectory()
+        let folder = directory.appendingPathComponent("drafts", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try "local text".write(to: folder.appendingPathComponent("Note.txt"), atomically: true, encoding: .utf8)
+        try Data([0, 1, 2]).write(to: folder.appendingPathComponent("Data.bin"))
+        let provider = WorkspaceFixtureProvider(providerID: .svn, workingChanges: [FileChange(path: "drafts", kind: .untracked)])
+        let model = WorkspaceModel(service: RepositoryService(providers: [provider]))
+        model.open(directory)
+        try await waitUntil { !model.isLoading && model.snapshot != nil }
+        model.selectWorkspaceFile(path: "drafts/Note.txt")
+        try await waitUntil { !model.isLoading && model.filePreview?.text == "local text" }
+        XCTAssertTrue(model.isUntrackedFilePreview)
+        model.selectWorkspaceFile(path: "drafts/Data.bin")
+        try await waitUntil { !model.isLoading && model.filePreview?.message != nil }
+        XCTAssertTrue(model.isUntrackedFilePreview)
+        XCTAssertNil(model.filePreview?.text)
+        XCTAssertTrue(model.filePreview?.message?.contains("二进制") == true)
+        XCTAssertNil(model.patch)
+        let requests = await provider.log.diffRequests()
+        XCTAssertTrue(requests.isEmpty)
+    }
+
     func testOpenAutomaticallySelectsReadableSourceFileAndLoadsWorkingDiff() async throws {
         let provider = WorkspaceFixtureProvider()
         let model = WorkspaceModel(service: RepositoryService(providers: [provider]))
@@ -569,8 +626,9 @@ private struct WorkspaceFixtureProvider: RepositoryOperationProvider, Repository
     let detectError: Bool
     let detectDelays: [String: UInt64]
     let unmanagedDirectories: Set<String>
+    let workingChanges: [FileChange]?
 
-    init(providerID: ProviderID = .git, revisions: [Revision]? = nil, delays: [String: UInt64] = [:], fileHistoryDelays: [String: UInt64] = [:], fileHistoryFailures: Set<String> = [], operationDelay: UInt64 = 0, detectsRepository: Bool = true, detectError: Bool = false, detectDelays: [String: UInt64] = [:], unmanagedDirectories: Set<String> = [], log: WorkspaceInvocationLog = WorkspaceInvocationLog()) {
+    init(providerID: ProviderID = .git, revisions: [Revision]? = nil, delays: [String: UInt64] = [:], fileHistoryDelays: [String: UInt64] = [:], fileHistoryFailures: Set<String> = [], operationDelay: UInt64 = 0, detectsRepository: Bool = true, detectError: Bool = false, detectDelays: [String: UInt64] = [:], unmanagedDirectories: Set<String> = [], workingChanges: [FileChange]? = nil, log: WorkspaceInvocationLog = WorkspaceInvocationLog()) {
         self.id = providerID
         self.revisions = revisions ?? [Revision(id: providerID == .svn ? "r1" : "a1b2c3d4", author: "zym", date: .distantPast, message: "feat: 历史读取")]
         self.delays = delays
@@ -581,6 +639,7 @@ private struct WorkspaceFixtureProvider: RepositoryOperationProvider, Repository
         self.detectError = detectError
         self.detectDelays = detectDelays
         self.unmanagedDirectories = unmanagedDirectories
+        self.workingChanges = workingChanges
         self.log = log
     }
 
@@ -618,7 +677,7 @@ private struct WorkspaceFixtureProvider: RepositoryOperationProvider, Repository
     }
 
     func status(in binding: RepositoryBinding) async throws -> [FileChange] {
-        [
+        workingChanges ?? [
             FileChange(path: "scratch.swift", kind: .untracked),
             FileChange(path: "README.md", kind: .modified),
             FileChange(path: "Sources/App.swift", kind: .modified),

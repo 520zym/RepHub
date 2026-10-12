@@ -73,6 +73,15 @@ public struct DiffView: View {
                 Text(comparisonLabel).font(.system(size: 11)).foregroundStyle(appPalette.secondaryText)
             }
             Spacer(minLength: 8)
+            if model.isUntrackedFilePreview {
+                Label("未跟踪", systemImage: "questionmark.circle")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(appPalette.accent)
+                    .padding(.horizontal, 9).padding(.vertical, 5)
+                    .background(appPalette.accent.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
+                    .fixedSize()
+                    .help("尚未加入版本控制；当前显示本地文件内容，不会自动添加或提交。")
+            }
             if model.filePreview?.isTruncated == true || model.patch?.isTruncated == true {
                 Label("内容已截断", systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
             }
@@ -86,6 +95,7 @@ public struct DiffView: View {
     }
 
     private var comparisonLabel: String {
+        if model.isUntrackedFilePreview { return "尚未加入版本控制 · 本地内容 · 只读" }
         if model.filePreview != nil { return "工作区文件 · 只读" }
         let provider = model.selectedBinding?.providerName ?? "版本控制"
         if let revision = model.selectedRevisionID { return "\(provider) · \(String(revision.prefix(8))) 与父版本比较" }

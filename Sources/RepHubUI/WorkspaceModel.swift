@@ -142,6 +142,13 @@ public final class WorkspaceModel {
             || workingCopyMigration?.isBusy == true
     }
     public var isInteractionLocked: Bool { isOperating }
+    /// SVN 可能只报告未跟踪目录；浏览其中的文件时也保留未跟踪语义。
+    public var isUntrackedFilePreview: Bool {
+        guard filePreview != nil, selectedRevisionID == nil, let selectedPath else { return false }
+        return snapshot?.changes.contains {
+            $0.kind == .untracked && (selectedPath == $0.path || selectedPath.hasPrefix($0.path + "/"))
+        } == true
+    }
     public var operationRefreshIssues: [String] {
         var seen = Set<String>()
         return ((workspace?.issues ?? []) + snapshots.values.flatMap(\.issues)).filter { seen.insert($0).inserted }
@@ -551,7 +558,7 @@ public final class WorkspaceModel {
         loadPatch()
     }
 
-    /// 全部文件树复用变更差异，未修改文件显示有界的只读内容。
+    /// 已跟踪变更复用差异；未跟踪和未修改文件显示有界的只读内容。
     public func selectWorkspaceFile(path: String) {
         guard !isInteractionLocked, let binding = selectedBinding,
               let path = validatedRelativePath(path) else { return }
@@ -1002,11 +1009,7 @@ public final class WorkspaceModel {
             } else {
                 if let path, !snapshots[binding.id, default: BindingSnapshot(binding: binding)].changes.contains(where: { $0.path == path }),
                    FileManager.default.fileExists(atPath: binding.root.appendingPathComponent(path).path) {
-                    let preview = try await fileBrowser.preview(path: path)
-                    guard operationToken == token, selectedBindingID == binding.id else { return }
-                    selectedRevisionID = nil
-                    selectedPath = path
-                    filePreview = preview
+                    try await loadWorkingFile(path: path, binding: binding, token: token, restoresOperation: true)
                     return
                 }
                 let candidate = path.flatMap { requested in
@@ -1014,6 +1017,10 @@ public final class WorkspaceModel {
                 } ?? preferredFile(in: snapshots[binding.id]?.changes ?? [])
                 selectedRevisionID = nil
                 selectedPath = candidate?.path
+                if let candidate {
+                    try await loadWorkingFile(path: candidate.path, binding: binding, token: token, restoresOperation: true)
+                    return
+                }
                 let patch = try await service.diff(in: binding, path: candidate?.path, revision: nil)
                 guard operationToken == token, selectedBindingID == binding.id else { return }
                 self.patch = patch
@@ -1058,10 +1065,7 @@ public final class WorkspaceModel {
         }
 
         guard let first = preferredFile(in: snapshot.changes) else { return }
-        selectedPath = first.path
-        let patch = try await service.diff(in: binding, path: first.path, revision: nil)
-        guard accepts(token), selectedBindingID == binding.id, selectedRevisionID == nil, selectedPath == first.path else { return }
-        self.patch = patch
+        try await loadWorkingFile(path: first.path, binding: binding, token: token)
     }
 
     private func loadRevision(_ revision: Revision, binding: RepositoryBinding, token: Int) async throws {
@@ -1075,18 +1079,18 @@ public final class WorkspaceModel {
         self.patch = patch
     }
 
-    private func loadWorkingFile(path: String, binding: RepositoryBinding, token: Int) async throws {
+    private func loadWorkingFile(path: String, binding: RepositoryBinding, token: Int, restoresOperation: Bool = false) async throws {
         selectedRevisionID = nil
         selectedPath = path
         revisionFiles = []
-        if snapshot?.changes.contains(where: { $0.path == path }) == true {
+        if snapshot?.changes.contains(where: { $0.path == path && $0.kind != .untracked }) == true {
             let value = try await service.diff(in: binding, path: path, revision: nil)
-            guard accepts(token), selectedBindingID == binding.id, selectedRevisionID == nil, selectedPath == path else { return }
+            guard acceptsHistoryLoad(token, restoresOperation: restoresOperation), selectedBindingID == binding.id, selectedRevisionID == nil, selectedPath == path else { return }
             filePreview = nil
             patch = value
         } else {
             let value = try await fileBrowser.preview(path: path)
-            guard accepts(token), selectedBindingID == binding.id, selectedRevisionID == nil, selectedPath == path else { return }
+            guard acceptsHistoryLoad(token, restoresOperation: restoresOperation), selectedBindingID == binding.id, selectedRevisionID == nil, selectedPath == path else { return }
             patch = nil
             filePreview = value
         }
@@ -1229,6 +1233,10 @@ public final class WorkspaceModel {
         let path = selectedPath
         start { [weak self] token in
             guard let self else { return }
+            if let path {
+                try await self.loadWorkingFile(path: path, binding: binding, token: token)
+                return
+            }
             let patch = try await self.service.diff(in: binding, path: path, revision: nil)
             guard self.accepts(token), self.selectedBindingID == binding.id, self.selectedPath == path, self.selectedRevisionID == nil else { return }
             self.patch = patch
