@@ -20,6 +20,11 @@ public struct RepositoryCapabilities: OptionSet, Hashable, Sendable {
     public static let fileHistory = Self(rawValue: 1 << 7)
     public static let synchronization = Self(rawValue: 1 << 8)
     public static let commit = Self(rawValue: 1 << 9)
+    public static let push = Self(rawValue: 1 << 10)
+    public static let staging = Self(rawValue: 1 << 11)
+    public static let branchManagement = Self(rawValue: 1 << 12)
+    public static let conflictResolution = Self(rawValue: 1 << 13)
+    public static let revisionComparison = Self(rawValue: 1 << 14)
 }
 
 public struct RepositoryBinding: Identifiable, Hashable, Sendable {
@@ -30,6 +35,10 @@ public struct RepositoryBinding: Identifiable, Hashable, Sendable {
     public let currentBranch: String
     public let remoteURL: String?
     public let capabilities: RepositoryCapabilities
+    /// 多目录关联时用本地目录区分同一种版本控制来源。
+    public var displayLabel: String {
+        "\(providerID == .svn ? "SVN" : providerName) · \(root.lastPathComponent)"
+    }
 
     public init(providerID: ProviderID, providerName: String, root: URL, currentBranch: String = "", remoteURL: String? = nil, capabilities: RepositoryCapabilities) {
         self.providerID = providerID; self.providerName = providerName; self.root = root

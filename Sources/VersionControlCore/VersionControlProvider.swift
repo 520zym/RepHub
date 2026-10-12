@@ -17,13 +17,3 @@ public protocol VersionControlProvider: Sendable {
 public extension VersionControlProvider {
     func branches(in binding: RepositoryBinding) async throws -> [BranchReference] { [] }
 }
-
-/// 仅声明初始化单选的领域约束，当前只读里程碑不执行初始化。
-public struct InitializeRequest: Sendable {
-    public let providerID: ProviderID
-    public let directory: URL
-    public let remoteURL: URL?
-    public init(providerID: ProviderID, directory: URL, remoteURL: URL? = nil) {
-        self.providerID = providerID; self.directory = directory; self.remoteURL = remoteURL
-    }
-}

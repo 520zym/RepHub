@@ -4,11 +4,14 @@ import VersionControlCore
 public struct Workspace: Identifiable, Sendable {
     public var id: String { directory.path }
     public let directory: URL
+    /// 与主目录共同展示的其他工作副本。主目录不重复存放在此集合中。
+    public let linkedDirectories: [URL]
     public let bindings: [RepositoryBinding]
     public let issues: [String]
     public var name: String { directory.lastPathComponent }
-    public init(directory: URL, bindings: [RepositoryBinding], issues: [String]) {
-        self.directory = directory; self.bindings = bindings; self.issues = issues
+    public init(directory: URL, linkedDirectories: [URL] = [], bindings: [RepositoryBinding], issues: [String]) {
+        self.directory = directory; self.linkedDirectories = linkedDirectories
+        self.bindings = bindings; self.issues = issues
     }
     public var isUnmanaged: Bool { bindings.isEmpty && issues.isEmpty }
 }
@@ -37,6 +40,10 @@ public actor RepositoryService {
 
     public func acquisitionOptions() -> [RepositoryAcquisitionOption] {
         providers.compactMap { ($0 as? any RepositoryAcquisitionProvider)?.acquisitionOption }
+    }
+
+    public func setupOptions() -> [RepositorySetupOption] {
+        providers.compactMap { ($0 as? any RepositorySetupProvider)?.setupOption }
     }
 
     public func browseRemote(providerID: ProviderID, location: RemoteRepositoryLocation) async throws -> RemoteDirectoryListing {
@@ -126,6 +133,91 @@ public actor RepositoryService {
         return destination
     }
 
+    /// 在任何写入前重新检测全部来源。初始化只能发生在未受管且没有检测故障的目录。
+    public func initialize(_ request: RepositorySetupRequest,
+                           progress: @escaping RepositoryOperationProgressHandler) async throws -> RepositorySetupResult {
+        guard !isPerformingOperation else {
+            throw VersionControlError.unsupported("已有仓库操作正在执行，请等待完成或取消后的状态核对结束。")
+        }
+        guard let provider = providers.first(where: { $0.id == request.providerID }) as? any RepositorySetupProvider else {
+            throw VersionControlError.unsupported("所选版本控制来源不支持初始化。")
+        }
+        if provider.setupOption.requiresRemote, request.remote == nil {
+            throw VersionControlError.invalidRepository("所选版本控制方式需要填写远端仓库地址。")
+        }
+        let directory = try checkedDirectory(request.directory)
+        guard !directory.path.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+            throw VersionControlError.invalidRepository("初始化目录路径包含控制字符。")
+        }
+        let normalizedRequest = RepositorySetupRequest(providerID: request.providerID, directory: directory,
+                                                       remote: request.remote, message: request.message,
+                                                       initialBranch: request.initialBranch)
+        isPerformingOperation = true
+        defer { isPerformingOperation = false }
+        await progress(RepositoryOperationProgress("正在检查文件夹是否已受版本控制…"))
+        let detected = try await open(directory: directory)
+        guard detected.bindings.isEmpty else {
+            throw VersionControlError.invalidRepository("此文件夹已受版本控制，不能再次初始化。")
+        }
+        guard detected.issues.isEmpty else {
+            throw VersionControlError.invalidRepository("无法确认文件夹是否未受版本控制：\n\(detected.issues.joined(separator: "\n"))")
+        }
+        guard try !containsVersionControlMetadata(in: directory) else {
+            throw VersionControlError.invalidRepository("文件夹内包含 .git 或 .svn 元数据，不能在嵌套工作副本中初始化。")
+        }
+        try Task.checkCancellation()
+        do {
+            let result = try await provider.initialize(normalizedRequest) { update in
+                await progress(Self.sanitizedProgress(update, password: normalizedRequest.remote?.credentials?.password))
+            }
+            return sanitizedSetupResult(result, password: normalizedRequest.remote?.credentials?.password)
+        } catch is CancellationError {
+            return RepositorySetupResult(outcome: .unknown, directory: directory,
+                                         summary: "初始化结果需要核对。",
+                                         details: "初始化已开始，但未取得适配器结果。请重新打开文件夹核对状态，勿直接重复初始化。")
+        } catch {
+            return RepositorySetupResult(outcome: .unknown, directory: directory,
+                                         summary: "初始化结果需要核对。",
+                                         details: "初始化已开始，但未取得适配器结果。请重新打开文件夹核对状态，勿直接重复初始化。\n\n"
+                                            + sanitizedText(error.localizedDescription,
+                                                           password: normalizedRequest.remote?.credentials?.password))
+        }
+    }
+
+    private func containsVersionControlMetadata(in directory: URL) throws -> Bool {
+        let names: Set<String> = [".git", ".svn"]
+        var enumerationError: Error?
+        guard let enumerator = FileManager.default.enumerator(at: directory,
+                                                               includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+                                                               options: [], errorHandler: { _, error in
+                                                                   enumerationError = error
+                                                                   return false
+                                                               }) else {
+            throw VersionControlError.invalidRepository("无法枚举初始化目录以检查嵌套版本控制元数据。")
+        }
+        for case let item as URL in enumerator {
+            try Task.checkCancellation()
+            if names.contains(item.lastPathComponent.lowercased()) { return true }
+        }
+        if let enumerationError {
+            throw VersionControlError.invalidRepository("无法完整检查嵌套版本控制元数据：\(RepositoryDisplaySanitizer.redact(enumerationError.localizedDescription))")
+        }
+        return false
+    }
+
+    private func sanitizedSetupResult(_ result: RepositorySetupResult, password: String?) -> RepositorySetupResult {
+        RepositorySetupResult(outcome: result.outcome, directory: result.directory,
+                              summary: sanitizedText(result.summary, password: password),
+                              details: sanitizedText(result.details, password: password),
+                              backupDirectory: result.backupDirectory)
+    }
+
+    private func sanitizedText(_ text: String, password: String? = nil) -> String {
+        var value = RepositoryDisplaySanitizer.redact(text)
+        if let password, !password.isEmpty { value = value.replacingOccurrences(of: password, with: "***") }
+        return value
+    }
+
     private func acquisitionError(_ error: any Error, location: RemoteRepositoryLocation) -> String {
         var message = RepositoryDisplaySanitizer.redact(error.localizedDescription)
         if let password = location.credentials?.password, !password.isEmpty {
@@ -147,21 +239,51 @@ public actor RepositoryService {
             })
     }
 
-    public func open(directory: URL) async throws -> Workspace {
+    public func open(directory: URL, linkedDirectories: [URL] = []) async throws -> Workspace {
+        let directory = try checkedDirectory(directory)
+        let linked = normalizeLinkedDirectories(linkedDirectories, excluding: directory)
+        let directories = [directory] + linked
+        var bindings: [RepositoryBinding] = [], issues: [String] = []
+        var seenBindings = Set<String>()
+        for candidate in directories {
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: candidate.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+                issues.append("关联目录不可访问：\(candidate.path)")
+                continue
+            }
+            for provider in providers {
+                try Task.checkCancellation()
+                do {
+                    if let binding = try await provider.detect(at: candidate), seenBindings.insert(binding.id).inserted {
+                        bindings.append(binding)
+                    }
+                } catch is CancellationError { throw CancellationError() }
+                catch {
+                    let prefix = candidate == directory ? provider.displayName : "\(candidate.lastPathComponent) · \(provider.displayName)"
+                    issues.append("\(prefix)：\(error.localizedDescription)")
+                }
+            }
+        }
+        try Task.checkCancellation()
+        return Workspace(directory: directory, linkedDirectories: linked, bindings: bindings, issues: issues)
+    }
+
+    private func checkedDirectory(_ directory: URL) throws -> URL {
         let directory = directory.standardizedFileURL.resolvingSymlinksInPath()
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory), isDirectory.boolValue else {
             throw VersionControlError.invalidRepository("所选路径不是可访问的文件夹。")
         }
-        var bindings: [RepositoryBinding] = [], issues: [String] = []
-        for provider in providers {
-            try Task.checkCancellation()
-            do { if let binding = try await provider.detect(at: directory) { bindings.append(binding) } }
-            catch is CancellationError { throw CancellationError() }
-            catch { issues.append("\(provider.displayName)：\(error.localizedDescription)") }
+        return directory
+    }
+
+    private func normalizeLinkedDirectories(_ candidates: [URL], excluding primary: URL) -> [URL] {
+        var seen = Set([primary.path])
+        return candidates.compactMap { candidate in
+            guard candidate.isFileURL else { return nil }
+            let normalized = candidate.standardizedFileURL.resolvingSymlinksInPath()
+            return seen.insert(normalized.path).inserted ? normalized : nil
         }
-        try Task.checkCancellation()
-        return Workspace(directory: directory, bindings: bindings, issues: issues)
     }
 
     public func load(_ binding: RepositoryBinding, reference: String? = nil) async -> BindingSnapshot {
@@ -452,6 +574,192 @@ public actor RepositoryService {
         }.map(\.element)
     }
 
+    /// 读取适配器当前的可管理状态；该状态令牌只能用于随后的同一来源写操作。
+    public func managementContext(in binding: RepositoryBinding) async throws -> RepositoryManagementContext {
+        guard let provider = try provider(for: binding) as? any RepositoryManagementProvider else {
+            throw VersionControlError.unsupported("当前版本控制来源不支持仓库管理。")
+        }
+        try Task.checkCancellation()
+        guard let current = try await provider.detect(at: binding.root), current.id == binding.id else {
+            throw VersionControlError.invalidRepository("仓库位置已改变，请重新打开工作区。")
+        }
+        let context = try await provider.managementContext(in: current)
+        guard context.binding.id == current.id else {
+            throw VersionControlError.invalidData("版本控制适配器返回的管理状态不属于当前仓库。")
+        }
+        return context
+    }
+
+    /// 管理写操作在执行前复核能力、绑定与状态令牌，完成或取消后均独立刷新全部关联工作副本。
+    public func manage(_ request: RepositoryManagementRequest, bindingID: String, in workspace: Workspace,
+                       progress: @escaping RepositoryOperationProgressHandler) async throws -> WorkspaceManagementResult {
+        guard !isPerformingOperation else {
+            throw VersionControlError.unsupported("已有仓库操作正在执行，请等待完成或取消后的状态核对结束。")
+        }
+        guard let requested = workspace.bindings.first(where: { $0.id == bindingID }),
+              requested.capabilities.contains(request.action.capability),
+              let provider = try provider(for: requested) as? any RepositoryManagementProvider else {
+            throw VersionControlError.unsupported("所选版本控制来源不支持此管理操作。")
+        }
+        try validateManagementAction(request.action)
+        isPerformingOperation = true
+        defer { isPerformingOperation = false }
+
+        let result: RepositoryManagementResult
+        var didStart = false
+        do {
+            try Task.checkCancellation()
+            await progress(RepositoryOperationProgress("正在核对仓库状态…"))
+            guard let current = try await provider.detect(at: requested.root), current.id == requested.id,
+                  current.currentBranch == requested.currentBranch, current.remoteURL == requested.remoteURL else {
+                throw VersionControlError.invalidRepository("仓库分支或远端已改变，请刷新后重新执行管理操作。")
+            }
+            let context = try await provider.managementContext(in: current)
+            guard context.binding.id == current.id, context.stateToken == request.stateToken else {
+                throw VersionControlError.invalidRepository("仓库状态已改变，请重新打开管理面板后再执行。")
+            }
+            try Task.checkCancellation()
+            didStart = true
+            let performed = try await provider.performManagement(request, in: current) { update in
+                await progress(Self.sanitizedProgress(update))
+            }
+            result = sanitizedManagementResult(performed)
+        } catch is CancellationError {
+            result = RepositoryManagementResult(outcome: didStart ? .unknown : .cancelled,
+                                                summary: didStart ? "操作结果需要核对。" : "操作已取消。",
+                                                details: didStart
+                                                    ? "操作已开始，但未取得适配器结果。请根据刷新后的状态核对，勿直接重复执行。"
+                                                    : "取消不会自动回滚已经执行的仓库步骤，请核对刷新后的状态。")
+        } catch {
+            result = RepositoryManagementResult(outcome: didStart ? .unknown : .failed,
+                                                summary: didStart ? "操作结果需要核对。" : "操作未完成。",
+                                                details: (didStart ? "操作已开始，但未取得适配器结果。请根据刷新后的状态核对，勿直接重复执行。\n\n" : "")
+                                                    + RepositoryDisplaySanitizer.redact(error.localizedDescription))
+        }
+
+        await progress(RepositoryOperationProgress("正在重新检查所有版本控制来源…"))
+        let refreshed = await Task.detached { [self] in await refreshAfterOperation(workspace) }.value
+        return WorkspaceManagementResult(result: result, workspace: refreshed.0, snapshots: refreshed.1)
+    }
+
+    public func stagedDiff(in binding: RepositoryBinding, path: String) async throws -> RepositoryPatch {
+        try validateManagedPath(path)
+        guard binding.capabilities.contains(.staging),
+              let provider = try provider(for: binding) as? any RepositoryManagementProvider else {
+            throw VersionControlError.unsupported("当前版本控制来源没有独立暂存区。")
+        }
+        return try await provider.stagedDiff(in: binding, path: path)
+    }
+
+    public func compare(in binding: RepositoryBinding, from: String, to: String) async throws -> RepositoryComparison {
+        try validateComparisonRevision(from)
+        try validateComparisonRevision(to)
+        guard let provider = try provider(for: binding) as? any RepositoryComparisonProvider else {
+            throw VersionControlError.unsupported("当前版本控制来源不支持修订比较。")
+        }
+        let comparison = try await provider.compare(in: binding, from: from, to: to)
+        try validateComparisonRevision(comparison.fromRevision)
+        try validateComparisonRevision(comparison.toRevision)
+        for change in comparison.files {
+            try validateManagedPath(change.path)
+            if let original = change.originalPath { try validateManagedPath(original) }
+        }
+        return comparison
+    }
+
+    public func comparisonDiff(in binding: RepositoryBinding, comparison: RepositoryComparison,
+                               path: String) async throws -> RepositoryPatch {
+        try validateManagedPath(path)
+        guard comparison.files.contains(where: { $0.path == path || $0.originalPath == path }) else {
+            throw VersionControlError.invalidRepository("所选文件不属于当前比较范围。")
+        }
+        guard let provider = try provider(for: binding) as? any RepositoryComparisonProvider else {
+            throw VersionControlError.unsupported("当前版本控制来源不支持修订比较。")
+        }
+        return try await provider.comparisonDiff(in: binding, comparison: comparison, path: path)
+    }
+
+    private func validateManagementAction(_ action: RepositoryManagementAction) throws {
+        switch action {
+        case .stage(let paths), .unstage(let paths), .markResolved(let paths):
+            guard !paths.isEmpty, Set(paths).count == paths.count else {
+                throw VersionControlError.invalidRepository("请选择至少一个且不重复的文件。")
+            }
+            for path in paths { try validateManagedPath(path) }
+        case .setRemote(let name, let url):
+            try validateRemoteName(name)
+            try validateRemoteURL(url)
+        case .setIdentity(let name, let email):
+            try validateIdentityField(name, label: "提交者姓名")
+            try validateIdentityField(email, label: "提交者邮箱")
+        case .push(let remote, let branch, _):
+            try validateRemoteName(remote)
+            try validateManagementName(branch, label: "分支名称")
+        case .createBranch(let name, let startPoint):
+            try validateManagementName(name, label: "分支名称")
+            try validateManagementName(startPoint, label: "起点")
+        case .switchBranch(let name), .merge(let name):
+            try validateManagementName(name, label: "分支名称")
+        case .finishMerge(let message):
+            guard !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !message.contains("\0"), message.utf8.count <= 256 * 1024 else {
+                throw VersionControlError.invalidRepository("合并说明不能为空且不能超过允许长度。")
+            }
+        }
+    }
+
+    private func validateRemoteName(_ value: String) throws {
+        try validateManagementName(value, label: "远端名称")
+        guard !value.hasPrefix("-") else {
+            throw VersionControlError.invalidRepository("远端名称不能以连字符开头。")
+        }
+    }
+
+    private func validateRemoteURL(_ value: String) throws {
+        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+              value.utf8.count <= 16 * 1024 else {
+            throw VersionControlError.invalidRepository("远端地址无效。")
+        }
+        // HTTPS 地址先通过通用端点策略排除凭据、查询与不规范主机；SSH 与其他适配器地址
+        // 保留给具体版本控制工具作最终校验，不能在业务层误拒绝常见 Git SSH 写法。
+        if value.lowercased().hasPrefix("https://") {
+            do {
+                _ = try RepositoryEndpointPolicy(httpsAddress: value, tlsMode: .modern)
+            } catch {
+                throw VersionControlError.invalidRepository(error.localizedDescription)
+            }
+        }
+    }
+
+    private func validateIdentityField(_ value: String, label: String) throws {
+        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+              value.utf8.count <= 4 * 1024 else {
+            throw VersionControlError.invalidRepository("\(label)无效。")
+        }
+    }
+
+    private func validateManagedPath(_ path: String) throws { try validateCommitPath(path) }
+
+    private func validateComparisonRevision(_ value: String) throws {
+        try validateManagementName(value, label: "修订范围")
+    }
+
+    private func validateManagementName(_ value: String, label: String) throws {
+        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+              value.utf8.count <= 4 * 1024 else {
+            throw VersionControlError.invalidRepository("\(label)无效。")
+        }
+    }
+
+    private func sanitizedManagementResult(_ result: RepositoryManagementResult) -> RepositoryManagementResult {
+        RepositoryManagementResult(outcome: result.outcome,
+                                   summary: RepositoryDisplaySanitizer.redact(result.summary),
+                                   details: RepositoryDisplaySanitizer.redact(result.details))
+    }
+
     /// 同一服务实例串行写入；只执行一个已识别的目标，完成后刷新全部绑定。
     public func perform(_ operation: RepositoryOperationKind, bindingID: String, in workspace: Workspace,
                         progress: @escaping RepositoryOperationProgressHandler) async throws -> WorkspaceOperationResult {
@@ -510,9 +818,9 @@ public actor RepositoryService {
 
     private func refreshAfterOperation(_ previous: Workspace) async -> (Workspace, [BindingSnapshot]) {
         let refreshed: Workspace
-        do { refreshed = try await open(directory: previous.directory) }
+        do { refreshed = try await open(directory: previous.directory, linkedDirectories: previous.linkedDirectories) }
         catch {
-            refreshed = Workspace(directory: previous.directory, bindings: previous.bindings,
+            refreshed = Workspace(directory: previous.directory, linkedDirectories: previous.linkedDirectories, bindings: previous.bindings,
                 issues: ["操作后无法重新识别工作区：\(RepositoryDisplaySanitizer.redact(error.localizedDescription))"])
         }
         var snapshots: [BindingSnapshot] = []
