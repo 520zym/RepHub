@@ -7,7 +7,7 @@ import VersionControlCore
 
 /// 通过 Subversion 命令行读取工作副本，并执行受限的更新、远端浏览和检出操作。
 /// 用户输入的认证信息只保留在当前进程内存中，不写入 SVN 认证缓存。
-public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingProvider, RepositoryAcquisitionProvider, RepositoryCommitProvider {
+public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingProvider, RepositoryAcquisitionProvider, RepositoryCommitProvider, RepositorySetupProvider, RepositoryManagementProvider, RepositoryComparisonProvider {
     public let runner: CommandRunner
     private let tlsFallback: SVNAutomaticTLSFallback
     private let commandExecutor: @Sendable ([String], URL, URL?) async throws -> CommandResult
@@ -45,6 +45,7 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         supportsBrowsing: true,
         supportsCredentials: true
     )
+    public let setupOption = RepositorySetupOption(providerID: .svn, title: "SVN", requiresRemote: true)
 
     public func browseRemote(_ location: RemoteRepositoryLocation) async throws -> RemoteDirectoryListing {
         let address = try normalizedRemoteAddress(location.url)
@@ -126,7 +127,7 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
                     providerName: displayName,
                     root: root,
                     remoteURL: entry.url,
-                    capabilities: [.status, .diff, .history, .update, .fileHistory, .synchronization, .commit]
+                    capabilities: [.status, .diff, .history, .update, .fileHistory, .synchronization, .commit, .conflictResolution, .revisionComparison]
                 )
             }
 
@@ -894,6 +895,235 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         )
     }
 
+    public func initialize(
+        _ request: RepositorySetupRequest,
+        progress: @escaping RepositoryOperationProgressHandler
+    ) async throws -> RepositorySetupResult {
+        guard request.providerID == id else {
+            return RepositorySetupResult(outcome: .failed, directory: request.directory, summary: "初始化方式与 SVN 不匹配。")
+        }
+        guard let remote = request.remote else {
+            return RepositorySetupResult(outcome: .failed, directory: request.directory, summary: "SVN 初始化需要明确的新远端地址。")
+        }
+        let source = request.directory.standardizedFileURL
+        var isDirectory = ObjCBool(false)
+        guard FileManager.default.fileExists(atPath: source.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return RepositorySetupResult(outcome: .failed, directory: source, summary: "要导入的本地文件夹不存在。")
+        }
+        guard try await detect(at: source) == nil else {
+            return RepositorySetupResult(outcome: .failed, directory: source, summary: "该文件夹已受版本控制管理，不能初始化为新的 SVN 工作副本。")
+        }
+        let address: String
+        do {
+            address = try normalizedRemoteAddress(remote.url)
+            try await rememberCredentials(remote.credentials, for: address)
+        } catch {
+            return RepositorySetupResult(
+                outcome: .failed,
+                directory: source,
+                summary: "SVN 远端地址或凭据无效，未开始导入。",
+                details: RepositoryDisplaySanitizer.redact(error.localizedDescription)
+            )
+        }
+        let message = request.message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty else {
+            return RepositorySetupResult(outcome: .failed, directory: source, summary: "SVN 初始提交说明不能为空。")
+        }
+
+        await progress(RepositoryOperationProgress("检查 SVN 远端路径…"))
+        do {
+            _ = try await runRemoteRead(["info", "--xml", svnRemoteTarget(address)], remoteURL: address)
+            return RepositorySetupResult(outcome: .failed, directory: source, summary: "SVN 远端路径已存在，拒绝覆盖。")
+        } catch is CancellationError {
+            return RepositorySetupResult(outcome: .cancelled, directory: source, summary: "SVN 导入在开始前已取消。")
+        } catch {
+            guard isMissingSVNPath(error) else { throw error }
+        }
+
+        let parentAddress = try remoteParentAddress(of: address)
+        await progress(RepositoryOperationProgress("验证 SVN 远端父目录与连接…"))
+        let tlsMode = try await probeRemoteTLSMode(parentAddress)
+        try Task.checkCancellation()
+
+        await progress(RepositoryOperationProgress("准备不含版本控制元数据的导入快照…"))
+        let staging = FileManager.default.temporaryDirectory.appendingPathComponent("rephub-svn-import-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: staging) }
+        try makeSVNImportSnapshot(from: source, to: staging)
+        let sourceFingerprint = try importManifest(at: source)
+        let snapshotFingerprint = try importManifest(at: staging)
+        guard sourceFingerprint == snapshotFingerprint else {
+            throw VersionControlError.invalidData("导入快照与原目录不一致，已停止导入。")
+        }
+        try Task.checkCancellation()
+
+        await progress(RepositoryOperationProgress("正在导入到 SVN…", detail: "远端写入只执行一次。"))
+        guard try importManifest(at: source) == sourceFingerprint else {
+            return RepositorySetupResult(outcome: .failed, directory: source,
+                                         summary: "原目录在导入前发生变化，未写入 SVN。",
+                                         details: "原目录未替换；请重新确认内容后再导入。")
+        }
+        let imported: CommandResult
+        do {
+            imported = try await runRemoteWrite(
+                ["--non-interactive", "--no-auth-cache", "import", "--no-ignore", "--no-auto-props", staging.path, address, "-m", message],
+                remoteURL: address, tlsMode: tlsMode, timeout: 120
+            )
+            _ = try requireSuccess(imported, tool: "svn")
+        } catch is CancellationError {
+            return RepositorySetupResult(outcome: .unknown, directory: source,
+                                         summary: "SVN 导入已启动后被取消，无法确认远端是否已创建。",
+                                         details: "原目录未改动；请先在远端核对 \(address)。")
+        } catch {
+            return RepositorySetupResult(outcome: .unknown, directory: source,
+                                         summary: "SVN 导入结果无法确认，未自动重试。",
+                                         details: "原目录未改动；请先在远端核对 \(address)。\n\(RepositoryDisplaySanitizer.redact(error.localizedDescription))")
+        }
+
+        let temporaryCheckout = source.deletingLastPathComponent().appendingPathComponent(".rephub-svn-checkout-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: temporaryCheckout) }
+        await progress(RepositoryOperationProgress("验证导入结果并生成新的 SVN 工作副本…"))
+        do {
+            let result = try await runRemoteWrite(
+                ["--non-interactive", "--no-auth-cache", "checkout", "--ignore-externals", svnRemoteTarget(address), temporaryCheckout.path],
+                remoteURL: address, tlsMode: tlsMode, timeout: 600
+            )
+            _ = try requireSuccess(result, tool: "svn")
+            guard try await detect(at: temporaryCheckout) != nil else {
+                throw VersionControlError.invalidRepository("导入后的临时工作副本无法识别。")
+            }
+            guard try importManifest(at: temporaryCheckout) == snapshotFingerprint else {
+                throw VersionControlError.invalidData("检出内容与导入快照不一致。")
+            }
+        } catch {
+            return RepositorySetupResult(outcome: .unknown, directory: source,
+                                         summary: "SVN 已导入，但未能安全替换本地文件夹。",
+                                         details: "原目录仍保留；请核对远端 \(address) 后手工检出。\n\(RepositoryDisplaySanitizer.redact(error.localizedDescription))")
+        }
+
+        let backup = source.deletingLastPathComponent().appendingPathComponent("\(source.lastPathComponent).rephub-backup-\(UUID().uuidString)", isDirectory: true)
+        do {
+            try Task.checkCancellation()
+            guard try importManifest(at: source) == sourceFingerprint else {
+                return RepositorySetupResult(outcome: .unknown, directory: source,
+                                             summary: "SVN 已导入，但原目录在发布前发生变化。",
+                                             details: "原目录未替换；请核对远端 \(address) 后手工合并或检出。")
+            }
+            try FileManager.default.moveItem(at: source, to: backup)
+            do {
+                try FileManager.default.moveItem(at: temporaryCheckout, to: source)
+            } catch {
+                try? FileManager.default.moveItem(at: backup, to: source)
+                return RepositorySetupResult(outcome: .unknown, directory: source,
+                                             summary: "SVN 已导入，但本地工作副本发布失败。",
+                                             details: "原目录已尝试恢复；远端请手工核对。", backupDirectory: backup)
+            }
+        } catch {
+            return RepositorySetupResult(outcome: .unknown, directory: source,
+                                         summary: "SVN 已导入，但无法保留原目录后发布工作副本。",
+                                         details: "原目录或备份可能仍在原位置，请先手工核对。")
+        }
+        await progress(RepositoryOperationProgress("SVN 初始化完成。"))
+        let revision = committedRevision(from: imported.output).map { " r\($0)" } ?? ""
+        return RepositorySetupResult(outcome: .succeeded, directory: source,
+                                     summary: "已导入 SVN\(revision)，原文件夹已保留为备份。",
+                                     details: "远端：\(address)", backupDirectory: backup)
+    }
+
+    public func managementContext(in binding: RepositoryBinding) async throws -> RepositoryManagementContext {
+        let status = try await svn(["status", "--xml"], directory: binding.root)
+        let document = try SVNXMLDocument(data: status.data)
+        let changes = document.statusEntries.map { FileChange(path: relativePath($0.path, root: binding.root), kind: statusKind($0)) }
+        let conflicts = document.statusEntries.compactMap { entry -> RepositoryConflict? in
+            guard statusKind(entry) == .conflicted else { return nil }
+            let path = relativePath(entry.path, root: binding.root)
+            let unsupported = entry.treeConflicted || entry.properties == "conflicted"
+            let editable = !unsupported && fileLooksLikeResolvedText(binding.root.appendingPathComponent(path))
+            let detail: String = entry.treeConflicted ? "SVN 树冲突，不能在 RepHub 中标记解决。"
+                : entry.properties == "conflicted" ? "SVN 属性冲突，不能在 RepHub 中标记解决。"
+                : editable ? "内容冲突已无标记，可标记为已解决。" : "请先在编辑器中解决内容冲突并移除冲突标记。"
+            return RepositoryConflict(path: path, detail: detail, canMarkResolved: editable)
+        }
+        let base = try await workingCopyRevision(in: binding)
+        let token = try managementToken(status: status.data, baseRevision: base, root: binding.root, entries: document.statusEntries)
+        return RepositoryManagementContext(binding: binding, stateToken: token, headRevision: "r\(base)", changes: changes, conflicts: conflicts)
+    }
+
+    public func performManagement(
+        _ request: RepositoryManagementRequest,
+        in binding: RepositoryBinding,
+        progress: @escaping RepositoryOperationProgressHandler
+    ) async throws -> RepositoryManagementResult {
+        guard case let .markResolved(paths) = request.action else {
+            throw VersionControlError.unsupported("SVN 不支持该仓库管理操作。")
+        }
+        guard !paths.isEmpty else { return RepositoryManagementResult(outcome: .failed, summary: "请选择要标记为已解决的冲突文件。") }
+        let context = try await managementContext(in: binding)
+        guard context.stateToken == request.stateToken else {
+            return RepositoryManagementResult(outcome: .failed, summary: "SVN 工作副本状态已变化，请刷新冲突列表后重试。")
+        }
+        let conflicts = Dictionary(uniqueKeysWithValues: context.conflicts.map { ($0.path, $0) })
+        let selected = Array(Set(paths)).sorted()
+        for path in selected {
+            _ = try validatedCommitPath(path, in: binding)
+            guard let conflict = conflicts[path] else {
+                return RepositoryManagementResult(outcome: .failed, summary: "路径不是当前 SVN 冲突：\(path)")
+            }
+            guard conflict.canMarkResolved else {
+                return RepositoryManagementResult(outcome: .failed, summary: "\(path)：\(conflict.detail)")
+            }
+        }
+        await progress(RepositoryOperationProgress("标记 SVN 内容冲突已解决…"))
+        do {
+            for path in selected {
+                try Task.checkCancellation()
+                _ = try await svn(["resolve", "--accept", "working", "--", svnTargetPath(path)], directory: binding.root)
+            }
+        } catch is CancellationError {
+            return RepositoryManagementResult(outcome: .cancelled, summary: "标记冲突已解决已取消；请刷新状态确认。")
+        } catch {
+            return RepositoryManagementResult(outcome: .failed, summary: "无法标记 SVN 冲突已解决。", details: RepositoryDisplaySanitizer.redact(error.localizedDescription))
+        }
+        let after = try await managementContext(in: binding)
+        let unresolved = Set(after.conflicts.map(\.path)).intersection(selected)
+        guard unresolved.isEmpty else {
+            return RepositoryManagementResult(outcome: .failed, summary: "部分路径仍处于冲突状态。", details: unresolved.sorted().joined(separator: "、"))
+        }
+        return RepositoryManagementResult(outcome: .succeeded, summary: "已标记 \(selected.count) 个 SVN 内容冲突为已解决。")
+    }
+
+    public func compare(in binding: RepositoryBinding, from: String, to: String) async throws -> RepositoryComparison {
+        let start = try numericSVNRevision(from)
+        let end = try numericSVNRevision(to)
+        guard start != end else { return RepositoryComparison(fromRevision: "r\(start)", toRevision: "r\(end)", files: []) }
+        let target = try repositoryHistoryTarget(in: binding, pegRevision: String(max(start, end)))
+        let result = try await svn(["diff", "--summarize", "--xml", "-r", "\(start):\(end)", target], directory: binding.root, remoteURL: binding.remoteURL)
+        let paths = try SVNDiffSummaryDocument(data: result.data).entries.compactMap { entry -> FileChange? in
+            guard let relative = relativeSummaryPath(entry.path, binding: binding) else { return nil }
+            // 仓库根自身的属性变化没有可选择的相对路径，当前比较面板不能安全展示为文件。
+            guard !relative.isEmpty else { return nil }
+            return FileChange(path: relative, kind: summaryKind(entry.item))
+        }
+        return RepositoryComparison(fromRevision: "r\(start)", toRevision: "r\(end)", files: paths)
+    }
+
+    public func comparisonDiff(in binding: RepositoryBinding, comparison: RepositoryComparison, path: String) async throws -> RepositoryPatch {
+        let normalized = normalizedRelativePath(path)
+        guard let change = comparison.files.first(where: { $0.path == normalized }) else {
+            throw VersionControlError.invalidData("该文件不属于当前 SVN 修订比较范围：\(normalized)")
+        }
+        let from = try numericSVNRevision(comparison.fromRevision)
+        let to = try numericSVNRevision(comparison.toRevision)
+        let target = try repositoryFileURL(path: normalized, in: binding)
+        // 删除节点只在 from 修订存在，新增节点只在 to 修订存在；普通变更取较新可见节点。
+        let peg: Int = switch change.kind {
+        case .deleted: from
+        case .added: to
+        default: max(from, to)
+        }
+        let result = try await svn(["diff", "-r", "\(from):\(to)", "--", "\(target)@\(peg)"], directory: binding.root, remoteURL: binding.remoteURL)
+        return RepositoryPatch(text: result.output)
+    }
+
     private func svn(_ arguments: [String], directory: URL, remoteURL: String? = nil) async throws -> CommandResult {
         // --non-interactive 防止凭据提示阻塞 UI；不接受或绕过 TLS 证书错误。
         let command = ["--non-interactive", "--no-auth-cache"] + arguments
@@ -908,6 +1138,137 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
             }
         )
         return try requireSuccess(result, tool: "svn")
+    }
+
+    private func makeSVNImportSnapshot(from source: URL, to destination: URL) throws {
+        let manager = FileManager.default
+        try manager.createDirectory(at: destination, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .isSymbolicLinkKey]
+        var enumerationError: Error?
+        guard let enumerator = manager.enumerator(at: source, includingPropertiesForKeys: Array(keys), options: [], errorHandler: { _, error in
+            enumerationError = error
+            return false
+        }) else {
+            throw VersionControlError.invalidData("无法枚举要导入的目录。")
+        }
+        while let item = enumerator.nextObject() as? URL {
+            let relative = relativePath(item.path, root: source)
+            let components = relative.split(separator: "/").map(String.init)
+            if components.contains(where: { $0 == ".svn" || $0 == ".git" }) {
+                enumerator.skipDescendants()
+                continue
+            }
+            let values = try item.resourceValues(forKeys: keys)
+            // 不静默丢弃链接：导入对象必须完全可见且可复核，外部链接一律要求用户先处理。
+            if values.isSymbolicLink == true {
+                enumerator.skipDescendants()
+                throw VersionControlError.invalidData("导入目录包含符号链接，无法安全导入：\(relative)")
+            }
+            let target = destination.appendingPathComponent(relative)
+            if values.isDirectory == true {
+                try manager.createDirectory(at: target, withIntermediateDirectories: true)
+            } else {
+                try manager.copyItem(at: item, to: target)
+            }
+        }
+        if let enumerationError { throw enumerationError }
+    }
+
+    private func importManifest(at root: URL) throws -> String {
+        let manager = FileManager.default
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .isSymbolicLinkKey]
+        var enumerationError: Error?
+        guard let enumerator = manager.enumerator(at: root, includingPropertiesForKeys: Array(keys), options: [], errorHandler: { _, error in
+            enumerationError = error
+            return false
+        }) else { throw VersionControlError.invalidData("无法核对导入目录。") }
+        var records: [String] = []
+        while let item = enumerator.nextObject() as? URL {
+            let relative = relativePath(item.path, root: root)
+            let parts = relative.split(separator: "/")
+            if parts.contains(where: { $0 == ".svn" || $0 == ".git" }) {
+                enumerator.skipDescendants()
+                continue
+            }
+            let values = try item.resourceValues(forKeys: keys)
+            if values.isSymbolicLink == true {
+                enumerator.skipDescendants()
+                throw VersionControlError.invalidData("导入目录包含符号链接，无法安全核对：\(relative)")
+            }
+            if values.isDirectory == true {
+                records.append("d:\(relative)")
+            } else {
+                records.append("f:\(relative):\(try CommitFileSnapshot.fingerprint(root: root, path: relative))")
+            }
+        }
+        if let enumerationError { throw enumerationError }
+        return CommitFileSnapshot.fingerprint(data: Data(records.sorted().joined(separator: "\n").utf8))
+    }
+
+    private func remoteParentAddress(of address: String) throws -> String {
+        guard let url = URL(string: address) else { throw VersionControlError.invalidRepository("SVN 远端地址无效。") }
+        let parent = url.deletingLastPathComponent().absoluteString
+        let normalized = try normalizedRemoteAddress(parent)
+        guard normalized != address else { throw VersionControlError.invalidRepository("SVN 导入地址必须位于已存在的父目录下。") }
+        return normalized
+    }
+
+    private func fileLooksLikeResolvedText(_ url: URL) -> Bool {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              attributes[.type] as? FileAttributeType == .typeRegular,
+              let size = (attributes[.size] as? NSNumber)?.intValue, size <= 4_194_304,
+              let data = try? Data(contentsOf: url), !data.contains(0),
+              let text = String(data: data, encoding: .utf8) else { return false }
+        return !text.contains("<<<<<<<") && !text.contains("=======") && !text.contains(">>>>>>>")
+    }
+
+    private func managementToken(
+        status: Data,
+        baseRevision: String,
+        root: URL,
+        entries: [SVNXMLDocument.StatusEntry]
+    ) throws -> String {
+        let canonical = try stableCommitXML(status)
+        let fingerprints = entries.map { entry -> String in
+            let path = relativePath(entry.path, root: root)
+            let url = root.appendingPathComponent(path)
+            var isDirectory = ObjCBool(false)
+            let value: String
+            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
+                value = (try? importManifest(at: url)) ?? "unavailable-directory"
+            } else {
+                value = (try? CommitFileSnapshot.fingerprint(root: root, path: path)) ?? "unavailable"
+            }
+            return "\(path)=\(value)"
+        }.sorted().joined(separator: "\n")
+        return CommitFileSnapshot.fingerprint(data: Data(("base=\(baseRevision)\n" + canonical + "\n" + fingerprints).utf8))
+    }
+
+    private func numericSVNRevision(_ value: String) throws -> Int {
+        let normalized = normalizedRevision(value)
+        guard let revision = Int(normalized), revision >= 0 else {
+            throw VersionControlError.invalidData("SVN 修订号无效：\(value)")
+        }
+        return revision
+    }
+
+    private func relativeSummaryPath(_ value: String, binding: RepositoryBinding) -> String? {
+        if let url = URL(string: value), let remote = binding.remoteURL.flatMap(URL.init(string:)) {
+            let full = decodedURLPath(url).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let root = decodedURLPath(remote).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            guard full == root || full.hasPrefix(root + "/") else { return nil }
+            return String(full.dropFirst(root.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        }
+        return normalizedRelativePath(value)
+    }
+
+    private func summaryKind(_ item: String) -> FileChangeKind {
+        switch item.lowercased() {
+        case "added": .added
+        case "deleted": .deleted
+        case "modified": .modified
+        default: .unknown
+        }
     }
 
     private func runRemoteRead(_ command: [String], remoteURL: String) async throws -> CommandResult {
@@ -1264,7 +1625,10 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
 
     private func isMissingSVNPath(_ error: Error) -> Bool {
         guard case let VersionControlError.executionFailed(detail) = error else { return false }
-        return detail.contains("E160013")
+        if detail.contains("E160013") { return true }
+        // 新版 SVN 对 `info` 不存在 URL 会组合输出 W170000 与 E200009；只有同时具备
+        // “non-existent in revision” 这一明确路径缺失描述时才允许初始化继续，不能吞掉认证/连接错误。
+        return detail.contains("W170000") && detail.contains("E200009") && detail.contains("non-existent in revision")
     }
 
     private func normalizedRepositoryURL(_ value: String) -> String {

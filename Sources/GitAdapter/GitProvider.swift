@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 import ToolExecution
@@ -37,7 +38,7 @@ private struct GitHistoryCursor: Codable {
 }
 
 /// Git 适配器。读取与受限的获取／快进更新均通过参数数组执行，不经过 shell。
-public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPagingProvider, RepositoryAcquisitionProvider, RepositoryCommitProvider, @unchecked Sendable {
+public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPagingProvider, RepositoryAcquisitionProvider, RepositoryCommitProvider, RepositorySetupProvider, RepositoryManagementProvider, RepositoryComparisonProvider, @unchecked Sendable {
     public let id: ProviderID = .git
     public let displayName = "Git"
 
@@ -56,6 +57,8 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPa
         supportsBrowsing: false,
         supportsCredentials: false
     )
+
+    public let setupOption = RepositorySetupOption(providerID: .git, title: "Git", requiresRemote: false)
 
     /// 克隆到由上层预留的全新目录。认证仍交由用户现有的 Git 凭据助手或 SSH Agent，
     /// 因而不把密码放入 URL、参数或应用配置。
@@ -138,8 +141,32 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPa
             root: root,
             currentBranch: branch,
             remoteURL: remote?.isEmpty == false ? remote : nil,
-            capabilities: [.status, .diff, .history, .branches, .commitGraph, .fetch, .update, .fileHistory, .synchronization, .commit]
+            capabilities: [.status, .diff, .history, .branches, .commitGraph, .fetch, .update, .fileHistory, .synchronization, .commit, .push, .staging, .branchManagement, .conflictResolution, .revisionComparison]
         )
+    }
+
+    public func initialize(_ request: RepositorySetupRequest, progress: @escaping RepositoryOperationProgressHandler) async throws -> RepositorySetupResult {
+        guard request.providerID == .git else { throw VersionControlError.unsupported("该初始化请求不属于 Git。") }
+        let directory = request.directory.standardizedFileURL
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: directory.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw VersionControlError.invalidRepository("初始化目录不存在：\(directory.path)")
+        }
+        guard try findGitMetadata(above: directory) == nil else { throw VersionControlError.invalidRepository("目标目录已受 Git 管理，不会覆盖。") }
+        guard !fileManager.fileExists(atPath: directory.appendingPathComponent(".svn").path) else { throw VersionControlError.invalidRepository("目标目录已受 SVN 管理，请先通过共管工作流打开。") }
+        let branch = request.initialBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+        try await requireValidReferenceName(branch, in: directory)
+        let remoteLocation: String?
+        if let remote = request.remote {
+            guard remote.credentials == nil else { throw VersionControlError.unsupported("Git 初始化使用系统凭据助手或 SSH Agent。") }
+            remoteLocation = try validatedCloneLocation(remote.url)
+        } else { remoteLocation = nil }
+        await progress(RepositoryOperationProgress("正在初始化 Git 仓库…"))
+        _ = try requireSuccess(try await git(["init", "--initial-branch=\(branch)", "--", directory.path], in: directory), tool: "git")
+        if let remoteLocation {
+            _ = try requireSuccess(try await git(["remote", "add", "origin", "--", remoteLocation], in: directory), tool: "git")
+        }
+        return RepositorySetupResult(outcome: .succeeded, directory: directory, summary: "已初始化 Git 仓库。")
     }
 
     /// 只执行对当前绑定明确配置的上游的获取或快进更新。
@@ -425,6 +452,196 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPa
             }
             return nil
         }
+    }
+
+    public func managementContext(in binding: RepositoryBinding) async throws -> RepositoryManagementContext {
+        try ensureGit(binding)
+        let changes = try await status(in: binding)
+        let conflicts = changes.filter { $0.kind == .conflicted }.map { RepositoryConflict(path: $0.path, detail: "Git 标记为未解决冲突") }
+        let remoteNames = try requireSuccess(try await git(["remote"], in: binding.root), tool: "git").output.split(whereSeparator: \.isNewline).map(String.init)
+        var remotes: [RepositoryRemote] = []
+        for name in remoteNames {
+            if let url = try await remoteURL(named: name, in: binding.root) {
+                remotes.append(RepositoryRemote(name: name, url: url, pushURL: try await pushURL(named: name, in: binding.root)))
+            }
+        }
+        let head = try await optionalHead(in: binding.root)
+        let mergeHead = try await git(["rev-parse", "--verify", "--quiet", "MERGE_HEAD"], in: binding.root)
+        let authorName = try await localGitConfig("user.name", in: binding.root)
+        let authorEmail = try await localGitConfig("user.email", in: binding.root)
+        return RepositoryManagementContext(binding: binding, stateToken: try await managementToken(in: binding.root), headRevision: head, remotes: remotes, branches: try await branches(in: binding), changes: changes, conflicts: conflicts, canFinishMerge: mergeHead.exitCode == 0 && conflicts.isEmpty, authorName: authorName, authorEmail: authorEmail)
+    }
+
+    public func performManagement(_ request: RepositoryManagementRequest, in binding: RepositoryBinding,
+                                  progress: @escaping RepositoryOperationProgressHandler) async throws -> RepositoryManagementResult {
+        var writeStarted = false
+        do {
+            try Task.checkCancellation()
+            try ensureGit(binding)
+            guard request.stateToken == (try await managementToken(in: binding.root)) else {
+                return RepositoryManagementResult(outcome: .failed, summary: "工作区状态已变化，请刷新后重试。")
+            }
+            switch request.action {
+            case let .setRemote(name, url):
+                try await requireValidReferenceName(name, in: binding.root)
+                let safeURL = try validatedCloneLocation(url)
+                let names = try requireSuccess(try await git(["remote"], in: binding.root), tool: "git").output.split(whereSeparator: \.isNewline)
+                let exists = names.contains(Substring(name))
+                try Task.checkCancellation()
+                writeStarted = true
+                _ = try requireSuccess(try await git(exists ? ["remote", "set-url", "--", name, safeURL] : ["remote", "add", "--", name, safeURL], in: binding.root), tool: "git")
+                return RepositoryManagementResult(outcome: .succeeded, summary: exists ? "已更新远端 \(name)。" : "已添加远端 \(name)。")
+            case let .setIdentity(name, email):
+                let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                let email = email.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !name.isEmpty, !email.isEmpty, email.contains("@"),
+                      !name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+                      !email.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+                    throw VersionControlError.invalidData("提交姓名或邮箱无效。")
+                }
+                try Task.checkCancellation()
+                writeStarted = true
+                _ = try requireSuccess(try await git(["config", "--local", "user.name", name], in: binding.root), tool: "git")
+                _ = try requireSuccess(try await git(["config", "--local", "user.email", email], in: binding.root), tool: "git")
+                return RepositoryManagementResult(outcome: .succeeded, summary: "已保存此仓库的提交身份。")
+            case let .stage(selection):
+                let paths = try managedPaths(selection, root: binding.root)
+                try await requireCurrentChangePaths(paths, binding: binding)
+                try await ensureSafeIndexOperation(paths, root: binding.root)
+                let conflicts = Set(try await status(in: binding).filter { $0.kind == .conflicted }.map(\.path))
+                guard conflicts.isDisjoint(with: paths) else {
+                    return RepositoryManagementResult(outcome: .conflicts, summary: "所选文件仍有未解决冲突。")
+                }
+                try Task.checkCancellation()
+                writeStarted = true
+                _ = try requireSuccess(try await git(["--literal-pathspecs", "add", "-A", "--"] + paths, in: binding.root), tool: "git")
+                return RepositoryManagementResult(outcome: .succeeded, summary: "已暂存 \(paths.count) 个文件。")
+            case let .unstage(selection):
+                let changes = try await status(in: binding)
+                let originalPaths = changes.filter { selection.contains($0.path) }.compactMap(\.originalPath)
+                let paths = try managedPaths(selection + originalPaths, root: binding.root)
+                try await requireCurrentChangePaths(paths, binding: binding)
+                let command = (try await optionalHead(in: binding.root)) == nil
+                    ? ["--literal-pathspecs", "rm", "--cached", "--ignore-unmatch", "--"] + paths
+                    : ["--literal-pathspecs", "restore", "--staged", "--"] + paths
+                try Task.checkCancellation()
+                writeStarted = true
+                _ = try requireSuccess(try await git(command, in: binding.root), tool: "git")
+                return RepositoryManagementResult(outcome: .succeeded, summary: "已取消暂存 \(paths.count) 个文件。")
+            case let .createBranch(name, start):
+                try await requireValidReferenceName(name, in: binding.root)
+                guard let startID = try await resolvedCommit(start, in: binding.root) else {
+                    throw VersionControlError.invalidData("分支起点不存在或不是提交。")
+                }
+                let exists = try await git(["show-ref", "--verify", "--quiet", "refs/heads/\(name)"], in: binding.root)
+                guard exists.exitCode == 1 else { throw VersionControlError.invalidData("分支已存在或无法核对，请刷新后重试。") }
+                try Task.checkCancellation()
+                writeStarted = true
+                _ = try requireSuccess(try await git(["branch", "--", name, startID], in: binding.root), tool: "git")
+                return RepositoryManagementResult(outcome: .succeeded, summary: "已创建分支 \(name)。")
+            case let .switchBranch(name):
+                try await requireValidReferenceName(name, in: binding.root)
+                try await ensureSafeBranchOperation(in: binding.root)
+                let local = try await git(["show-ref", "--verify", "--quiet", "refs/heads/\(name)"], in: binding.root)
+                guard local.exitCode == 0 else { throw VersionControlError.invalidData("请选择本地分支；远端分支可先作为起点创建本地分支。") }
+                try await ensureSafeTargetTree(name, in: binding.root)
+                try Task.checkCancellation()
+                writeStarted = true
+                _ = try requireSuccess(try await git(["switch", "--", name], in: binding.root), tool: "git")
+                return RepositoryManagementResult(outcome: .succeeded, summary: "已切换到分支 \(name)。")
+            case let .merge(reference):
+                try await ensureSafeBranchOperation(in: binding.root)
+                try await ensureSafeTargetTree(reference, in: binding.root)
+                guard let target = try await resolvedCommit(reference, in: binding.root) else { throw VersionControlError.invalidData("合并目标不存在。") }
+                await progress(RepositoryOperationProgress("正在合并 \(reference)…"))
+                try Task.checkCancellation()
+                writeStarted = true
+                let merged = try await git(["merge", "--no-commit", "--no-ff", "--no-edit", "--no-verify", "--", target], in: binding.root, timeout: 90)
+                if merged.exitCode == 0 {
+                    let pending = try await git(["rev-parse", "--verify", "--quiet", "MERGE_HEAD"], in: binding.root)
+                    return RepositoryManagementResult(outcome: .succeeded, summary: pending.exitCode == 0 ? "已准备合并，请确认合并提交说明。" : "当前分支已包含目标版本，无需合并。")
+                }
+                let conflicts = try await status(in: binding).filter { $0.kind == .conflicted }
+                return RepositoryManagementResult(outcome: conflicts.isEmpty ? .failed : .conflicts,
+                    summary: conflicts.isEmpty ? "Git 合并未完成。" : "合并产生冲突，请先解决。", details: sanitizedGitFailure(merged))
+            case let .finishMerge(message):
+                let merge = try await git(["rev-parse", "--verify", "--quiet", "MERGE_HEAD"], in: binding.root)
+                guard merge.exitCode == 0 else { throw VersionControlError.invalidData("当前没有待完成的合并。") }
+                guard !(try await status(in: binding)).contains(where: { $0.kind == .conflicted }) else {
+                    return RepositoryManagementResult(outcome: .conflicts, summary: "仍有未解决冲突。")
+                }
+                let subject = message.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !subject.isEmpty, !subject.contains("\0") else { throw VersionControlError.invalidData("请填写有效的合并提交说明。") }
+                try Task.checkCancellation()
+                writeStarted = true
+                _ = try requireSuccess(try await git(["commit", "--no-verify", "--no-gpg-sign", "-m", subject], in: binding.root, timeout: 90), tool: "git")
+                return RepositoryManagementResult(outcome: .succeeded, summary: "已创建合并提交。")
+            case let .markResolved(selection):
+                let paths = try managedPaths(selection, root: binding.root)
+                let conflicts = Set(try await status(in: binding).filter { $0.kind == .conflicted }.map(\.path))
+                guard Set(paths).isSubset(of: conflicts) else { throw VersionControlError.invalidData("只能标记当前冲突文件。") }
+                for path in paths { try verifyResolvedTextFile(path, root: binding.root) }
+                try await ensureSafeIndexOperation(paths, root: binding.root)
+                try Task.checkCancellation()
+                writeStarted = true
+                _ = try requireSuccess(try await git(["--literal-pathspecs", "add", "--"] + paths, in: binding.root), tool: "git")
+                return RepositoryManagementResult(outcome: .succeeded, summary: "已记录 \(paths.count) 个冲突文件的解决结果。")
+            case let .push(remote, branch, setUpstream):
+                _ = try await currentBranch(in: binding.root)
+                try await requireValidReferenceName(branch, in: binding.root)
+                try await requireValidReferenceName(remote, in: binding.root)
+                guard let targetURL = try await pushURL(named: remote, in: binding.root) else { throw VersionControlError.invalidData("未配置所选远端。") }
+                let sourceHead = try await currentHead(in: binding.root)
+                await progress(RepositoryOperationProgress("正在推送 \(branch)…"))
+                var args = ["push", "--porcelain", "--no-verify", "--no-follow-tags", "--recurse-submodules=no"]
+                if setUpstream { args.append("--set-upstream") }
+                args += ["--", remote, "HEAD:refs/heads/\(branch)"]
+                try Task.checkCancellation()
+                writeStarted = true
+                let pushed = try await git(args, in: binding.root, timeout: 120, restrictRemoteProtocols: true)
+                if pushed.exitCode != 0 {
+                    let text = sanitizedGitFailure(pushed)
+                    let rejected = text.localizedCaseInsensitiveContains("rejected") || text.localizedCaseInsensitiveContains("non-fast-forward")
+                    return RepositoryManagementResult(outcome: rejected ? .failed : .unknown,
+                        summary: rejected ? "远端拒绝了推送。" : "推送结果不明确，远端状态未知。", details: text)
+                }
+                let verified = try await git(["ls-remote", "--heads", "--", targetURL, "refs/heads/\(branch)"], in: binding.root, timeout: 45, restrictRemoteProtocols: true)
+                guard verified.exitCode == 0, verified.output.split(whereSeparator: \.isWhitespace).first.map(String.init) == sourceHead else {
+                    return RepositoryManagementResult(outcome: .unknown, summary: "推送已返回成功，但远端分支尚未确认到本次提交。", details: sanitizedGitFailure(verified))
+                }
+                return RepositoryManagementResult(outcome: .succeeded, summary: "已推送当前分支并确认远端提交。")
+            }
+        } catch is CancellationError {
+            return RepositoryManagementResult(outcome: writeStarted ? .unknown : .cancelled,
+                summary: writeStarted ? "操作已取消，结果需要核对。" : "已取消，尚未修改仓库。")
+        } catch {
+            return RepositoryManagementResult(outcome: writeStarted ? .unknown : .failed,
+                summary: writeStarted ? "操作结果需要核对。" : "操作前检查未通过。", details: error.localizedDescription)
+        }
+    }
+
+    public func stagedDiff(in binding: RepositoryBinding, path: String) async throws -> RepositoryPatch {
+        try ensureGit(binding); _ = try CommitFileSnapshot.validatedURL(root: binding.root, path: path)
+        let result = try await git(["--literal-pathspecs", "diff", "--cached", "--no-ext-diff", "--no-textconv", "--", path], in: binding.root)
+        return RepositoryPatch(text: try requireSuccess(result, tool: "git").output)
+    }
+
+    public func compare(in binding: RepositoryBinding, from: String, to: String) async throws -> RepositoryComparison {
+        try ensureGit(binding); guard let fromID = try await resolvedCommit(from, in: binding.root), let toID = try await resolvedCommit(to, in: binding.root) else { throw VersionControlError.invalidData("比较版本不存在或不是提交。") }
+        let result = try await git(["diff", "--name-status", "-z", "-M", "-C", fromID, toID, "--"], in: binding.root)
+        return RepositoryComparison(fromRevision: fromID, toRevision: toID, files: try parseNameStatus(try requireSuccess(result, tool: "git").data))
+    }
+
+    public func comparisonDiff(in binding: RepositoryBinding, comparison: RepositoryComparison, path: String) async throws -> RepositoryPatch {
+        try ensureGit(binding); _ = try CommitFileSnapshot.validatedURL(root: binding.root, path: path)
+        guard isGitObjectID(comparison.fromRevision), isGitObjectID(comparison.toRevision),
+              try await resolvedCommit(comparison.fromRevision, in: binding.root) == comparison.fromRevision,
+              try await resolvedCommit(comparison.toRevision, in: binding.root) == comparison.toRevision else { throw VersionControlError.invalidData("比较版本已失效。") }
+        guard comparison.files.contains(where: { $0.path == path || $0.originalPath == path }) else { throw VersionControlError.invalidData("该文件不属于当前比较范围。") }
+        let change = comparison.files.first { $0.path == path || $0.originalPath == path }
+        let paths = Array(Set([change?.path, change?.originalPath].compactMap { $0 })).sorted()
+        let result = try await git(["--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "-M", comparison.fromRevision, comparison.toRevision, "--"] + paths, in: binding.root)
+        return RepositoryPatch(text: try requireSuccess(result, tool: "git").output)
     }
 
     public func changedFiles(in binding: RepositoryBinding, revision: String) async throws -> [FileChange] {
@@ -815,7 +1032,21 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPa
             return nil
         }
         let value = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
-        return value.isEmpty ? nil : value
+        guard !value.isEmpty else { return nil }
+        _ = try validatedCloneLocation(value) // get-url 已解析 insteadOf，仍必须审查最终协议。
+        return value
+    }
+
+    private func pushURL(named remote: String, in directory: URL) async throws -> String? {
+        let result = try await git(["remote", "get-url", "--push", "--all", "--", remote], in: directory)
+        if result.exitCode == 2 || result.exitCode == 3 { return nil }
+        let value = try requireSuccess(result, tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+        guard value.split(whereSeparator: \.isNewline).count == 1 else {
+            throw VersionControlError.unsupported("该远端配置了多个推送地址，请先在 Git 中明确单一推送目标。")
+        }
+        _ = try validatedCloneLocation(value)
+        return value
     }
 
     /// fetch 只允许写入 refs/remotes/<remote>/；拒绝可写 refs/heads 等本地引用的自定义 refspec。
@@ -846,6 +1077,7 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPa
             ["fetch", "--progress", "--no-write-fetch-head", "--no-tags", "--no-recurse-submodules", "--", remote],
             in: directory,
             timeout: 90,
+            restrictRemoteProtocols: true,
             onOutput: { lines in await transferProgress.accept(lines) }
         )
         _ = try requireSuccess(result, tool: "git")
@@ -1122,6 +1354,100 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPa
         guard limit > 0 else { throw VersionControlError.invalidData("历史每页条数必须大于 0。") }
         guard limit <= 500 else { throw VersionControlError.unsupported("历史每页最多读取 500 条。") }
         return limit
+    }
+
+    private func managementToken(in directory: URL) async throws -> String {
+        let head = try await optionalHead(in: directory) ?? ""
+        let branch = (try? await currentBranch(in: directory)) ?? ""
+        let identity = (try await localGitConfig("user.name", in: directory) ?? "") + "\u{0}" + (try await localGitConfig("user.email", in: directory) ?? "")
+        let remotes = try requireSuccess(try await git(["remote", "-v"], in: directory), tool: "git").data
+        let status = try requireSuccess(try await git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], in: directory), tool: "git").data
+        let diff: Data
+        if let head = try await optionalHead(in: directory) {
+            diff = try requireSuccess(try await git(["diff", "--binary", "--no-ext-diff", "--no-textconv", head, "--"], in: directory), tool: "git").data
+        } else {
+            diff = try requireSuccess(try await git(["diff", "--binary", "--no-ext-diff", "--no-textconv", "--"], in: directory), tool: "git").data
+        }
+        let cached = try requireSuccess(try await git(["diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--"], in: directory), tool: "git").data
+        let mergeHead = try await git(["rev-parse", "--verify", "--quiet", "MERGE_HEAD"], in: directory)
+        var data = Data((head + "\u{0}" + branch + "\u{0}" + identity + "\u{0}").utf8); data.append(remotes); data.append(status); data.append(diff); data.append(cached)
+        if mergeHead.exitCode == 0 { data.append(mergeHead.data) }
+        // 未跟踪文件不在普通 diff 中，仍需把内容纳入 token，避免用户在确认前二次编辑却保持同一 porcelain 状态。
+        for record in status.split(separator: 0, omittingEmptySubsequences: true) where record.starts(with: Data("?? ".utf8)) {
+            let path = String(decoding: record.dropFirst(3), as: UTF8.self)
+            let fingerprint = try CommitFileSnapshot.fingerprint(root: directory, path: path)
+            data.append(Data((path + "\u{0}" + fingerprint).utf8))
+        }
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func currentBranch(in directory: URL) async throws -> String {
+        let result = try await git(["symbolic-ref", "--quiet", "--short", "HEAD"], in: directory)
+        guard result.exitCode == 0 else { throw VersionControlError.unsupported("当前处于游离 HEAD，不能执行此操作。") }
+        let branch = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !branch.isEmpty else { throw VersionControlError.invalidData("Git 未返回当前分支。") }; return branch
+    }
+
+    private func localGitConfig(_ key: String, in directory: URL) async throws -> String? {
+        let result = try await git(["config", "--local", "--get", key], in: directory)
+        if result.exitCode == 1 { return nil }
+        let value = try requireSuccess(result, tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+
+    private func managedPaths(_ paths: [String], root: URL) throws -> [String] {
+        let unique = Array(Set(paths)).sorted(); guard !unique.isEmpty else { throw VersionControlError.invalidData("未选择文件。") }
+        for path in unique { _ = try CommitFileSnapshot.validatedURL(root: root, path: path) }
+        return unique
+    }
+
+    private func requireCurrentChangePaths(_ paths: [String], binding: RepositoryBinding) async throws {
+        let changes = try await status(in: binding)
+        let allowed = Set(changes.flatMap { [$0.path, $0.originalPath].compactMap { $0 } })
+        guard Set(paths).isSubset(of: allowed) else { throw VersionControlError.invalidData("只能对当前变更列表中的明确文件操作。") }
+        for path in paths {
+            let url = try CommitFileSnapshot.validatedURL(root: binding.root, path: path)
+            var isDirectory: ObjCBool = false
+            if fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue { throw VersionControlError.invalidData("不能按目录递归暂存或取消暂存。") }
+        }
+    }
+
+    private func ensureSafeIndexOperation(_ paths: [String], root: URL) async throws {
+        guard !(try await commitUsesUnsafeFilter(in: root)) else { throw VersionControlError.unsupported("Git 文件过滤器可能执行外部程序，未修改暂存区。") }
+        guard !(try await containsSelectedSubmodule(paths: paths, in: root)) else { throw VersionControlError.unsupported("所选内容包含子模块，未修改暂存区。") }
+    }
+
+    private func ensureSafeBranchOperation(in root: URL) async throws {
+        guard !(try await hasTrackedChanges(in: root)) else { throw VersionControlError.unsupported("存在已跟踪的本地修改，未切换或合并分支。") }
+        guard !(try await hasInProgressOperation(in: root)) else { throw VersionControlError.unsupported("Git 正在合并或变基，无法执行分支操作。") }
+        guard !(try await commitUsesUnsafeFilter(in: root)) else { throw VersionControlError.unsupported("Git 文件过滤器可能执行外部程序，未执行分支操作。") }
+        guard let head = try await optionalHead(in: root), !(try await containsSubmodule(inTree: head, directory: root)) else { throw VersionControlError.unsupported("当前版本包含子模块，未执行分支操作。") }
+    }
+
+    private func ensureSafeTargetTree(_ reference: String, in root: URL) async throws {
+        guard let target = try await resolvedCommit(reference, in: root) else { throw VersionControlError.invalidData("目标分支或提交不存在。") }
+        guard !(try await containsSubmodule(inTree: target, directory: root)), !(try await containsCheckoutFilter(inTree: target, directory: root)) else { throw VersionControlError.unsupported("目标版本包含子模块或文件过滤器，未执行操作。") }
+        let conflicts = try await localPathsConflictingWithIncomingTree(upstream: target, in: root)
+        guard conflicts.isEmpty else { throw VersionControlError.unsupported("未跟踪或忽略文件会被目标版本覆盖：\(conflicts.prefix(3).joined(separator: "、"))") }
+    }
+
+    private func requireValidReferenceName(_ value: String, in directory: URL) async throws {
+        guard !value.isEmpty, !value.hasPrefix("-"),
+              !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+            throw VersionControlError.invalidData("分支或远端名称无效。")
+        }
+        let checked = try await git(["check-ref-format", "refs/heads/\(value)"], in: directory)
+        guard checked.exitCode == 0 else { throw VersionControlError.invalidData("分支或远端名称无效：\(value)") }
+    }
+
+    private func verifyResolvedTextFile(_ path: String, root: URL) throws {
+        let url = try CommitFileSnapshot.validatedURL(root: root, path: path)
+        let attributes = try fileManager.attributesOfItem(atPath: url.path)
+        guard attributes[.type] as? FileAttributeType == .typeRegular,
+              (attributes[.size] as? NSNumber)?.int64Value ?? Int64.max <= 8 * 1024 * 1024,
+              let data = fileManager.contents(atPath: url.path), !data.contains(0) else { throw VersionControlError.unsupported("只能标记已编辑的文本冲突文件。") }
+        let text = String(decoding: data, as: UTF8.self)
+        guard !text.contains("<<<<<<<") && !text.contains("=======") && !text.contains(">>>>>>>") else { throw VersionControlError.invalidData("文件仍包含冲突标记：\(path)") }
     }
 
     private func normalizedHistoryReference(_ reference: String?) -> String? {
