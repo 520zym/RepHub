@@ -34,14 +34,29 @@ enum PreparedDiffRow: Sendable {
     case paired(old: PreparedDiffLine?, new: PreparedDiffLine?)
 }
 
+extension PreparedDiffRow {
+    var isWhitespaceOnlyChange: Bool {
+        guard case let .paired(old, new) = self, let old, let new else { return false }
+        return old.isWhitespaceOnlyChange && new.isWhitespaceOnlyChange
+    }
+
+    func contains(line number: Int) -> Bool {
+        guard case let .paired(old, new) = self else { return false }
+        return old?.number == number || new?.number == number
+    }
+}
+
 struct PreparedDiffLine: Sendable {
     let number: Int?
     let text: String
     let kind: PreparedDiffSideKind
     var tokens: [SyntaxHighlighting.Token] = []
+    /// 以 Character 偏移表示，避免持有跨线程的 String.Index。
+    var inlineChangeRanges: [Range<Int>] = []
+    var isWhitespaceOnlyChange = false
 }
 
-enum PreparedDiffSideKind: Sendable {
+enum PreparedDiffSideKind: Sendable, Equatable {
     case context
     case added
     case removed
@@ -130,8 +145,18 @@ actor PreparedDiffCache {
                 }
                 rows.append(.metadata(text, isHunk: isHunk))
             case let .paired(old, new):
-                let oldLine = makePreparedLine(old, language: currentLanguage, state: &oldState)
-                let newLine = makePreparedLine(new, language: currentLanguage, state: &newState)
+                var oldLine = makePreparedLine(old, language: currentLanguage, state: &oldState)
+                var newLine = makePreparedLine(new, language: currentLanguage, state: &newState)
+                if var comparedOld = oldLine, var comparedNew = newLine,
+                   comparedOld.kind == .removed, comparedNew.kind == .added {
+                    let comparison = DiffTextComparison.compare(old: comparedOld.text, new: comparedNew.text)
+                    comparedOld.inlineChangeRanges = comparison.oldRanges
+                    comparedNew.inlineChangeRanges = comparison.newRanges
+                    comparedOld.isWhitespaceOnlyChange = comparison.isWhitespaceOnly
+                    comparedNew.isWhitespaceOnlyChange = comparison.isWhitespaceOnly
+                    oldLine = comparedOld
+                    newLine = comparedNew
+                }
                 tokenCost += ((oldLine?.tokens.count ?? 0) + (newLine?.tokens.count ?? 0)) * 64
                 rows.append(.paired(old: oldLine, new: newLine))
             }
@@ -196,6 +221,7 @@ actor PreparedDiffCache {
         return PreparedDiffLine(number: line.number, text: line.text, kind: kind,
                                 tokens: SyntaxHighlighting.tokenize(line.text, language: language, state: &state))
     }
+
 
     /// SF Mono 对同一列大多为等宽；中文、全角符号和 emoji 按两格估算，组合标记不另占格。
     /// 只用于预留可横向滚动的最小内容宽度，绝不截断代码行。

@@ -13,10 +13,15 @@ public struct DiffView: View {
     @State private var preparedSource: String?
     @State private var preparedPath: String?
     @State private var isPreparingDiff = false
+    @State private var ignoresWhitespace = false
+    private let focusLine: Int?
+    private let focusToken: UUID?
 
-    public init(model: WorkspaceModel, appearance: AppearanceStore) {
+    public init(model: WorkspaceModel, appearance: AppearanceStore, focusLine: Int? = nil, focusToken: UUID? = nil) {
         self.model = model
         self.appearance = appearance
+        self.focusLine = focusLine
+        self.focusToken = focusToken
     }
 
     public var body: some View {
@@ -43,7 +48,8 @@ public struct DiffView: View {
             if preparedSource == patch.text, preparedPath == model.selectedPath, let preparedDiff {
                 switch preparedDiff.content {
                 case let .unified(diff):
-                    SideBySideDiff(diff: diff, presentation: presentation, palette: codePalette)
+                    SideBySideDiff(diff: diff, presentation: presentation, palette: codePalette,
+                                   ignoresWhitespace: ignoresWhitespace, focusLine: focusLine, focusToken: focusToken)
                         .id(preparedSource ?? "")
                 case let .binary(text):
                     binaryState(text, palette: appPalette)
@@ -87,6 +93,10 @@ public struct DiffView: View {
                 Label("内容已截断", systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
             }
             if model.filePreview == nil {
+                Toggle("忽略空白", isOn: $ignoresWhitespace)
+                    .toggleStyle(.button)
+                    .font(.system(size: 11, weight: .medium))
+                    .help("仅隐藏去掉空白后完全相同的增删行；不改变提交、补丁或 AI 输入。")
                 WorkbenchSegmentedPicker(title: "差异布局", selection: $presentation,
                     options: [.init(.sideBySide, "并排"), .init(.unified, "统一")], palette: appPalette, compact: true)
                     .frame(width: 112)
@@ -182,15 +192,21 @@ private struct SideBySideDiff: View {
     let diff: PreparedUnifiedDiff
     let presentation: DiffPresentation
     let palette: CodePalette
+    let ignoresWhitespace: Bool
+    let focusLine: Int?
+    let focusToken: UUID?
     @State private var page = 0
 
     private static let rowsPerPage = 300
-    private var pageCount: Int { max(1, (diff.rows.count + Self.rowsPerPage - 1) / Self.rowsPerPage) }
+    private var visibleRows: [PreparedDiffRow] {
+        ignoresWhitespace ? diff.rows.filter { !$0.isWhitespaceOnlyChange } : diff.rows
+    }
+    private var pageCount: Int { max(1, (visibleRows.count + Self.rowsPerPage - 1) / Self.rowsPerPage) }
     private var displayedPage: Int { min(page, pageCount - 1) }
     private var displayedRows: [PreparedDiffRow] {
         let start = displayedPage * Self.rowsPerPage
-        let end = min(start + Self.rowsPerPage, diff.rows.count)
-        return start < end ? Array(diff.rows[start..<end]) : []
+        let end = min(start + Self.rowsPerPage, visibleRows.count)
+        return start < end ? Array(visibleRows[start..<end]) : []
     }
     private var displayedColumnRows: [PreparedDiffRow] {
         displayedRows.filter { row in
@@ -209,6 +225,8 @@ private struct SideBySideDiff: View {
             .id(displayedPage)
         }
         .background(palette.background)
+        .onAppear { selectPageForFocusLine() }
+        .onChange(of: focusToken) { _, _ in selectPageForFocusLine() }
     }
 
     private var pageNavigation: some View {
@@ -260,12 +278,16 @@ private struct SideBySideDiff: View {
                 }
                 .frame(height: 28)
                 // 每列独立横向滚动，始终各占一半视口；分页确保嵌套滚动中的节点数量有上限。
-                ScrollView(.vertical) {
-                    HStack(spacing: 0) {
-                        diffColumn(.old, viewportWidth: viewportColumnWidth, contentHeight: contentHeight)
-                        columnGutter
-                        diffColumn(.new, viewportWidth: viewportColumnWidth, contentHeight: contentHeight)
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical) {
+                        HStack(spacing: 0) {
+                            diffColumn(.old, viewportWidth: viewportColumnWidth, contentHeight: contentHeight)
+                            columnGutter
+                            diffColumn(.new, viewportWidth: viewportColumnWidth, contentHeight: contentHeight)
+                        }
                     }
+                    .onAppear { scrollSideBySide(proxy) }
+                    .onChange(of: focusToken) { _, _ in scrollSideBySide(proxy) }
                 }
             }
         }
@@ -277,17 +299,24 @@ private struct SideBySideDiff: View {
 
     private var unifiedBody: some View {
         let rows = displayedRows
-        return ScrollView([.horizontal, .vertical]) {
-            LazyVStack(alignment: .leading, spacing: 0) {
+        return ScrollViewReader { proxy in
+            ScrollView([.horizontal, .vertical]) {
+                LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(rows.indices, id: \.self) { index in
                     let row = rows[index]
                     switch row {
                     case let .metadata(text, isHunk): metadataRow(text, isHunk: isHunk)
-                    case let .paired(old, new): unifiedRow(old: old, new: new)
+                    case let .paired(old, new): unifiedRow(old: old, new: new).id(unifiedRowID(old: old, new: new))
                     }
                 }
-            }.frame(minWidth: 620, alignment: .leading)
-        }.defaultScrollAnchor(.topLeading)
+                }.frame(minWidth: 620, alignment: .leading)
+            }
+            .defaultScrollAnchor(.topLeading)
+            .onChange(of: focusToken) { _, _ in
+                guard let anchor = unifiedFocusAnchor else { return }
+                withAnimation(.easeOut(duration: 0.18)) { proxy.scrollTo(anchor, anchor: .center) }
+            }
+        }
     }
 
     private func columnTitle(_ title: String, width: CGFloat) -> some View {
@@ -313,7 +342,10 @@ private struct SideBySideDiff: View {
                 case let .metadata(text, isHunk):
                     if isHunk { metadataRow(text, isHunk: true).frame(width: width, alignment: .leading) }
                 case let .paired(old, new):
-                    codeCell(side == .old ? old : new).frame(width: width, alignment: .leading)
+                    let line = side == .old ? old : new
+                    codeCell(line)
+                        .id(line?.number.map { "\(side.rawValue)-\($0)" } ?? "\(side.rawValue)-empty-\(index)")
+                        .frame(width: width, alignment: .leading)
                 }
             }
         }
@@ -341,12 +373,73 @@ private struct SideBySideDiff: View {
         return HStack(spacing: 0) {
             Text(line?.number.map(String.init) ?? "").foregroundStyle(palette.lineNumber).frame(width: 45, alignment: .trailing).padding(.trailing, 8)
             Text(marker(for: line, alwaysShow: showMarker)).foregroundStyle(foreground(for: kind)).frame(width: 15)
-            SyntaxHighlighting.text(tokens: line?.tokens ?? [], palette: palette)
+            inlineHighlightedText(line)
                 .fixedSize(horizontal: true, vertical: false).textSelection(.enabled)
             Spacer(minLength: 12)
         }
         .font(.system(size: 13, design: .monospaced)).frame(height: 24)
-        .background(background(for: kind))
+        .background(focusLine == line?.number ? palette.selection.opacity(palette.isDark ? 0.46 : 0.58) : background(for: kind))
+    }
+
+    private func inlineHighlightedText(_ line: PreparedDiffLine?) -> Text {
+        guard let line, !line.inlineChangeRanges.isEmpty else {
+            return SyntaxHighlighting.text(tokens: line?.tokens ?? [], palette: palette)
+        }
+        let characters = Array(line.text)
+        var result = AttributedString()
+        var offset = 0
+        for token in line.tokens {
+            let tokenCharacters = Array(token.value)
+            var tokenOffset = 0
+            while tokenOffset < tokenCharacters.count {
+                let marked = line.inlineChangeRanges.contains { $0.contains(offset + tokenOffset) }
+                var end = tokenOffset + 1
+                while end < tokenCharacters.count,
+                      line.inlineChangeRanges.contains(where: { $0.contains(offset + end) }) == marked {
+                    end += 1
+                }
+                var fragment = AttributedString(String(tokenCharacters[tokenOffset..<end]))
+                fragment.foregroundColor = SyntaxHighlighting.color(for: token.kind, palette: palette)
+                if marked {
+                    fragment.backgroundColor = line.kind == .removed
+                        ? palette.removedForeground.opacity(palette.isDark ? 0.34 : 0.22)
+                        : palette.addedForeground.opacity(palette.isDark ? 0.34 : 0.22)
+                }
+                result += fragment
+                tokenOffset = end
+            }
+            offset += tokenCharacters.count
+        }
+        // 词法 token 永远应覆盖整行；异常时以完整文本回退而非丢失字符。
+        if offset != characters.count { return SyntaxHighlighting.text(tokens: line.tokens, palette: palette) }
+        return Text(result)
+    }
+
+    private func selectPageForFocusLine() {
+        guard let focusLine,
+              let index = visibleRows.firstIndex(where: { $0.contains(line: focusLine) }) else { return }
+        page = index / Self.rowsPerPage
+    }
+    private var unifiedFocusAnchor: String? {
+        guard let focusLine else { return nil }
+        return displayedRows.compactMap { row in
+            guard case let .paired(old, new) = row, row.contains(line: focusLine) else { return nil }
+            return unifiedRowID(old: old, new: new)
+        }.first
+    }
+    private func unifiedRowID(old: PreparedDiffLine?, new: PreparedDiffLine?) -> String {
+        "diff-row-\(new?.number ?? old?.number ?? -1)"
+    }
+    private func scrollSideBySide(_ proxy: ScrollViewProxy) {
+        guard let focusLine else { return }
+        let anchor = displayedRows.compactMap { row -> String? in
+            guard case let .paired(old, new) = row else { return nil }
+            if new?.number == focusLine { return "\(DiffColumn.new.rawValue)-\(focusLine)" }
+            if old?.number == focusLine { return "\(DiffColumn.old.rawValue)-\(focusLine)" }
+            return nil
+        }.first
+        guard let anchor else { return }
+        withAnimation(.easeOut(duration: 0.18)) { proxy.scrollTo(anchor, anchor: .center) }
     }
 
     private func marker(for line: PreparedDiffLine?, alwaysShow: Bool) -> String {
@@ -357,7 +450,7 @@ private struct SideBySideDiff: View {
     private func foreground(for kind: PreparedDiffSideKind) -> Color { switch kind { case .added: palette.addedForeground; case .removed: palette.removedForeground; case .context: palette.foreground } }
 }
 
-private enum DiffColumn: Equatable { case old, new }
+private enum DiffColumn: String, Equatable { case old, new }
 
 private struct HighlightedPatchIdentity: Equatable {
     let text: String
@@ -378,7 +471,9 @@ struct HighlightedPatchPreview: View {
             if preparedIdentity == identity, let prepared {
                 switch prepared.content {
                 case .unified(let diff):
-                    SideBySideDiff(diff: diff, presentation: .unified, palette: palette).id(identity.text)
+                    SideBySideDiff(diff: diff, presentation: .unified, palette: palette,
+                                   ignoresWhitespace: false, focusLine: nil, focusToken: nil)
+                        .id(identity.text)
                 case .binary(let message), .unsupported(let message):
                     ScrollView { Text(message).font(.caption).textSelection(.enabled).padding(12) }
                 }

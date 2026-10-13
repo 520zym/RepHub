@@ -9,13 +9,16 @@ public struct AIRunView: View {
     private let codePalette: CodePalette
     private let dismiss: () -> Void
     private let applyOutput: ((String) -> Void)?
+    private let onLocateFinding: ((AIReviewFinding) -> Void)?
 
-    public init(model: AIRunModel, palette: AppPalette, codePalette: CodePalette, dismiss: @escaping () -> Void, apply: ((String) -> Void)? = nil) {
+    public init(model: AIRunModel, palette: AppPalette, codePalette: CodePalette, dismiss: @escaping () -> Void,
+                apply: ((String) -> Void)? = nil, onLocateFinding: ((AIReviewFinding) -> Void)? = nil) {
         self.model = model
         self.palette = palette
         self.codePalette = codePalette
         self.dismiss = dismiss
         self.applyOutput = apply
+        self.onLocateFinding = onLocateFinding
     }
 
     public var body: some View {
@@ -196,8 +199,14 @@ public struct AIRunView: View {
                                             description: Text(model.isBusy ? "结果会在这里逐步显示。" : "确认场景、连接与文件范围后再开始。"))
                         .frame(maxWidth: .infinity, minHeight: 210)
                 } else {
-                    AICodeOutputView(output: model.output, palette: codePalette, isRunning: model.isBusy)
-                        .padding(12)
+                    VStack(alignment: .leading, spacing: 12) {
+                        if model.kind == .codeReview, !model.reviewFindings.isEmpty {
+                            findings
+                            Divider().overlay(palette.border.opacity(0.58))
+                        }
+                        AICodeOutputView(output: model.output, palette: codePalette, isRunning: model.isBusy)
+                    }
+                    .padding(12)
                 }
             }
             .background(palette.surface.opacity(0.65), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
@@ -205,6 +214,79 @@ public struct AIRunView: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    private var findings: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label("可定位问题", systemImage: "exclamationmark.bubble")
+                    .font(.system(size: 12, weight: .semibold))
+                Text("\(model.reviewFindings.count)")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(palette.secondaryText)
+                if model.isStale {
+                    Text("差异已变化，不能定位")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(palette.removed)
+                }
+                Spacer()
+            }
+            ForEach(model.reviewFindings) { finding in
+                findingRow(finding)
+            }
+        }
+        .padding(10)
+        .background(palette.sidebar.opacity(0.40), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func findingRow(_ finding: AIReviewFinding) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 7) {
+                Text(finding.severity.title)
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(severityColor(finding.severity))
+                    .padding(.horizontal, 6).padding(.vertical, 3)
+                    .background(severityColor(finding.severity).opacity(0.12), in: Capsule())
+                Text("\(finding.path):\(finding.newLine)")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .lineLimit(1).truncationMode(.middle)
+                if finding.resolution != .open {
+                    Text(finding.resolution == .resolved ? "已处理" : "已忽略")
+                        .font(.system(size: 10, weight: .medium)).foregroundStyle(palette.secondaryText)
+                }
+                Spacer(minLength: 0)
+                if let onLocateFinding {
+                    Button("定位") { onLocateFinding(finding) }
+                        .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
+                        .disabled(!model.canLocate(finding))
+                }
+            }
+            Text(finding.reason)
+                .font(.system(size: 12)).frame(maxWidth: .infinity, alignment: .leading)
+            Text("建议：\(finding.suggestion)")
+                .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 7) {
+                Button(finding.resolution == .resolved ? "恢复" : "标记已处理") {
+                    model.markFinding(finding.id, resolution: finding.resolution == .resolved ? .open : .resolved)
+                }
+                Button(finding.resolution == .ignored ? "恢复" : "忽略") {
+                    model.markFinding(finding.id, resolution: finding.resolution == .ignored ? .open : .ignored)
+                }
+            }
+            .font(.system(size: 10, weight: .medium))
+            .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
+        }
+        .padding(9)
+        .background(palette.surface.opacity(0.72), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+    }
+
+    private func severityColor(_ severity: AIReviewFinding.Severity) -> Color {
+        switch severity {
+        case .critical: palette.removed
+        case .warning: Color.orange
+        case .suggestion: palette.accent
+        }
     }
 
     private var usageSummary: some View {

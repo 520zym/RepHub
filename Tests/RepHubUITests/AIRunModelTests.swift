@@ -119,6 +119,58 @@ final class AIRunModelTests: XCTestCase {
         XCTAssertFalse(model.hasStartedRequest)
     }
 
+    func testReviewFindingsRequireSnapshotPathAndNewLine() async throws {
+        let result = """
+        审查结果
+        ```json
+        {"findings":[
+          {"severity":"warning","path":"A.swift","newLine":3,"reason":"可能为空","suggestion":"先判空"},
+          {"severity":"critical","path":"../../outside.swift","newLine":3,"reason":"越界","suggestion":"忽略"},
+          {"severity":"warning","path":"A.swift","newLine":99,"reason":"不存在","suggestion":"忽略"}
+        ]}
+        ```
+        """
+        let model = makeModel(provider: FixtureProvider(result: result), withConnection: true)
+        model.prepare(kind: .codeReview, sourceLabel: "工作区", paths: ["A.swift"]) { _ in
+            AIContext(sourceLabel: "测试", basis: "工作区", files: [
+                AIInputFile(path: "A.swift", patch: "@@ -1,1 +3,2 @@\n+let value = value\n+run()")
+            ])
+        }
+
+        model.run()
+        try await waitUntil { !model.isBusy }
+
+        XCTAssertEqual(model.reviewFindings.count, 1)
+        let finding = try XCTUnwrap(model.reviewFindings.first)
+        XCTAssertEqual(finding.path, "A.swift")
+        XCTAssertEqual(finding.newLine, 3)
+        XCTAssertTrue(model.canLocate(finding))
+        model.markFinding(finding.id, resolution: .resolved)
+        XCTAssertEqual(model.reviewFindings.first?.resolution, .resolved)
+    }
+
+    func testMarkdownFindingCanUseSeverityHeadingBeforePath() async throws {
+        let result = """
+        ### 警告
+        - 路径：`A.swift`
+        - 新版本行号：3
+        - 原因：未处理失败分支
+        - 修复建议：补充错误处理
+        """
+        let model = makeModel(provider: FixtureProvider(result: result), withConnection: true)
+        model.prepare(kind: .codeReview, sourceLabel: "工作区", paths: ["A.swift"]) { _ in
+            AIContext(sourceLabel: "测试", basis: "工作区", files: [
+                AIInputFile(path: "A.swift", patch: "@@ -1 +3 @@\n+run()")
+            ])
+        }
+
+        model.run()
+        try await waitUntil { !model.isBusy }
+
+        XCTAssertEqual(model.reviewFindings.count, 1)
+        XCTAssertEqual(model.reviewFindings.first?.severity, .warning)
+    }
+
     private func makeModel(provider: FixtureProvider, withConnection: Bool = false) -> AIRunModel {
         let defaults = UserDefaults(suiteName: "AIRunModelTests.\(UUID().uuidString)")!
         let settings = AISettingsStore(secrets: EmptySecrets(), defaults: defaults)
@@ -146,9 +198,10 @@ private struct FixtureProvider: AIProvider {
     let log: FixtureLog?
     let waitForGate: ResponseGate?
     let usage: AITokenUsage?
+    let result: String
 
-    init(log: FixtureLog? = nil, waitForGate: ResponseGate? = nil, usage: AITokenUsage? = nil) {
-        self.log = log; self.waitForGate = waitForGate; self.usage = usage
+    init(log: FixtureLog? = nil, waitForGate: ResponseGate? = nil, usage: AITokenUsage? = nil, result: String = "审查完成") {
+        self.log = log; self.waitForGate = waitForGate; self.usage = usage; self.result = result
     }
 
     func execute(_ request: AIExecutionRequest, apiKey: String?, progress: @escaping AIProgressHandler) async throws -> String {
@@ -160,7 +213,7 @@ private struct FixtureProvider: AIProvider {
         }
         try Task.checkCancellation()
         if let usage { await progress(.usage(usage)) }
-        return "审查完成"
+        return result
     }
 
     func check(_ connection: AIConnection) async throws -> String { "可用" }

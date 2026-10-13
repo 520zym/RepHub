@@ -19,6 +19,8 @@ public final class AIRunModel {
     public private(set) var completedSnapshotID: String?
     public private(set) var tokenUsage: AITokenUsage?
     public private(set) var hasStartedRequest = false
+    /// 仅代码审查本次会话的结构化结论；原始模型输出始终保留在 `output`。
+    public private(set) var reviewFindings: [AIReviewFinding] = []
 
     /// `nil` 代表尚未选择场景或连接。
     public private(set) var sceneID: UUID?
@@ -147,6 +149,7 @@ public final class AIRunModel {
         task?.cancel()
         isBusy = true
         output = ""
+        reviewFindings = []
         progress = "正在整理所选差异…"
         errorMessage = nil
         isStale = false
@@ -171,6 +174,7 @@ public final class AIRunModel {
                 }
                 guard self.accepts(token, basis: basis), !Task.isCancelled else { return }
                 self.output = result
+                self.reviewFindings = scene.kind == .codeReview ? Self.reviewFindings(in: result, context: context) : []
                 self.completedSnapshotID = context.snapshotID
                 self.completedBasis = basis
                 self.progress = "正在核对差异是否变化…"
@@ -209,6 +213,7 @@ public final class AIRunModel {
         task = nil
         isBusy = false
         output = ""
+        reviewFindings = []
         completedSnapshotID = nil
         completedBasis = nil
         isStale = true
@@ -221,6 +226,15 @@ public final class AIRunModel {
         task?.cancel()
         task = nil
         clearResult()
+    }
+
+    public func canLocate(_ finding: AIReviewFinding) -> Bool {
+        !isBusy && !isStale && completedSnapshotID != nil && reviewFindings.contains(where: { $0.id == finding.id })
+    }
+
+    public func markFinding(_ id: UUID, resolution: AIReviewFinding.Resolution) {
+        guard let index = reviewFindings.firstIndex(where: { $0.id == id }) else { return }
+        reviewFindings[index].resolution = resolution
     }
 
     public func markStale() {
@@ -337,6 +351,7 @@ public final class AIRunModel {
         completedBasis = nil
         tokenUsage = nil
         hasStartedRequest = false
+        reviewFindings = []
     }
 
     /// `apply` 和 `revalidate` 也会异步读取差异；用户改范围后不能让旧读取落回当前状态。
@@ -344,5 +359,106 @@ public final class AIRunModel {
         requestToken += 1
         task?.cancel()
         task = nil
+    }
+
+    private static func reviewFindings(in output: String, context: AIContext) -> [AIReviewFinding] {
+        let candidates = jsonFindings(in: output) + markdownFindings(in: output)
+        var locations = Set<String>()
+        return candidates.filter { finding in
+            let key = "\(finding.path)\u{0}\(finding.newLine)\u{0}\(finding.reason)"
+            guard locations.insert(key).inserted else { return false }
+            return context.validates(finding)
+        }
+    }
+
+    private static func jsonFindings(in output: String) -> [AIReviewFinding] {
+        let pattern = #"(?s)(?:```|~~~)json[^\n]*\n(.*?)(?:```|~~~)"#
+        guard let expression = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let range = NSRange(output.startIndex..., in: output)
+        return expression.matches(in: output, range: range).flatMap { match -> [AIReviewFinding] in
+            guard let payloadRange = Range(match.range(at: 1), in: output),
+                  let data = String(output[payloadRange]).data(using: .utf8) else { return [] }
+            return decodeJSONFindings(data)
+        }
+    }
+
+    private static func decodeJSONFindings(_ data: Data) -> [AIReviewFinding] {
+        guard let object = try? JSONSerialization.jsonObject(with: data) else { return [] }
+        let values: [[String: Any]]
+        if let array = object as? [[String: Any]] {
+            values = array
+        } else if let dictionary = object as? [String: Any], let array = dictionary["findings"] as? [[String: Any]] {
+            values = array
+        } else {
+            return []
+        }
+        return values.compactMap { value in
+            guard let path = string(value["path"]), let line = integer(value["newLine"] ?? value["new_line"] ?? value["line"]),
+                  let reason = string(value["reason"]), let suggestion = string(value["suggestion"]),
+                  let severity = severity(value["severity"]) else { return nil }
+            return AIReviewFinding(severity: severity, path: clean(path), newLine: line, reason: clean(reason), suggestion: clean(suggestion))
+        }
+    }
+
+    private static func markdownFindings(in output: String) -> [AIReviewFinding] {
+        let pathPattern = #"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?(?:文件路径|路径|文件|path|file)(?:\*\*)?\s*[:：]\s*`?([^`\n]+?)`?\s*$"#
+        guard let expression = try? NSRegularExpression(pattern: pathPattern) else { return [] }
+        let matches = expression.matches(in: output, range: NSRange(output.startIndex..., in: output))
+        return matches.enumerated().compactMap { index, match in
+            guard let pathRange = Range(match.range(at: 1), in: output) else { return nil }
+            let beforePath = output[..<pathRange.lowerBound]
+            let heading = beforePath.range(of: "\n#", options: .backwards)?.upperBound
+            let paragraph = beforePath.range(of: "\n\n", options: .backwards)?.upperBound
+            let start = [heading, paragraph].compactMap { $0 }.max() ?? output.startIndex
+            let end = index + 1 < matches.count
+                ? Range(matches[index + 1].range, in: output)?.lowerBound
+                : output.endIndex
+            guard let end, start <= end else { return nil }
+            let segmentRange = start..<end
+            let segment = String(output[segmentRange])
+            guard let line = integer(capture(#"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?(?:新版本行号|新行号|行号|line)(?:\*\*)?\s*[:：#]\s*(\d+)"#, in: segment)),
+                  let reason = capture(#"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?(?:原因|问题|reason)(?:\*\*)?\s*[:：]\s*(.+)$"#, in: segment),
+                  let suggestion = capture(#"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?(?:修复建议|建议|suggestion)(?:\*\*)?\s*[:：]\s*(.+)$"#, in: segment),
+                  let severity = severity(capture(#"(?im)(?:严重程度|severity)\s*[:：]\s*([^\n*]+)|\b(critical|warning|suggestion)\b|\b(严重|警告|建议)\b"#, in: segment)) else { return nil }
+            return AIReviewFinding(severity: severity, path: clean(String(output[pathRange])), newLine: line,
+                                   reason: clean(reason), suggestion: clean(suggestion))
+        }
+    }
+
+    private static func capture(_ pattern: String, in value: String) -> String? {
+        guard let expression = try? NSRegularExpression(pattern: pattern),
+              let match = expression.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) else { return nil }
+        for index in 1..<match.numberOfRanges where match.range(at: index).location != NSNotFound {
+            if let range = Range(match.range(at: index), in: value) { return String(value[range]) }
+        }
+        return nil
+    }
+
+    private static func string(_ value: Any?) -> String? {
+        guard let string = value as? String, !clean(string).isEmpty else { return nil }
+        return string
+    }
+
+    private static func integer(_ value: Any?) -> Int? {
+        if let value = value as? Int { return value > 0 ? value : nil }
+        if let value = value as? NSNumber { return value.intValue > 0 ? value.intValue : nil }
+        if let value = value as? String, let integer = Int(value), integer > 0 { return integer }
+        return nil
+    }
+
+    private static func severity(_ value: Any?) -> AIReviewFinding.Severity? {
+        guard let raw = value as? String else { return nil }
+        return switch clean(raw).lowercased() {
+        case "critical", "error", "严重", "高", "high": .critical
+        case "warning", "warn", "警告", "中", "medium": .warning
+        case "suggestion", "info", "建议", "低", "low": .suggestion
+        default: nil
+        }
+    }
+
+    private static func clean(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "`*"))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
