@@ -42,8 +42,8 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPa
     public let id: ProviderID = .git
     public let displayName = "Git"
 
-    private let runner: CommandRunner
-    private let fileManager: FileManager
+    let runner: CommandRunner
+    let fileManager: FileManager
 
     public init(runner: CommandRunner = CommandRunner(), fileManager: FileManager = .default) {
         self.runner = runner
@@ -1083,7 +1083,7 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPa
         _ = try requireSuccess(result, tool: "git")
     }
 
-    private func currentHead(in directory: URL) async throws -> String {
+    func currentHead(in directory: URL) async throws -> String {
         let result = try await git(["rev-parse", "--verify", "HEAD"], in: directory)
         let output = try requireSuccess(result, tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !output.isEmpty else { throw VersionControlError.invalidData("Git 未返回当前提交。") }
@@ -1110,7 +1110,7 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPa
         return !(try requireSuccess(result, tool: "git").data.isEmpty)
     }
 
-    private func hasInProgressOperation(in directory: URL) async throws -> Bool {
+    func hasInProgressOperation(in directory: URL) async throws -> Bool {
         let mergeHead = try await git(["rev-parse", "--verify", "--quiet", "MERGE_HEAD"], in: directory)
         if mergeHead.exitCode == 0 { return true }
         if mergeHead.exitCode != 1 { _ = try requireSuccess(mergeHead, tool: "git") }
@@ -1153,7 +1153,7 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPa
 
     /// 对于更新目标中的 .gitattributes，只要声明了 filter= 即拒绝更新。
     /// 这样不会为了“兼容”而执行仓库配置的外部过滤器，也不会留下 LFS 指针等不完整内容。
-    private func containsCheckoutFilter(inTree revision: String, directory: URL) async throws -> Bool {
+    func containsCheckoutFilter(inTree revision: String, directory: URL) async throws -> Bool {
         if try await hasConfiguredFilterDriver(in: directory) { return true }
         if try await hasFilterAttributeInLocalSources(in: directory) { return true }
         let listing = try await git(["ls-tree", "-r", "-z", revision], in: directory)
@@ -1210,7 +1210,7 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPa
         }
     }
 
-    private func containsSubmodule(inTree revision: String, directory: URL) async throws -> Bool {
+    func containsSubmodule(inTree revision: String, directory: URL) async throws -> Bool {
         let result = try await git(["ls-tree", "-r", "-z", revision], in: directory)
         return try requireSuccess(result, tool: "git").data
             .split(separator: 0, omittingEmptySubsequences: true)
@@ -1412,19 +1412,19 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPa
         }
     }
 
-    private func ensureSafeIndexOperation(_ paths: [String], root: URL) async throws {
+    func ensureSafeIndexOperation(_ paths: [String], root: URL) async throws {
         guard !(try await commitUsesUnsafeFilter(in: root)) else { throw VersionControlError.unsupported("Git 文件过滤器可能执行外部程序，未修改暂存区。") }
         guard !(try await containsSelectedSubmodule(paths: paths, in: root)) else { throw VersionControlError.unsupported("所选内容包含子模块，未修改暂存区。") }
     }
 
-    private func ensureSafeBranchOperation(in root: URL) async throws {
+    func ensureSafeBranchOperation(in root: URL) async throws {
         guard !(try await hasTrackedChanges(in: root)) else { throw VersionControlError.unsupported("存在已跟踪的本地修改，未切换或合并分支。") }
         guard !(try await hasInProgressOperation(in: root)) else { throw VersionControlError.unsupported("Git 正在合并或变基，无法执行分支操作。") }
         guard !(try await commitUsesUnsafeFilter(in: root)) else { throw VersionControlError.unsupported("Git 文件过滤器可能执行外部程序，未执行分支操作。") }
         guard let head = try await optionalHead(in: root), !(try await containsSubmodule(inTree: head, directory: root)) else { throw VersionControlError.unsupported("当前版本包含子模块，未执行分支操作。") }
     }
 
-    private func ensureSafeTargetTree(_ reference: String, in root: URL) async throws {
+    func ensureSafeTargetTree(_ reference: String, in root: URL) async throws {
         guard let target = try await resolvedCommit(reference, in: root) else { throw VersionControlError.invalidData("目标分支或提交不存在。") }
         guard !(try await containsSubmodule(inTree: target, directory: root)), !(try await containsCheckoutFilter(inTree: target, directory: root)) else { throw VersionControlError.unsupported("目标版本包含子模块或文件过滤器，未执行操作。") }
         let conflicts = try await localPathsConflictingWithIncomingTree(upstream: target, in: root)
@@ -1562,7 +1562,7 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPa
         }
     }
 
-    private func git(
+    func git(
         _ command: [String],
         in directory: URL,
         timeout: TimeInterval = 20,
@@ -1585,14 +1585,14 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPa
         )
     }
 
-    private func optionalHead(in directory: URL) async throws -> String? {
+    func optionalHead(in directory: URL) async throws -> String? {
         let result = try await git(["rev-parse", "--verify", "--quiet", "HEAD"], in: directory)
         if result.exitCode == 1 { return nil }
         let value = try requireSuccess(result, tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
         return value.isEmpty ? nil : value
     }
 
-    private func commitUsesUnsafeFilter(in directory: URL) async throws -> Bool {
+    func commitUsesUnsafeFilter(in directory: URL) async throws -> Bool {
         if try await hasConfiguredFilterDriver(in: directory) { return true }
         return try await hasFilterAttributeInLocalSources(in: directory)
     }
@@ -1640,7 +1640,7 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPa
         return try requireSuccess(result, tool: "git").data
     }
 
-    private func gitIndexLocation(in directory: URL) async throws -> URL {
+    func gitIndexLocation(in directory: URL) async throws -> URL {
         let result = try await git(["rev-parse", "--git-path", "index"], in: directory)
         let path = try requireSuccess(result, tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !path.isEmpty else { throw VersionControlError.invalidData("Git 未返回索引路径。") }
@@ -1799,7 +1799,7 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPa
         return RepositoryPatch(text: result.output)
     }
 
-    private func ensureGit(_ binding: RepositoryBinding) throws {
+    func ensureGit(_ binding: RepositoryBinding) throws {
         guard binding.providerID == .git else { throw VersionControlError.invalidRepository("该绑定不是 Git 工作区。") }
     }
 
@@ -1818,7 +1818,7 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPa
         }
     }
 
-    private func hasHead(_ directory: URL) async throws -> Bool {
+    func hasHead(_ directory: URL) async throws -> Bool {
         let result = try await git(["rev-parse", "--verify", "--quiet", "HEAD"], in: directory)
         return result.exitCode == 0
     }

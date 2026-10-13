@@ -9,11 +9,13 @@ import VersionControlCore
 /// 用户输入的认证信息只保留在当前进程内存中，不写入 SVN 认证缓存。
 public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingProvider, RepositoryAcquisitionProvider, RepositoryCommitProvider, RepositorySetupProvider, RepositoryManagementProvider, RepositoryComparisonProvider, RepositoryMigrationSourceProvider, RepositoryWorkingCopyMigrationSourceProvider {
     public let runner: CommandRunner
+    let shelfStorageDirectory: URL?
     private let tlsFallback: SVNAutomaticTLSFallback
     private let commandExecutor: @Sendable ([String], URL, URL?) async throws -> CommandResult
     private let credentials = SVNSessionCredentialStore()
 
-    public init(runner: CommandRunner = CommandRunner()) {
+    public init(runner: CommandRunner = CommandRunner(), shelfStorageDirectory: URL? = nil) {
+        self.shelfStorageDirectory = shelfStorageDirectory
         self.runner = runner
         self.tlsFallback = SVNAutomaticTLSFallback()
         self.commandExecutor = { arguments, directory, configuration in
@@ -32,6 +34,7 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         commandExecutor: @escaping @Sendable ([String], URL, URL?) async throws -> CommandResult
     ) {
         self.runner = runner
+        self.shelfStorageDirectory = nil
         self.tlsFallback = tlsFallback
         self.commandExecutor = commandExecutor
     }
@@ -1538,7 +1541,7 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         ]
     }
 
-    private func svn(_ arguments: [String], directory: URL, remoteURL: String? = nil) async throws -> CommandResult {
+    func svn(_ arguments: [String], directory: URL, remoteURL: String? = nil) async throws -> CommandResult {
         // --non-interactive 防止凭据提示阻塞 UI；不接受或绕过 TLS 证书错误。
         let command = ["--non-interactive", "--no-auth-cache"] + arguments
         let result = try await tlsFallback.execute(
@@ -2052,7 +2055,7 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         value.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     }
 
-    private func relativePath(_ path: String, root: URL) -> String {
+    func relativePath(_ path: String, root: URL) -> String {
         let rootPath = root.standardizedFileURL.path
         let absolute = URL(fileURLWithPath: path).standardizedFileURL.path
         guard absolute == rootPath || absolute.hasPrefix(rootPath + "/") else { return path }
@@ -2098,7 +2101,7 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         }
     }
 
-    private func parseDate(_ value: String?) -> Date {
+    func parseDate(_ value: String?) -> Date {
         guard let value else { return .distantPast }
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -2112,7 +2115,7 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         return encodedPath.removingPercentEncoding ?? encodedPath
     }
 
-    private func normalizedRevision(_ revision: String) -> String {
+    func normalizedRevision(_ revision: String) -> String {
         revision.hasPrefix("r") || revision.hasPrefix("R") ? String(revision.dropFirst()) : revision
     }
 
@@ -2209,12 +2212,12 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         return try next.encode()
     }
 
-    private func svnPathArgument(_ path: String) -> String {
+    func svnPathArgument(_ path: String) -> String {
         // 结尾 @ 表示没有 peg revision；仅含 @ 的路径需要它，普通路径追加会变成另一个文件名。
         path + "@"
     }
 
-    private func svnTargetPath(_ path: String) -> String {
+    func svnTargetPath(_ path: String) -> String {
         path.contains("@") ? svnPathArgument(path) : path
     }
 
@@ -2318,7 +2321,7 @@ private actor SVNSessionCredentialStore {
     }
 }
 
-private final class SVNXMLDocument: NSObject, XMLParserDelegate {
+final class SVNXMLDocument: NSObject, XMLParserDelegate {
     struct InfoEntry {
         var kind: String?
         var url: String?

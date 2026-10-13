@@ -61,15 +61,59 @@ struct WorkingCopyMigrationServiceTests {
         await #expect(throws: VersionControlError.self) { try await service.readRecord(at: root) }
     }
 
+    @Test("只读检查只报告源 SVN 的最新修订，不计算或虚构提交数量")
+    func reportsSourceUpdateFromMigrationRecord() async throws {
+        let root = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let git = root.appendingPathComponent(".git", isDirectory: true)
+        try FileManager.default.createDirectory(at: git, withIntermediateDirectories: true)
+        let revision = MigrationRevision(id: "r9", author: "a", date: .now, message: "m")
+        let mapping = MigrationMapping(source: revision, author: MigrationAuthor(name: "a", email: "a@example.test"), targetCommit: String(repeating: "a", count: 40))
+        let record = WorkingCopyMigrationRecord(sourceURL: "https://example.test/svn/project", repositoryUUID: "uuid",
+                                                startRevision: "r9", lastRevision: "r9", remoteURL: "https://example.test/git",
+                                                branch: "main", mappings: [mapping], cutoverRevision: "r9")
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(record).write(to: git.appendingPathComponent("rephub-svn-migration.json"))
+
+        let service = WorkingCopyMigrationService(
+            source: WorkingCopySourceFixture(root: root, latestRevision: "r12"),
+            target: WorkingCopyTargetFixture()
+        )
+        let result = try await service.checkForSourceUpdates(at: root)
+        guard case let .update(update) = result else { Issue.record("expected source update"); return }
+        #expect(update.migratedRevision == "r9")
+        #expect(update.latestRevision == "r12")
+    }
+
+    @Test("源端修订倒退不会被误报为已同步")
+    func rejectsSourceHistoryBehindMigratedRevision() async throws {
+        let root = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let git = root.appendingPathComponent(".git", isDirectory: true)
+        try FileManager.default.createDirectory(at: git, withIntermediateDirectories: true)
+        let revision = MigrationRevision(id: "r9", author: "a", date: .now, message: "m")
+        let mapping = MigrationMapping(source: revision, author: MigrationAuthor(name: "a", email: "a@example.test"), targetCommit: String(repeating: "a", count: 40))
+        let record = WorkingCopyMigrationRecord(sourceURL: "https://example.test/svn/project", repositoryUUID: "uuid",
+                                                startRevision: "r9", lastRevision: "r9", remoteURL: "https://example.test/git",
+                                                branch: "main", mappings: [mapping], cutoverRevision: "r9")
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(record).write(to: git.appendingPathComponent("rephub-svn-migration.json"))
+        let service = WorkingCopyMigrationService(
+            source: WorkingCopySourceFixture(root: root, latestRevision: "r8"),
+            target: WorkingCopyTargetFixture()
+        )
+        await #expect(throws: VersionControlError.self) { try await service.checkForSourceUpdates(at: root) }
+    }
+
     private func temporaryDirectory() throws -> URL {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("rephub-wc-migration-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true); return directory
     }
 }
 
-private struct WorkingCopySourceFixture: RepositoryWorkingCopyMigrationSourceProvider {
+private struct WorkingCopySourceFixture: RepositoryWorkingCopyMigrationSourceProvider, VersionControlProvider {
     let id = ProviderID(rawValue: "working-copy-source-fixture")
     let root: URL
+    var latestRevision: String? = nil
+    var displayName: String { "SVN fixture" }
     func planMigration(from location: RemoteRepositoryLocation, mode: MigrationMode, progress: @escaping RepositoryOperationProgressHandler) async throws -> MigrationSourcePlan { try await planWorkingCopyHistory(from: location, mode: mode, through: "r9", after: nil, progress: progress) }
     func inspectMigrationWorkingCopy(at directory: URL, requireClean: Bool) async throws -> MigrationWorkingCopyInfo { MigrationWorkingCopyInfo(directory: root, sourceURL: "https://example.test/svn/project", repositoryUUID: "uuid", baseRevision: "r9") }
     func planWorkingCopyHistory(from location: RemoteRepositoryLocation, mode: MigrationMode, through revision: String?, after previousRevision: String?, progress: @escaping RepositoryOperationProgressHandler) async throws -> MigrationSourcePlan {
@@ -77,6 +121,14 @@ private struct WorkingCopySourceFixture: RepositoryWorkingCopyMigrationSourcePro
     }
     func verifyWorkingCopyMigrationSource(_ location: RemoteRepositoryLocation, repositoryUUID: String, revision: String) async throws {}
     func exportMigrationSnapshot(plan: MigrationSourcePlan, revision: MigrationRevision, to directory: URL, progress: @escaping RepositoryOperationProgressHandler) async throws {}
+    func detect(at directory: URL) async throws -> RepositoryBinding? { nil }
+    func status(in binding: RepositoryBinding) async throws -> [FileChange] { [] }
+    func history(in binding: RepositoryBinding, limit: Int, reference: String?) async throws -> [Revision] {
+        latestRevision.map { [Revision(id: $0, author: "a", date: .now, message: "latest")] } ?? []
+    }
+    func branches(in binding: RepositoryBinding) async throws -> [BranchReference] { [] }
+    func changedFiles(in binding: RepositoryBinding, revision: String) async throws -> [FileChange] { [] }
+    func diff(in binding: RepositoryBinding, path: String?, revision: String?) async throws -> RepositoryPatch { .init(text: "") }
 }
 
 private actor WorkingCopyTargetFixture: RepositoryWorkingCopyMigrationTargetProvider {

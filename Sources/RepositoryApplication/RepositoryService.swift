@@ -34,8 +34,8 @@ public struct BindingSnapshot: Sendable {
 
 /// Orchestrates provider contracts only. No Git/SVN implementation dependency is allowed in this module.
 public actor RepositoryService {
-    private let providers: [any VersionControlProvider]
-    private var isPerformingOperation = false
+    let providers: [any VersionControlProvider]
+    var isPerformingOperation = false
     public init(providers: [any VersionControlProvider]) { self.providers = providers }
 
     public func acquisitionOptions() -> [RepositoryAcquisitionOption] {
@@ -394,7 +394,7 @@ public actor RepositoryService {
         return try await provider.fileHistoryDiff(in: binding, entry: entry)
     }
 
-    private func validateRelativeFilePath(_ path: String) throws {
+    func validateRelativeFilePath(_ path: String) throws {
         guard !path.isEmpty, !path.hasPrefix("/"), !path.contains("\0"),
               path.split(separator: "/", omittingEmptySubsequences: false).allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
             throw VersionControlError.invalidRepository("文件路径必须位于当前工作副本内。")
@@ -541,7 +541,7 @@ public actor RepositoryService {
         return WorkspaceCommitResult(results: results, workspace: refreshed.0, snapshots: refreshed.1)
     }
 
-    private func checkedCommitBinding(_ requested: RepositoryBinding,
+    func checkedCommitBinding(_ requested: RepositoryBinding,
                                       using adapter: any RepositoryCommitProvider) async throws -> RepositoryBinding {
         guard let current = try await adapter.detect(at: requested.root), current.id == requested.id,
               current.currentBranch == requested.currentBranch, current.remoteURL == requested.remoteURL else {
@@ -740,7 +740,7 @@ public actor RepositoryService {
         }
     }
 
-    private func validateManagedPath(_ path: String) throws { try validateCommitPath(path) }
+    func validateManagedPath(_ path: String) throws { try validateCommitPath(path) }
 
     /// `.` 是版本控制适配器在“只读修订比较”中表示工作副本根节点的通用标记。
     /// 它不属于普通受控文件路径，所以绝不能复用于暂存、提交、冲突解决等写操作。
@@ -835,7 +835,7 @@ public actor RepositoryService {
         return (refreshed, snapshots)
     }
 
-    private func provider(for binding: RepositoryBinding) throws -> any VersionControlProvider {
+    func provider(for binding: RepositoryBinding) throws -> any VersionControlProvider {
         guard let provider = providers.first(where: { $0.id == binding.providerID }) else {
             throw VersionControlError.unsupported("未注册对应的版本控制适配器。")
         }

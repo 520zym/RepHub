@@ -51,6 +51,54 @@ public actor WorkingCopyMigrationService {
         return record
     }
 
+    /// 只读检查 SVN 源端是否出现了尚未补迁的修订。没有迁移记录时绝不访问网络。
+    /// 检查开始与结束都会重新核对本地记录，避免迁移过程中把旧结论提示给用户。
+    public func checkForSourceUpdates(at directory: URL) async throws -> MigrationSourceUpdateCheck {
+        guard !busy else { return .skippedBusy }
+        try begin(); defer { busy = false }
+        let root = try validatedWorkingCopyDirectory(directory)
+        guard let before = try readRecord(at: root) else { return .noMigrationRecord }
+        let current = try await source.inspectMigrationWorkingCopy(at: root, requireClean: false)
+        guard current.sourceURL == before.sourceURL, current.repositoryUUID == before.repositoryUUID else {
+            throw VersionControlError.invalidData("当前 SVN 工作副本与迁移记录的来源地址或仓库 UUID 不一致。")
+        }
+        try await source.verifyWorkingCopyMigrationSource(
+            RemoteRepositoryLocation(url: before.sourceURL),
+            repositoryUUID: before.repositoryUUID,
+            revision: before.lastRevision
+        )
+        guard let historyProvider = source as? any VersionControlProvider else {
+            throw VersionControlError.unsupported("当前 SVN 迁移来源不支持只读历史检查。")
+        }
+        let binding = RepositoryBinding(
+            providerID: historyProvider.id,
+            providerName: historyProvider.displayName,
+            root: root,
+            remoteURL: before.sourceURL,
+            capabilities: [.history]
+        )
+        guard let latest = try await historyProvider.history(in: binding, limit: 1, reference: nil).first else {
+            throw VersionControlError.invalidData("源 SVN 未返回可比较的最新修订。")
+        }
+        guard let migratedNumber = revisionNumber(before.lastRevision),
+              let latestNumber = revisionNumber(latest.id) else {
+            throw VersionControlError.invalidData("SVN 修订号无法按数值比较。")
+        }
+        guard let after = try readRecord(at: root), sameRecord(before, after) else {
+            throw VersionControlError.invalidData("检查期间迁移记录已变化，请重新检查。")
+        }
+        if latestNumber < migratedNumber {
+            throw VersionControlError.invalidData("源 SVN 最新修订早于已迁移修订，无法确认来源历史连续性。")
+        }
+        if latestNumber > migratedNumber {
+            return .update(MigrationSourceUpdate(
+                directory: root, sourceURL: before.sourceURL, repositoryUUID: before.repositoryUUID,
+                migratedRevision: before.lastRevision, latestRevision: latest.id
+            ))
+        }
+        return .current(migratedRevision: before.lastRevision, checkedAt: Date())
+    }
+
     public func plan(at directory: URL, remoteURL: String, branch: String, mode: MigrationMode,
                      action: WorkingCopyMigrationAction,
                      progress: @escaping RepositoryOperationProgressHandler) async throws -> WorkingCopyMigrationPlan {
@@ -393,6 +441,16 @@ private extension WorkingCopyMigrationService {
         a.id == b.id && a.action == b.action && a.workingCopy == b.workingCopy && a.source.revisions == b.source.revisions &&
         a.source.anchor == b.source.anchor && a.source.mode == b.source.mode && a.remoteURL == b.remoteURL && a.branch == b.branch &&
         a.expectedGitTip == b.expectedGitTip && a.authors == b.authors && a.previousRecord?.lastRevision == b.previousRecord?.lastRevision
+    }
+
+    func sameRecord(_ a: WorkingCopyMigrationRecord, _ b: WorkingCopyMigrationRecord) -> Bool {
+        a.version == b.version && a.sourceURL == b.sourceURL && a.repositoryUUID == b.repositoryUUID &&
+        a.startRevision == b.startRevision && a.cutoverRevision == b.cutoverRevision &&
+        a.lastRevision == b.lastRevision && a.remoteURL == b.remoteURL && a.branch == b.branch &&
+        a.mappings.count == b.mappings.count &&
+        zip(a.mappings, b.mappings).allSatisfy { left, right in
+            left.source == right.source && left.author == right.author && left.targetCommit == right.targetCommit
+        }
     }
 
     func begin() throws { guard !busy else { throw VersionControlError.unsupported("另一项迁移操作正在执行。") }; busy = true }
