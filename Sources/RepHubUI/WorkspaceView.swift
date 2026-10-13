@@ -14,6 +14,7 @@ public struct WorkspaceView: View {
     @State private var showsOperationSheet = false
     @State private var showsCommitSheet = false
     @State private var migrationResultToOpen: URL?
+    @State private var conflictToOpen: String?
     @FocusState private var commitMessageFocused: Bool
 
     public init(model: WorkspaceModel, appearance: AppearanceStore) {
@@ -53,6 +54,10 @@ public struct WorkspaceView: View {
         .onChange(of: model.workspace?.id) { _, _ in
             commitTargets = Set(model.workspace?.bindings.map(\.id) ?? [])
             commitMessage = ""
+        }
+        .onChange(of: model.workingCopyPresentationRequest) { _, _ in
+            section = .workingCopy
+            model.setHistoryVisible(false)
         }
         .onChange(of: model.historyPresentationRequest) { _, _ in
             section = .history
@@ -97,12 +102,21 @@ public struct WorkspaceView: View {
                 openRecentRepository: model.openRecentRepository
             )
         }
-        .sheet(isPresented: $model.showsRepositoryManagement, onDismiss: model.repositoryManagement.dismiss) {
+        .sheet(isPresented: $model.showsRepositoryManagement, onDismiss: {
+            model.repositoryManagement.dismiss()
+            if let path = conflictToOpen {
+                conflictToOpen = nil
+                model.showConflictEditor(path: path)
+            }
+        }) {
             RepositoryManagementView(model: model.repositoryManagement, palette: palette, appearance: appearance, dismiss: {
                 model.repositoryManagement.dismiss()
                 model.showsRepositoryManagement = false
             }, completed: { response in
                 model.applyManagementResponse(response)
+            }, editConflict: { path in
+                conflictToOpen = path
+                model.showsRepositoryManagement = false
             })
         }
         .sheet(isPresented: $model.showsRepositorySetup, onDismiss: model.repositorySetup.dismiss) {
@@ -127,7 +141,7 @@ public struct WorkspaceView: View {
             }
         }) {
             if let migration = model.repositoryMigration {
-                RepositoryMigrationView(model: migration, workingCopyModel: model.workingCopyMigration, palette: palette, dismiss: {
+                RepositoryMigrationView(model: migration, workingCopyModel: model.workingCopyMigration, startsInWorkingCopy: model.migrationStartsInWorkingCopy, palette: palette, dismiss: {
                     migration.dismiss()
                     model.workingCopyMigration?.dismiss()
                     model.showsRepositoryMigration = false
@@ -141,8 +155,11 @@ public struct WorkspaceView: View {
         }
         .sheet(isPresented: $model.showsAIReview) {
             if let ai = model.aiReview {
-                AIRunView(model: ai, palette: palette, codePalette: codePalette, dismiss: { model.showsAIReview = false })
+                AIRunView(model: ai, palette: palette, codePalette: codePalette, dismiss: { model.showsAIReview = false }, onLocateFinding: model.locateReviewFinding)
             }
+        }
+        .sheet(item: $model.toolRequest, onDismiss: { model.toolIsBusy = false }) { request in
+            WorkspaceToolView(model: model, request: request, palette: palette, appearance: appearance)
         }
         .alert("无法打开仓库", isPresented: Binding(
             get: { model.recentRepositoryError != nil },
@@ -181,7 +198,7 @@ public struct WorkspaceView: View {
             WorkspaceFileTreeView(model: model, palette: palette, showsBindingPicker: showsBindingPicker)
         } trailing: {
             VStack(spacing: 0) {
-                DiffView(model: model, appearance: appearance)
+                DiffView(model: model, appearance: appearance, focusLine: model.diffFocusLine, focusToken: model.diffFocusToken)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 commitBar(palette: palette)
             }
@@ -202,6 +219,8 @@ public struct WorkspaceView: View {
                             Button("初始化版本控制…", action: model.prepareSetup)
                         } else {
                             Button("管理当前仓库…", action: model.prepareManagement)
+                            Button("全历史搜索…", action: model.showFullHistorySearch)
+                            Button("搁置与恢复改动…", action: model.showShelves)
                             if model.repositoryMigration != nil {
                                 Button("迁移仓库…", action: model.showRepositoryMigration)
                             }
@@ -212,6 +231,12 @@ public struct WorkspaceView: View {
                                         Button("移除 \(directory.lastPathComponent)") { model.removeLinkedDirectory(directory) }
                                     }
                                 }
+                            }
+                        }
+                        if let monitor = model.migrationMonitor {
+                            Menu("迁移源提醒") {
+                                Button("立即检查源 SVN") { monitor.checkNow() }.disabled(monitor.isChecking)
+                                Toggle("自动检查", isOn: Binding(get: { !monitor.isPaused }, set: { monitor.setPaused(!$0) }))
                             }
                         }
                         if let monitor = model.monitor {
@@ -397,6 +422,17 @@ public struct WorkspaceView: View {
                 Button("检测到 \(monitor.pendingBindingIDs.count) 个来源变化") { model.refreshMonitoredChanges() }
                     .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
                     .disabled(model.isInteractionLocked)
+            }
+            if let monitor = model.migrationMonitor {
+                if let notice = monitor.notices.first {
+                    Button("源 SVN 有新提交 · \(notice.latestRevision)") { model.showMigrationSupplement(notice) }
+                        .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
+                        .help("上次迁至 \(notice.migratedRevision)，点击预览补迁；不会自动修改或推送代码。")
+                        .disabled(model.isInteractionLocked)
+                }
+                if let failure = monitor.errors.first {
+                    Label("迁移源检查失败", systemImage: "exclamationmark.circle").help(failure.message)
+                }
             }
             if let message = model.monitor?.errorMessage {
                 Label("本地监控读取失败", systemImage: "exclamationmark.circle")

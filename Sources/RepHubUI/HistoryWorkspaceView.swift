@@ -52,7 +52,7 @@ struct HistoryWorkspaceView: View {
     }
 
     private var supportsGraph: Bool {
-        !isFileHistory && model.selectedBinding?.capabilities.contains(.commitGraph) == true
+        model.inspectedRevision == nil && !isFileHistory && model.selectedBinding?.capabilities.contains(.commitGraph) == true
     }
 
     private var supportsBranches: Bool {
@@ -72,7 +72,7 @@ struct HistoryWorkspaceView: View {
                 }
                 .padding(.bottom, 3)
             } bottom: {
-                DiffView(model: model, appearance: appearance)
+                DiffView(model: model, appearance: appearance, focusLine: model.diffFocusLine, focusToken: model.diffFocusToken)
                     .padding(.top, 3)
             }
             .background(palette.background)
@@ -102,6 +102,14 @@ struct HistoryWorkspaceView: View {
     }
 
     private func revisionTable(palette: AppPalette) -> some View {
+        VStack(spacing: 0) {
+        if let revision = model.inspectedRevision {
+            HStack {
+                Text("追溯提交 · \(revision.shortID)").font(.system(size: 11))
+                Spacer()
+                Button("返回仓库历史", action: model.clearInspectedRevision).buttonStyle(.plain)
+            }.foregroundStyle(palette.accent).padding(10).background(palette.selection.opacity(0.4))
+        }
         HistoryRevisionTable(
             revisions: filteredRevisions,
             supportsGraph: supportsGraph,
@@ -124,6 +132,7 @@ struct HistoryWorkspaceView: View {
             selectReference: model.selectHistoryReference,
             chooseFileHistory: model.chooseFileHistory,
             clearFileHistory: model.clearFileHistory,
+            fullHistorySearch: model.showFullHistorySearch,
             drawsGraphConnections: !isFileHistory && revisionSearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !revisionFilter.isActive,
             loadedCount: model.historyRevisions.count,
             hasMore: model.hasMoreHistory,
@@ -134,6 +143,7 @@ struct HistoryWorkspaceView: View {
             cancelLoadMore: model.cancelLoadingMoreHistory,
             palette: palette
         )
+        }
     }
 
     private var isFileHistory: Bool { model.historyFilePath != nil }
@@ -352,6 +362,7 @@ private struct HistoryRevisionTable: View {
     let selectReference: (String?) -> Void
     let chooseFileHistory: () -> Void
     let clearFileHistory: () -> Void
+    let fullHistorySearch: () -> Void
     let drawsGraphConnections: Bool
     let loadedCount: Int
     let hasMore: Bool
@@ -376,6 +387,11 @@ private struct HistoryRevisionTable: View {
                 HStack(spacing: 10) {
                     bindingSource
                     WorkbenchSearchField("搜索已加载的提交、作者、版本号…", text: $search, palette: palette)
+                    Button(action: fullHistorySearch) {
+                        Label("全历史搜索", systemImage: "text.magnifyingglass")
+                    }
+                    .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
+                    .help("搜索尚未加载的历史记录，可按作者、日期和文件路径筛选")
                     filterControl
                     if supportsBranches {
                         Menu {

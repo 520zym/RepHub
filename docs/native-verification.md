@@ -372,3 +372,26 @@ Claude Code 2.1.177 不再提供旧的 `--permission-prompts` 和 `--max-turns` 
 原生验收仅使用 `/tmp/rephub-syntax-qa/repository` 临时 Git 仓库、独立标识 `com.zym.RepHub.syntaxQA` 以及仅监听本机的模拟 AI 服务。实窗核对了 Java 多行注释／URL 字符串、未跟踪 Java 全文、652 行差异第二段、浅色应用与深色代码组合、提交面板的统一差异、AI Java／SQL 围栏及复制入口；最终修正深色代码标题与分页按钮的颜色，并重新打包核对 AI 标题和 SQL 着色。没有调用真实模型、使用 API Key 或操作正式仓库；验收后退出 QA 应用并停止模拟服务。
 
 最终 `scripts/build-app.sh` 与 `codesign --verify --deep --strict build/RepHub.app` 通过，日志 `/tmp/rephub-syntax-qa/build-final.log`。高亮为阅读用词法着色，未接入语言服务器、类型推断或完整编译器语法分析；差异中省略的源码不能提供完整上下文。
+
+## 2026-10-13：追溯、冲突处理与本地整理
+
+新增逐行追溯、全历史搜索、三方内容冲突编辑、搁置恢复、Git 按块／按行提交、右键忽略、结构化 AI 问题定位、忽略空白与行内强调、SVN 迁移源新修订提醒。入口与各适配器边界见[功能说明](advanced-workflows.md)。
+
+定向执行：
+
+```sh
+swift test --filter 'Inspection|ConflictEditing|Shelf|GitPartialCommit|RepositoryIgnore|DiffTextComparison|AIReviewFinding|AIRunModelTests|WorkingCopyMigrationServiceTests|WorkspaceModelTests|PreparedDiffCacheTests'
+```
+
+共 **78 项不同测试通过，无失败、无跳过**，日志 `/tmp/rephub-advanced-final-tests.log`。其中 SVN 适配器 4 项、Git 适配器 7 项、忽略规则集成 5 项、核心服务 10 项、AI 问题解析 1 项、UI 模型与差异缓存 51 项。覆盖固定修订追溯、跨首批 300 条的历史检索、冲突原内容变化拒绝、Git/SVN 搁置恢复、局部提交只保留选中行并保留其他暂存、过期忽略预览拒绝、补迁源身份与修订比较，以及既有工作区／AI／差异缓存回归。不是全量测试。
+
+实窗发现局部提交代码块标题仅包含函数上下文，空上下文时看不到标题；已保留完整 hunk 行号，并修正修改行复选框对齐、长行水平滚动与完成后的按钮状态。修复后重跑 `GitPartialCommitTests` 两项通过，日志 `/tmp/rephub-advanced-partial-final.log`，属于上述 78 项的重复回归，不额外累计。
+
+原生验收使用独立应用标识 `com.zym.RepHub.advancedQA`、`/tmp/RepHub-Advanced-QA-ju4gvqbw/git-review` 与本机 `file://` SVN 的 `svn-review`。未操作正式业务仓库、远端或真实 AI 服务。
+
+1. 全历史搜索显示实际扫描数量，选中结果可进入正常提交详情与文件差异，不依赖主列表已加载范围。逐行追溯显示实际作者、日期、固定修订和已提交内容；修复行号间距、日期换行与居中问题后，重新核对左上对齐和 Java 高亮。
+2. 在原生局部提交面板中仅勾选 `count = 1 → 2` 的增删行；补丁预览不包含另一处 println 修改。实际本地提交为 `87c53678777326d4c57e2c0c4022cffea0b47275`，命令和工作区均确认未选 println 修改仍保留。没有推送。
+3. 对剩余 Demo.java 修改及未跟踪 `cache/session.tmp` 执行“保存并清理”，临时工作区变干净；点击恢复后，两项改动恢复，stash 记录仍在。仅操作本轮夹具。
+4. SVN 冲突面板分别显示基准 count 1、本地 count 2、传入 count 3；有冲突标记时保存禁用。选择“采用本地”后最终结果不含标记，保存返回“已解决”；随后 SVN status 为普通 M，文件内容为 count 2，工作副本仍为 r3，没有自动 SVN 提交。三栏读区在最终打包前补充左上滚动锚点，避免短文本居中；其异步高亮不随最终结果输入反复分词。
+
+最终 `scripts/build-app.sh` 和 `codesign --verify --deep --strict build/RepHub.app` 通过，日志 `/tmp/rephub-advanced-package-final.log`。AI 结构化结果与迁移提醒本轮为模型／服务测试，不宣称已在真实模型或远端旧 TLS SVN 上验证。搁置的 SVN 文本快照、二进制／树冲突和局部提交的边界按功能说明执行。

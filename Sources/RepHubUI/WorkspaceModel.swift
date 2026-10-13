@@ -62,6 +62,8 @@ public final class WorkspaceModel {
     /// 可选注入，保持旧的工作区读取与测试构造方式兼容。
     public let repositoryMigration: RepositoryMigrationModel?
     public let workingCopyMigration: WorkingCopyMigrationModel?
+    public let migrationMonitor: MigrationUpdateMonitor?
+    public private(set) var migrationStartsInWorkingCopy = false
     public var showsRepositoryManagement = false
     public var showsRepositorySetup = false
     public var showsRepositoryMigration = false
@@ -69,7 +71,16 @@ public final class WorkspaceModel {
     public var showsAIReview = false
     public let aiReview: AIRunModel?
 
-    private let service: RepositoryService
+    let service: RepositoryService
+    var toolRequest: WorkspaceToolRequest?
+    var toolIsBusy = false
+    public private(set) var inspectedRevision: Revision?
+    public private(set) var diffFocusLine: Int?
+    public private(set) var diffFocusToken: UUID?
+    public private(set) var workingCopyPresentationRequest = 0
+    private var reviewBindingID: String?
+    private var reviewRevisionID: String?
+
     /// 远程克隆／检出独立于已有工作副本的更新状态；认证信息仅在本次应用会话中使用。
     public let repositoryAcquisition: RepositoryAcquisitionModel
     /// 提交窗口拥有本次选择与结果；工作区只负责在完成后接收服务层已刷新的快照。
@@ -104,6 +115,7 @@ public final class WorkspaceModel {
         self.repositorySetup = RepositorySetupModel(service: service)
         self.repositoryMigration = migrationService.map(RepositoryMigrationModel.init(service:))
         self.workingCopyMigration = workingCopyMigrationService.map(WorkingCopyMigrationModel.init(service:))
+        self.migrationMonitor = workingCopyMigrationService.map { MigrationUpdateMonitor(service: $0) }
         self.repositoryAcquisition = RepositoryAcquisitionModel(service: service)
         if let aiSettings, let aiService {
             self.aiReview = AIRunModel(settings: aiSettings, service: aiService)
@@ -124,6 +136,8 @@ public final class WorkspaceModel {
             if let revision { return try await contexts.revision(in: binding, revision: revision, selectedPaths: selected) }
             return try await contexts.workingCopy(in: binding, selectedPaths: selected)
         }
+        reviewBindingID = binding.id
+        reviewRevisionID = revision
         showsAIReview = true
     }
 
@@ -139,9 +153,9 @@ public final class WorkspaceModel {
     public var isOperating: Bool {
         isOperationInProgress || repositoryAcquisition.isAcquiring || repositoryCommit.isBusy
             || repositoryManagement.isBusy || repositorySetup.isBusy || repositoryMigration?.isBusy == true
-            || workingCopyMigration?.isBusy == true
+            || workingCopyMigration?.isBusy == true || toolIsBusy
     }
-    public var isInteractionLocked: Bool { isOperating }
+    public var isInteractionLocked: Bool { isOperating || toolRequest != nil }
     /// SVN 可能只报告未跟踪目录；浏览其中的文件时也保留未跟踪语义。
     public var isUntrackedFilePreview: Bool {
         guard filePreview != nil, selectedRevisionID == nil, let selectedPath else { return false }
@@ -152,6 +166,87 @@ public final class WorkspaceModel {
     public var operationRefreshIssues: [String] {
         var seen = Set<String>()
         return ((workspace?.issues ?? []) + snapshots.values.flatMap(\.issues)).filter { seen.insert($0).inserted }
+    }
+
+    public func showFullHistorySearch() { showTool(.inspection) }
+    public func showBlame(path: String) { showTool(.inspection, path: path) }
+    public func showShelves() { showTool(.shelves) }
+    public func showConflictEditor(path: String) { showTool(.conflict, path: path) }
+    public func showPartialCommit(path: String) { showTool(.partialCommit, path: path) }
+    public func showIgnoreRule(path: String) { showTool(.ignore, path: path) }
+
+    private func showTool(_ kind: WorkspaceToolRequest.Kind, path: String? = nil) {
+        guard !isInteractionLocked, let binding = selectedBinding else { return }
+        cancelReading()
+        cancelHistoryPage()
+        toolRequest = WorkspaceToolRequest(kind: kind, binding: binding, path: path)
+    }
+
+    func dismissTool() {
+        guard !toolIsBusy else { return }
+        let writes = toolRequest?.kind != .inspection
+        toolRequest = nil
+        if writes { refreshWorkspace(allBindings: true) }
+    }
+
+    func showInspectionRevision(_ revision: Revision, binding: RepositoryBinding) {
+        guard !toolIsBusy, workspace?.bindings.contains(where: { $0.id == binding.id }) == true else { return }
+        toolRequest = nil
+        cancelHistoryPage()
+        clearFileHistoryState()
+        inspectedRevision = revision
+        historyReference = nil
+        selectedBindingID = binding.id
+        selectedRevisionID = revision.id
+        selectedPath = nil
+        diffFocusLine = nil
+        filePreview = nil
+        revisionFiles = []
+        patch = nil
+        isHistoryVisible = true
+        historyPresentationRequest += 1
+        start { [weak self] token in
+            guard let self else { return }
+            try await self.loadRevision(revision, binding: binding, token: token)
+        }
+    }
+
+    public func clearInspectedRevision() {
+        inspectedRevision = nil
+        refresh()
+    }
+
+    public func locateReviewFinding(_ finding: AIReviewFinding) {
+        guard let aiReview, aiReview.canLocate(finding), let binding = selectedBinding,
+              binding.id == reviewBindingID else { return }
+        showsAIReview = false
+        let revision = reviewRevisionID
+        selectedRevisionID = revision
+        selectedPath = finding.path
+        filePreview = nil
+        patch = nil
+        isHistoryVisible = revision != nil
+        if revision == nil { workingCopyPresentationRequest += 1 }
+        else { historyPresentationRequest += 1 }
+        start { [weak self] token in
+            guard let self else { return }
+            let contexts = RepositoryAIContextService(service: self.service)
+            let context = if let revision {
+                try await contexts.revision(in: binding, revision: revision, selectedPaths: aiReview.selectedPaths)
+            } else {
+                try await contexts.workingCopy(in: binding, selectedPaths: aiReview.selectedPaths)
+            }
+            guard self.accepts(token), context.snapshotID == aiReview.completedSnapshotID else {
+                aiReview.markStale()
+                self.errorMessage = "审查后代码已经改变，请重新审查再定位。"
+                return
+            }
+            let patch = try await self.service.diff(in: binding, path: finding.path, revision: revision)
+            guard self.accepts(token), self.selectedPath == finding.path else { return }
+            self.patch = patch
+            self.diffFocusLine = finding.newLine
+            self.diffFocusToken = UUID()
+        }
     }
 
     public func supports(_ operation: RepositoryOperationKind, for binding: RepositoryBinding) -> Bool {
@@ -221,12 +316,21 @@ public final class WorkspaceModel {
 
     public func showRepositoryMigration() {
         guard !isInteractionLocked, let migration = repositoryMigration else { return }
+        migrationStartsInWorkingCopy = false
         migration.reset()
         workingCopyMigration?.reset()
         if let svn = workspace?.bindings.first(where: { $0.providerID == .svn }), let remote = svn.remoteURL {
             migration.prefillSource(url: remote)
             workingCopyMigration?.prefill(directory: svn.root)
         }
+        showsRepositoryMigration = true
+    }
+
+    public func showMigrationSupplement(_ notice: MigrationSourceUpdate) {
+        guard !isInteractionLocked, let migration = repositoryMigration, let workingCopyMigration else { return }
+        migration.reset()
+        migrationStartsInWorkingCopy = true
+        workingCopyMigration.prefill(directory: notice.directory)
         showsRepositoryMigration = true
     }
 
@@ -305,6 +409,9 @@ public final class WorkspaceModel {
         cancelReading()
         invalidateReadingCache()
         monitor?.stop()
+        migrationMonitor?.stop()
+        inspectedRevision = nil
+        toolRequest = nil
         repositoryManagement.dismiss()
         repositorySetup.dismiss()
         repositoryCommit.reset()
@@ -326,7 +433,12 @@ public final class WorkspaceModel {
     }
 
     private func restartMonitoring() {
-        guard let workspace else { monitor?.stop(); return }
+        guard let workspace else { monitor?.stop(); migrationMonitor?.stop(); return }
+        migrationMonitor?.start(directories: workspace.bindings.map(\.root), canCheck: { [weak self] in
+            guard let self else { return false }
+            return NSApplication.shared.isActive && !self.isInteractionLocked && !self.isLoading
+                && !self.showsRepositoryManagement && !self.showsRepositoryMigration && !self.showsAIReview
+        })
         monitor?.start(workspace: workspace, shouldPoll: { [weak self] in
             guard let self else { return false }
             return NSApplication.shared.isActive && !self.isInteractionLocked && !self.isLoading
@@ -350,6 +462,7 @@ public final class WorkspaceModel {
         // 防止其迟到结果覆盖服务层已经核对并返回的新快照。
         cancelReading()
         errorMessage = nil
+        inspectedRevision = nil
         workspace = response.workspace
         snapshots = Dictionary(uniqueKeysWithValues: response.snapshots.map { ($0.binding.id, $0) })
         restartMonitoring()
@@ -463,6 +576,7 @@ public final class WorkspaceModel {
         guard !isInteractionLocked else { return }
         guard let priorBinding = selectedBinding, let previous = workspace else { return }
         cancelHistoryPage()
+        inspectedRevision = nil
         let revisionID = selectedRevisionID
         let reference = historyReference
         let filePath = historyFilePath
@@ -531,6 +645,7 @@ public final class WorkspaceModel {
 
     public func selectBinding(_ binding: RepositoryBinding) {
         guard !isInteractionLocked else { return }
+        inspectedRevision = nil
         guard selectedBindingID != binding.id else { return }
         invalidateReadingCache()
         fileBrowser.setRoot(binding.root)
@@ -549,6 +664,7 @@ public final class WorkspaceModel {
 
     public func selectChange(_ change: FileChange?) {
         guard !isInteractionLocked else { return }
+        diffFocusLine = nil
         saveReadingSelection()
         filePreview = nil
         selectedPath = change?.path
@@ -581,6 +697,7 @@ public final class WorkspaceModel {
     /// 显示某一文件的历史。调用方可传入已删除的历史路径；只有路径本身越界时会被拒绝。
     public func showFileHistory(path: String, reference: String? = nil) {
         guard !isInteractionLocked, let binding = selectedBinding else { return }
+        inspectedRevision = nil
         cancelHistoryPage()
         saveReadingSelection()
         filePreview = nil
@@ -689,6 +806,7 @@ public final class WorkspaceModel {
     /// 分支入口只改变历史查询范围，不改动当前工作副本。
     public func selectHistoryReference(_ reference: String?) {
         guard !isInteractionLocked else { return }
+        inspectedRevision = nil
         guard let binding = selectedBinding else { return }
         historyReference = reference
         historySelection = nil
@@ -710,6 +828,7 @@ public final class WorkspaceModel {
     /// 历史文件只缩小当前修订的差异范围，不改变已选修订或工作区状态列表。
     public func selectRevisionFile(_ change: FileChange?) {
         guard !isInteractionLocked else { return }
+        diffFocusLine = nil
         filePreview = nil
         selectedPath = change?.path
         patch = nil
@@ -740,10 +859,11 @@ public final class WorkspaceModel {
 
     /// 当前历史范围内可展示的提交；文件范围下保留适配器提供的重命名/peg 信息，选择时会回查对应条目。
     public var historyRevisions: [Revision] {
-        historyFilePath == nil ? (snapshot?.revisions ?? []) : historyFileEntries.map(\.revision)
+        if let inspectedRevision { return [inspectedRevision] }
+        return historyFilePath == nil ? (snapshot?.revisions ?? []) : historyFileEntries.map(\.revision)
     }
 
-    public var hasMoreHistory: Bool { nextHistoryCursor != nil }
+    public var hasMoreHistory: Bool { inspectedRevision == nil && nextHistoryCursor != nil }
 
     public func cancelLoadingMoreHistory() { cancelHistoryPage() }
 

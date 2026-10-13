@@ -167,10 +167,26 @@ struct WorkspaceFileTreeView: View {
         .contextMenu {
             if entry.isDirectory, let change {
                 Button("查看变更", systemImage: "rectangle.and.text.magnifyingglass") { model.selectChange(change) }
+                if change.kind == .untracked { Button("添加忽略规则…", systemImage: "eye.slash") { model.showIgnoreRule(path: change.path) } }
             }
             if !entry.isDirectory {
                 Button("查看文件历史", systemImage: "clock.arrow.circlepath") { model.showFileHistory(path: entry.path) }
+                fileTools(path: entry.path, change: change)
             }
+        }
+    }
+
+    @ViewBuilder private func fileTools(path: String, change: FileChange?) -> some View {
+        if change?.kind != .untracked {
+            Button("逐行追溯…", systemImage: "text.line.first.and.arrowtriangle.forward") { model.showBlame(path: path) }
+        }
+        if change?.kind == .conflicted {
+            Button("编辑并解决冲突…", systemImage: "arrow.triangle.merge") { model.showConflictEditor(path: path) }
+        } else if change?.kind == .modified && model.selectedBinding?.providerID == .git {
+            Button("按块／按行提交…", systemImage: "checklist") { model.showPartialCommit(path: path) }
+        }
+        if change?.kind == .untracked {
+            Button("添加忽略规则…", systemImage: "eye.slash") { model.showIgnoreRule(path: path) }
         }
     }
 
@@ -222,8 +238,10 @@ struct WorkspaceFileTreeView: View {
             .contextMenu {
                 if row.isDirectory, let change = row.change {
                     Button("查看变更", systemImage: "rectangle.and.text.magnifyingglass") { model.selectChange(change) }
+                if change.kind == .untracked { Button("添加忽略规则…", systemImage: "eye.slash") { model.showIgnoreRule(path: change.path) } }
                 } else if let change = row.change {
                     Button("查看文件历史", systemImage: "clock.arrow.circlepath") { model.showFileHistory(path: change.path) }
+                    fileTools(path: change.path, change: change)
                 }
             }
         }

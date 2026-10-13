@@ -14,6 +14,7 @@ struct RepositoryManagementView: View {
     @Environment(\.colorScheme) private var systemColorScheme
     let dismiss: () -> Void
     let completed: @MainActor @Sendable (WorkspaceManagementResult) -> Void
+    var editConflict: ((String) -> Void)? = nil
     @State private var tab: Tab = .actions
     @State private var selectedPaths = Set<String>()
     @State private var selectedConflicts = Set<String>()
@@ -226,7 +227,7 @@ struct RepositoryManagementView: View {
 
     private func conflictSection(_ context: RepositoryManagementContext) -> some View {
         section("冲突") {
-            Text("请先在外部编辑器中解决内容，再在此处标记为已解决。不会自动选择任一版本。")
+            Text("文本冲突可在内置编辑器中对比、编辑并保存；也可在外部处理后标记已解决。")
                 .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
             ForEach(context.conflicts) { conflict in
                 HStack(spacing: 7) {
@@ -234,7 +235,11 @@ struct RepositoryManagementView: View {
                         if selected { selectedConflicts.insert(conflict.path) } else { selectedConflicts.remove(conflict.path) }
                     }))
                     .toggleStyle(.checkbox).font(.system(size: 12)).disabled(!conflict.canMarkResolved)
-                    Button("打开") { openConflict(conflict.path) }
+                    if let editConflict {
+                        Button("编辑冲突") { editConflict(conflict.path) }
+                            .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary, compact: true))
+                    }
+                    Button("外部打开") { openConflict(conflict.path) }
                         .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
                 }
             }

@@ -16,9 +16,10 @@ struct RepositoryMigrationView: View {
     private enum Route: Hashable { case newDirectory, workingCopy }
 
     init(model: RepositoryMigrationModel, workingCopyModel: WorkingCopyMigrationModel? = nil,
-         palette: AppPalette, dismiss: @escaping () -> Void, openResult: @escaping (URL) -> Void) {
+         startsInWorkingCopy: Bool = false, palette: AppPalette, dismiss: @escaping () -> Void, openResult: @escaping (URL) -> Void) {
         self._model = Bindable(wrappedValue: model)
         self.workingCopyModel = workingCopyModel
+        self._route = State(initialValue: startsInWorkingCopy ? .workingCopy : .newDirectory)
         self.palette = palette
         self.dismiss = dismiss
         self.openResult = openResult
