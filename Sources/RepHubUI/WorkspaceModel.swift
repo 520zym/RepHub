@@ -273,10 +273,13 @@ public final class WorkspaceModel {
         repositoryAcquisition.prepare()
     }
 
-    public func prepareCommit(initialTargets: Set<String>, initialMessage: String) {
+    public func prepareCommit(initialTargets: Set<String>, initialMessage: String,
+                              initialPathsByBinding: [String: Set<String>]? = nil,
+                              initialMessages: [String: String]? = nil) {
         guard !isInteractionLocked, let workspace, !workspace.isUnmanaged else { return }
         cancelHistoryPage()
-        repositoryCommit.prepare(in: workspace, initialTargets: initialTargets, initialMessage: initialMessage)
+        repositoryCommit.prepare(in: workspace, initialTargets: initialTargets, initialMessage: initialMessage,
+                                 initialPathsByBinding: initialPathsByBinding, initialMessages: initialMessages)
     }
 
     public func prepareManagement() {

@@ -395,3 +395,17 @@ swift test --filter 'Inspection|ConflictEditing|Shelf|GitPartialCommit|Repositor
 4. SVN 冲突面板分别显示基准 count 1、本地 count 2、传入 count 3；有冲突标记时保存禁用。选择“采用本地”后最终结果不含标记，保存返回“已解决”；随后 SVN status 为普通 M，文件内容为 count 2，工作副本仍为 r3，没有自动 SVN 提交。三栏读区在最终打包前补充左上滚动锚点，避免短文本居中；其异步高亮不随最终结果输入反复分词。
 
 最终 `scripts/build-app.sh` 和 `codesign --verify --deep --strict build/RepHub.app` 通过，日志 `/tmp/rephub-advanced-package-final.log`。AI 结构化结果与迁移提醒本轮为模型／服务测试，不宣称已在真实模型或远端旧 TLS SVN 上验证。搁置的 SVN 文本快照、二进制／树冲突和局部提交的边界按功能说明执行。
+
+## 2026-10-13：工作区与历史分工调整
+
+工作区使用左文件勾选、中全高差异、右提交检查器；只表达当前状态，移除底部历史。冲突横幅就近进入现有三方编辑器。提交历史使用连续两行提交列表及 Git Graph，右侧摘要、可收起文件树和差异；单文件历史使用全页范围及并排差异。
+
+提交范围由真实工作副本根与相对路径关联：共管 Git/SVN 共享勾选意图，独立及嵌套根隔离；明确传入空范围不会回退为全选。SVN 未跟踪目录仅在预检确认后包含子项，已跟踪目录的属性变更不扩大为整个子树。AI 生成从预检中的已启用、非空目标开始，提交仍需确认。
+
+`swift test --filter 'WorkspaceCommitSelectionTests|RepositoryCommitModelTests|WorkspaceModelTests|HistoryPaginationModelTests|GitGraphLayoutTests|HistoryFilterTests'` 共 **60 项通过，0 失败、0 跳过**，日志 `/tmp/rephub-layout-tests.log`。包含选择边界 6 项、提交模型 11 项、工作区及关联模型 31 项、历史分页 6 项、图与筛选 6 项。不是全量回归。
+
+原生检查使用独立 `com.zym.RepHub.layoutQA` 应用、`RepHub-CommitFixture-be6ee2e2-d08b-4f3b-889c-8022804ab946` 共管夹具和 `RepHub-Management-QA-4l3n4lhs/git-conflict` 冲突夹具：验证 Git/SVN 单文件预选均为 1/5、草稿保留、TAB 往返、分支树展开、单文件历史及返回、冲突禁用与编辑入口、提交区 205pt 宽度及收起恢复、深色显示。验收没有实际提交、推送或保存冲突结果，没有操作正式仓库。截图和差异说明见[设计核对记录](../design-qa.md)。
+
+最终 `scripts/build-app.sh debug` 和 `codesign --verify --deep --strict build/RepHub.app` 通过，日志 `/tmp/rephub-workflow-package.log`。产物为 `build/RepHub.app`；不代表其他路径下的已安装副本已替换。
+
+最后复核补充修复了多绑定提交草稿：预检内 Git/SVN 各自填写的说明在关闭后分别保留；在右侧统一草稿中主动编辑才覆盖各目标。避免显式关闭和 sheet 的 onDismiss 二次回调清空已保存草稿。新增恢复测试后，`swift test --filter RepositoryCommitModelTests` **12/12 通过**，本轮合计 61 项不同测试（11 项为重复回归，不重复累计）。重新打包签名，并在最终 QA 应用中分别填写 Git/SVN 不同说明，关闭后再次进入，确认两份说明仍各自保留；随后取消并退出，没有执行提交。

@@ -5,7 +5,7 @@ import DesignSystem
 import RepositoryApplication
 import VersionControlCore
 
-/// 提交历史的三栏工作台。分支筛选只改变读取参考，不执行检出或切换工作副本。
+/// 提交历史阅读器。分支筛选只改变读取参考，不执行检出或切换工作副本。
 struct HistoryWorkspaceView: View {
     @Bindable var model: WorkspaceModel
     @Bindable var appearance: AppearanceStore
@@ -17,30 +17,19 @@ struct HistoryWorkspaceView: View {
 
     var body: some View {
         let palette = appearance.palette(for: appearance.preferredColorScheme ?? systemColorScheme)
-        Group {
-            if supportsBranches {
-                SoftHorizontalSplit(initialWidth: showAsMainView ? 220 : 190,
-                    minimumFixed: showAsMainView ? 110 : 100,
-                    flexibleMinimum: showAsMainView ? 260 : 180,
-                    storageKey: showAsMainView ? "history.main.branches" : "history.compact.branches") {
-                    HistoryBranchSidebar(
-                        snapshot: model.snapshot,
-                        selectedReference: model.historyReference,
-                        search: $branchSearch,
-                        palette: palette,
-                        isCompact: !showAsMainView,
-                        treeState: model.treeState,
-                        selectReference: model.selectHistoryReference
-                    )
-                } trailing: {
-                    historyContent(palette: palette)
-                }
-            } else {
-                historyContent(palette: palette)
+        VStack(spacing: 0) {
+            if let path = model.historyFilePath {
+                HistoryFileHistoryScopeBar(
+                    path: path,
+                    reference: model.historyFileReference,
+                    palette: palette,
+                    clear: model.clearFileHistory
+                )
             }
+            historyContent(palette: palette)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(palette.surface)
+        .background(palette.sidebar)
         .onAppear {
             if showAsMainView { model.setHistoryVisible(true) }
         }
@@ -61,29 +50,25 @@ struct HistoryWorkspaceView: View {
 
     @ViewBuilder
     private func historyContent(palette: AppPalette) -> some View {
-        if showAsMainView {
-            SoftVerticalSplit(fixedSide: .bottom, initialHeight: 390, minimumFixed: 120, flexibleMinimum: 180,
-                storageKey: "history.main.diff") {
-                SoftHorizontalSplit(fixedSide: .trailing, initialWidth: 286, minimumFixed: 120, flexibleMinimum: 220,
-                    storageKey: "history.main.inspector") {
-                    revisionTable(palette: palette)
-                } trailing: {
-                    HistoryRevisionInspector(model: model, palette: palette, isCompact: false)
-                }
-                .padding(.bottom, 3)
-            } bottom: {
-                DiffView(model: model, appearance: appearance, focusLine: model.diffFocusLine, focusToken: model.diffFocusToken)
-                    .padding(.top, 3)
-            }
-            .background(palette.background)
-        } else {
-            SoftHorizontalSplit(fixedSide: .trailing, initialWidth: 270, minimumFixed: 100, flexibleMinimum: 160,
-                storageKey: "history.compact.inspector") {
-                revisionTable(palette: palette)
-            } trailing: {
-                HistoryRevisionInspector(model: model, palette: palette, isCompact: true)
-            }
+        // 历史页面的主线是“选提交 → 看摘要及文件 → 阅读差异”。
+        // 分支树在左上按需展开，不能像仓库导航一样常驻并挤压提交列表。
+        SoftHorizontalSplit(
+            initialWidth: showAsMainView ? 430 : 360,
+            minimumFixed: 220,
+            flexibleMinimum: showAsMainView ? 420 : 280,
+            storageKey: showAsMainView ? "history.reader.revisions" : "history.compact.revisions"
+        ) {
+            revisionTable(palette: palette)
+        } trailing: {
+            HistoryReaderPane(
+                model: model,
+                appearance: appearance,
+                palette: palette,
+                isFileHistory: isFileHistory,
+                showAsMainView: showAsMainView
+            )
         }
+        .background(palette.background)
     }
 
     private var bindingSelection: Binding<String?> {
@@ -114,8 +99,8 @@ struct HistoryWorkspaceView: View {
             revisions: filteredRevisions,
             supportsGraph: supportsGraph,
             supportsBranches: supportsBranches,
-            fileHistoryPath: model.historyFilePath,
-            fileHistoryReference: model.historyFileReference,
+            snapshot: model.snapshot,
+            treeState: model.treeState,
             usesGitIdentifiers: model.selectedBinding?.providerID == .git,
             syncStatus: model.historySyncStatus,
             issues: (model.workspace?.issues ?? []) + model.historyIssues,
@@ -129,9 +114,9 @@ struct HistoryWorkspaceView: View {
             filter: $revisionFilter,
             selectedReference: model.historyReference,
             references: model.snapshot?.branches ?? [],
+            branchSearch: $branchSearch,
             selectReference: model.selectHistoryReference,
             chooseFileHistory: model.chooseFileHistory,
-            clearFileHistory: model.clearFileHistory,
             fullHistorySearch: model.showFullHistorySearch,
             drawsGraphConnections: !isFileHistory && revisionSearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !revisionFilter.isActive,
             loadedCount: model.historyRevisions.count,
@@ -150,6 +135,92 @@ struct HistoryWorkspaceView: View {
 
     private var filterScopeID: String {
         "\(model.workspace?.id ?? "")|\(model.selectedBindingID ?? "")"
+    }
+}
+
+/// 文件历史是整个历史页面的范围，而不是提交列表的一条局部提示。
+private struct HistoryFileHistoryScopeBar: View {
+    let path: String
+    let reference: String?
+    let palette: AppPalette
+    let clear: () -> Void
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Button(action: clear) {
+                Label("全部历史", systemImage: "chevron.left")
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
+            .help("关闭文件范围，返回仓库全部提交历史")
+
+            Image(systemName: "doc.text")
+                .foregroundStyle(palette.accent)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("文件历史")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(palette.secondaryText)
+                Text(path)
+                    .font(.system(size: 13, design: .monospaced))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            if let reference, !reference.isEmpty {
+                Text("截至 \(shortReference(reference))")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(palette.secondaryText)
+                    .lineLimit(1)
+                    .help("文件历史截至修订 \(reference)")
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 56)
+        .background(palette.selection.opacity(0.42))
+        .help(path)
+    }
+
+    private func shortReference(_ reference: String) -> String {
+        reference.count >= 40 && reference.allSatisfy(\.isHexDigit)
+            ? String(reference.prefix(10)) : reference
+    }
+}
+
+/// 右侧阅读区保持提交摘要、文件树和差异之间的连续关系。
+/// 文件树可以临时收起，纵向分栏则让每个人按自己的阅读习惯分配摘要与代码空间。
+private struct HistoryReaderPane: View {
+    @Bindable var model: WorkspaceModel
+    @Bindable var appearance: AppearanceStore
+    let palette: AppPalette
+    let isFileHistory: Bool
+    let showAsMainView: Bool
+    @State private var showsChangedFiles = true
+
+    var body: some View {
+        SoftVerticalSplit(
+            fixedSide: .top,
+            initialHeight: isFileHistory ? 156 : 310,
+            minimumFixed: isFileHistory ? 104 : 116,
+            flexibleMinimum: 170,
+            storageKey: (showAsMainView ? "history.reader.summary" : "history.compact.summary")
+                + (isFileHistory ? ".file" : ".repository")
+        ) {
+            HistoryRevisionInspector(
+                model: model,
+                palette: palette,
+                isCompact: false,
+                showsChangedFiles: $showsChangedFiles
+            )
+        } bottom: {
+            DiffView(
+                model: model,
+                appearance: appearance,
+                focusLine: model.diffFocusLine,
+                focusToken: model.diffFocusToken
+            )
+            .background(palette.background)
+        }
+        .id(isFileHistory)
     }
 }
 
@@ -184,7 +255,9 @@ private struct HistoryBranchSidebar: View {
                 }
                 .padding(10)
             }
-            Spacer(minLength: 0)
+            if !isCompact {
+                Spacer(minLength: 0)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(palette.sidebar)
@@ -347,8 +420,8 @@ private struct HistoryRevisionTable: View {
     let revisions: [Revision]
     let supportsGraph: Bool
     let supportsBranches: Bool
-    let fileHistoryPath: String?
-    let fileHistoryReference: String?
+    let snapshot: BindingSnapshot?
+    @Bindable var treeState: WorkspaceTreeState
     let usesGitIdentifiers: Bool
     let syncStatus: RepositorySyncStatus?
     let issues: [String]
@@ -359,9 +432,9 @@ private struct HistoryRevisionTable: View {
     @Binding var filter: HistoryFilter
     let selectedReference: String?
     let references: [BranchReference]
+    @Binding var branchSearch: String
     let selectReference: (String?) -> Void
     let chooseFileHistory: () -> Void
-    let clearFileHistory: () -> Void
     let fullHistorySearch: () -> Void
     let drawsGraphConnections: Bool
     let loadedCount: Int
@@ -375,61 +448,78 @@ private struct HistoryRevisionTable: View {
 
     @State private var isNearHistoryEnd = false
     @State private var isFilterPopoverPresented = false
+    @State private var isBranchNavigatorExpanded = false
 
     var body: some View {
         GeometryReader { proxy in
-            let showDate = proxy.size.width >= 610
-            let showAuthor = proxy.size.width >= 500
-            let showHash = proxy.size.width >= 405
             let graphRows = supportsGraph ? GitGraphLayout.rows(for: revisions) : []
             let graphWidth = supportsGraph ? max(26, CGFloat(graphRows.map(\.laneCount).max() ?? 1) * 11 + 3) : 0
             VStack(spacing: 0) {
-                HStack(spacing: 10) {
-                    bindingSource
-                    WorkbenchSearchField("搜索已加载的提交、作者、版本号…", text: $search, palette: palette)
-                    Button(action: fullHistorySearch) {
-                        Label("全历史搜索", systemImage: "text.magnifyingglass")
-                    }
-                    .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
-                    .help("搜索尚未加载的历史记录，可按作者、日期和文件路径筛选")
-                    filterControl
-                    if supportsBranches {
-                        Menu {
-                            Button("所有分支") { selectReference(nil) }
-                            if !references.isEmpty { Divider() }
-                            ForEach(references) { reference in
-                                Button(reference.name) { selectReference(reference.name) }
+                VStack(spacing: 7) {
+                    HStack(spacing: 8) {
+                        bindingSource
+                        if supportsBranches {
+                            Button {
+                                isBranchNavigatorExpanded.toggle()
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "arrow.triangle.branch")
+                                    Text(selectedReference ?? "所有分支").lineLimit(1).truncationMode(.middle)
+                                    Image(systemName: isBranchNavigatorExpanded ? "chevron.up" : "chevron.down")
+                                        .font(.system(size: 9, weight: .semibold))
+                                }
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(selectedReference == nil ? palette.secondaryText : palette.accent)
+                                .padding(.horizontal, 8).frame(height: 27)
+                                .background(selectedReference == nil ? .clear : palette.selection.opacity(0.6), in: RoundedRectangle(cornerRadius: 7))
                             }
-                        } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: "arrow.triangle.branch")
-                                Text(selectedReference ?? "所有分支").lineLimit(1).truncationMode(.middle)
-                            }
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(selectedReference == nil ? palette.secondaryText : palette.accent)
-                            .padding(.horizontal, 8).frame(height: 30)
-                            .background(selectedReference == nil ? .clear : palette.selection.opacity(0.6), in: RoundedRectangle(cornerRadius: 7))
+                            .buttonStyle(.plain)
+                            .frame(maxWidth: 154)
+                            .help("展开分支和标签树；筛选历史范围不会切换工作副本分支")
                         }
-                        .menuStyle(.borderlessButton).menuIndicator(.visible)
-                        .frame(width: 132)
-                        .help("筛选历史范围，不会切换工作副本分支")
+                        Spacer(minLength: 0)
+                        Button(action: fullHistorySearch) {
+                            Label("全历史搜索", systemImage: "text.magnifyingglass").labelStyle(.iconOnly)
+                        }
+                        .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
+                        .accessibilityLabel("全历史搜索")
+                        .help("搜索尚未加载的历史记录，可按作者、日期和文件路径筛选")
+                        Button(action: chooseFileHistory) {
+                            Label("文件历史", systemImage: "doc.text.magnifyingglass").labelStyle(.iconOnly)
+                        }
+                        .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
+                        .accessibilityLabel("选择文件查看历史")
+                        .help("选择当前工作区中的一个文件，查看其提交历史")
                     }
-                    Button(action: chooseFileHistory) {
-                        Label("文件历史", systemImage: "doc.text.magnifyingglass").labelStyle(.iconOnly)
+                    HStack(spacing: 8) {
+                        WorkbenchSearchField("搜索已加载的提交、作者、版本号…", text: $search, palette: palette)
+                        filterControl
                     }
-                    .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
-                    .accessibilityLabel("选择文件查看历史")
-                    .help("选择当前工作区中的一个文件，查看其提交历史")
                 }
-                .padding(.horizontal, 14).frame(height: 48).background(palette.surface)
-                if let fileHistoryPath {
-                    fileHistoryScope(path: fileHistoryPath, reference: fileHistoryReference)
+                .padding(.horizontal, 14).padding(.vertical, 9).background(palette.surface)
+                if supportsBranches, isBranchNavigatorExpanded {
+                    HistoryBranchSidebar(
+                        snapshot: snapshot,
+                        selectedReference: selectedReference,
+                        search: $branchSearch,
+                        palette: palette,
+                        isCompact: true,
+                        treeState: treeState,
+                        selectReference: { reference in
+                            selectReference(reference)
+                            isBranchNavigatorExpanded = false
+                        }
+                    )
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 228)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 8)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
                 }
                 if let syncStatus {
                     syncSummary(syncStatus)
                 }
-                tableHeader(graphWidth: graphWidth, showAuthor: showAuthor, showDate: showDate, showHash: showHash)
-                    .background(palette.secondaryText.opacity(0.045))
                 if revisions.isEmpty {
                     VStack(spacing: 6) {
                         Image(systemName: issues.isEmpty ? "clock.arrow.circlepath" : "exclamationmark.triangle")
@@ -447,22 +537,40 @@ private struct HistoryRevisionTable: View {
                     List(selection: $selectedRevisionID) {
                         ForEach(Array(revisions.enumerated()), id: \.element.id) { index, revision in
                             HStack(spacing: 8) {
-                                if supportsGraph { HistoryGraphCell(row: graphRows[index], accent: palette.accent, width: graphWidth, drawsConnections: drawsGraphConnections) }
-                                HStack(spacing: 6) {
-                                    Text(revision.subject).lineLimit(1).layoutPriority(2)
-                                    if let state = syncStatus?.states[revision.id], state != .synchronized {
-                                        RevisionSyncBadge(state: state, palette: palette)
+                                if supportsGraph {
+                                    HistoryGraphCell(
+                                        row: graphRows[index],
+                                        accent: palette.accent,
+                                        width: graphWidth,
+                                        height: 56,
+                                        drawsConnections: drawsGraphConnections
+                                    )
+                                }
+                                VStack(alignment: .leading, spacing: 5) {
+                                    HStack(spacing: 6) {
+                                        Text(revision.subject)
+                                            .font(.system(size: 14, weight: .medium))
+                                            .lineLimit(1)
+                                            .layoutPriority(2)
+                                        if let state = syncStatus?.states[revision.id], state != .synchronized {
+                                            RevisionSyncBadge(state: state, palette: palette)
+                                        }
                                     }
+                                    HStack(spacing: 5) {
+                                        Text(revision.author).lineLimit(1)
+                                        Text("·")
+                                        Text(revision.date.formatted(date: .numeric, time: .shortened)).lineLimit(1)
+                                        Text("·")
+                                        Text(revision.shortID).font(.system(size: 11, design: .monospaced))
+                                    }
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(palette.secondaryText)
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                if showAuthor { Text(revision.author).lineLimit(1).frame(width: 92, alignment: .leading) }
-                                if showDate { Text(revision.date.formatted(date: .numeric, time: .shortened)).lineLimit(1).frame(width: 126, alignment: .leading) }
-                                if showHash { Text(revision.shortID).font(.system(.caption, design: .monospaced)).foregroundStyle(palette.secondaryText).frame(width: 70, alignment: .leading) }
                             }
-                            .font(.callout)
                             .tag(Optional(revision.id))
                             .contentShape(Rectangle())
-                            .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
+                            .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 12))
                             .listRowSeparator(.hidden)
                             .listRowBackground(Color.clear)
                             .contextMenu {
@@ -484,13 +592,15 @@ private struct HistoryRevisionTable: View {
                     }
                     .listStyle(.plain)
                     .scrollContentBackground(.hidden)
+                    .background(palette.sidebar)
                 }
                 paginationFooter
             }
             .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
+            .animation(.easeInOut(duration: 0.18), value: isBranchNavigatorExpanded)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(palette.surface)
+        .background(palette.sidebar)
     }
 
     private func loadMoreIfNearEnd() {
@@ -552,41 +662,6 @@ private struct HistoryRevisionTable: View {
         NSPasteboard.general.setString(revisionID, forType: .string)
     }
 
-    private func fileHistoryScope(path: String, reference: String?) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: "doc.text")
-                .foregroundStyle(palette.accent)
-            Text("文件历史")
-                .font(.caption.weight(.semibold))
-            Text(path)
-                .font(.system(.caption, design: .monospaced))
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .foregroundStyle(palette.secondaryText)
-            if let reference, !reference.isEmpty {
-                Text("截至 \(shortReference(reference))")
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(palette.secondaryText)
-                    .lineLimit(1)
-                    .help("文件历史截至修订 \(reference)")
-            }
-            Spacer(minLength: 6)
-            Button("显示全部历史", action: clearFileHistory)
-                .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
-                .help("关闭文件历史范围，返回仓库提交历史")
-        }
-        .padding(.horizontal, 14)
-        .frame(height: 31)
-        .background(palette.selection.opacity(0.42))
-        .help(path)
-    }
-
-    private func shortReference(_ reference: String) -> String {
-        // 只缩写完整提交哈希；分支名和标签保留原文，交由布局自然省略。
-        reference.count >= 40 && reference.allSatisfy(\.isHexDigit)
-            ? String(reference.prefix(10)) : reference
-    }
-
     private func syncSummary(_ status: RepositorySyncStatus) -> some View {
         HStack(spacing: 7) {
             Image(systemName: syncSymbol(for: status))
@@ -633,17 +708,6 @@ private struct HistoryRevisionTable: View {
         }
     }
 
-    private func tableHeader(graphWidth: CGFloat, showAuthor: Bool, showDate: Bool, showHash: Bool) -> some View {
-        HStack(spacing: 8) {
-            if supportsGraph { Text("图").frame(width: graphWidth) }
-            Text("提交说明").frame(maxWidth: .infinity, alignment: .leading)
-            if showAuthor { Text("作者").frame(width: 92, alignment: .leading) }
-            if showDate { Text("日期").frame(width: 126, alignment: .leading) }
-            if showHash { Text(usesGitIdentifiers ? "哈希" : "修订号").frame(width: 70, alignment: .leading) }
-        }
-        .font(.caption.weight(.semibold)).foregroundStyle(palette.secondaryText)
-        .padding(.horizontal, 10).padding(.vertical, 7)
-    }
 }
 
 private struct HistoryFilterPopover: View {
@@ -708,6 +772,7 @@ private struct HistoryRevisionInspector: View {
     @Bindable var model: WorkspaceModel
     let palette: AppPalette
     let isCompact: Bool
+    @Binding var showsChangedFiles: Bool
     @State private var issueDetailsExpanded = false
     @State private var messageDetailsExpanded = false
     @State private var revisionTree: [PathTreeNode<FileChange>] = []
@@ -718,54 +783,59 @@ private struct HistoryRevisionInspector: View {
                 HistoryIssueNotice(message: issues.joined(separator: "\n"), palette: palette, isExpanded: $issueDetailsExpanded)
             }
             if let revision = selectedRevision {
-                Text(revision.subject).font(.headline).lineLimit(isCompact ? 2 : 3)
+                HStack(alignment: .top, spacing: 12) {
+                    Text(revision.subject)
+                        .font(.system(size: 18, weight: .semibold))
+                        .lineLimit(isCompact ? 2 : 3)
+                        .layoutPriority(1)
+                    Spacer(minLength: 0)
+                    revisionActions(revision)
+                }
                 referenceLabels(revision.references)
-                HStack(spacing: 8) {
-                    Text(revision.shortID).font(.system(.caption, design: .monospaced)).foregroundStyle(palette.accent)
-                    Text(revision.author).lineLimit(1).font(.caption).foregroundStyle(palette.secondaryText)
-                    if let state = model.historySyncStatus?.states[revision.id], state != .synchronized {
-                        Label(state.title, systemImage: syncSymbol(for: state))
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(state == .uncertain ? palette.secondaryText : palette.accent)
-                            .help(syncHelp(for: state))
-                    }
-                }
-                .contextMenu {
-                    Button("复制完整修订号") { copyRevisionID(revision.id) }
-                }
-                if !isCompact {
-                    Label(revision.date.formatted(date: .abbreviated, time: .shortened), systemImage: "calendar")
-                        .font(.caption).foregroundStyle(palette.secondaryText)
-                    if !messageBody.isEmpty {
-                        DisclosureGroup(isExpanded: $messageDetailsExpanded) {
-                            ScrollView {
-                                Text(messageBody).font(.callout).textSelection(.enabled)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                            .frame(maxHeight: 88)
-                        } label: {
-                            Text(messageBody).font(.callout).lineLimit(2)
+                revisionMetadata(revision)
+                if !messageBody.isEmpty {
+                    DisclosureGroup(isExpanded: $messageDetailsExpanded) {
+                        ScrollView {
+                            Text(messageBody).font(.callout).textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        .tint(palette.accent)
+                        .frame(maxHeight: 88)
+                    } label: {
+                        HStack(spacing: 7) {
+                            Text("提交说明").font(.system(size: 12, weight: .medium))
+                            Text(messageBody).font(.system(size: 12)).foregroundStyle(palette.secondaryText).lineLimit(1)
+                        }
                     }
-                    Button { model.showAIReview(revision: revision.id) } label: { Label("审查此提交", systemImage: "sparkles") }
-                        .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
-                        .disabled(model.aiReview == nil || model.isInteractionLocked).help("选择文件并审查此提交的差异")
-                    if model.selectedBinding?.capabilities.contains(.revisionComparison) == true {
-                        Button { model.prepareComparison(revision: revision) } label: { Label("比较版本", systemImage: "arrow.left.arrow.right") }
-                            .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
-                            .disabled(model.isInteractionLocked)
-                            .help("打开版本比较并选择两个固定修订")
+                    .tint(palette.accent)
+                }
+                if model.historyFilePath == nil {
+                    HStack {
+                        Text("变更的文件  \(model.revisionFiles.count)")
+                            .font(.subheadline.weight(.semibold))
+                        Spacer()
+                        Button {
+                            showsChangedFiles.toggle()
+                        } label: {
+                            Label(showsChangedFiles ? "收起文件" : "展开文件", systemImage: showsChangedFiles ? "chevron.up" : "chevron.down")
+                                .labelStyle(.iconOnly)
+                        }
+                        .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
+                        .accessibilityLabel(showsChangedFiles ? "收起变更文件" : "展开变更文件")
+                        .help(showsChangedFiles ? "收起变更文件树，为代码差异留出更多空间" : "展开变更文件树")
+                        if showsChangedFiles {
+                            TreeExpansionControls(directoryIDs: revisionTree.flatMap(\.directoryIDs), collapsed: revisionCollapsed, palette: palette)
+                        }
+                    }
+                    .padding(.top, 2)
+                    if showsChangedFiles {
+                        revisionFiles
+                    } else {
+                        Text("已收起 \(model.revisionFiles.count) 个变更文件")
+                            .font(.caption)
+                            .foregroundStyle(palette.secondaryText)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-                HStack {
-                    Text(model.historyFilePath == nil ? "变更的文件  \(model.revisionFiles.count)" : "历史文件")
-                        .font(.subheadline.weight(.semibold))
-                    Spacer()
-                    TreeExpansionControls(directoryIDs: revisionTree.flatMap(\.directoryIDs), collapsed: revisionCollapsed, palette: palette)
-                }
-                .padding(.top, 8)
-                revisionFiles
             } else {
                 ContentUnavailableView("选择一个提交", systemImage: "arrowshape.turn.up.right")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -789,6 +859,75 @@ private struct HistoryRevisionInspector: View {
     private var messageBody: String {
         guard let revision = selectedRevision else { return "" }
         return revision.message.components(separatedBy: .newlines).dropFirst().joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @ViewBuilder
+    private func revisionActions(_ revision: Revision) -> some View {
+        HStack(spacing: 6) {
+            Button { model.showAIReview(revision: revision.id) } label: {
+                Label("AI 审查", systemImage: "sparkles")
+            }
+            .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
+            .disabled(model.aiReview == nil || model.isInteractionLocked)
+            .help("选择文件并审查此提交的差异")
+            if model.selectedBinding?.capabilities.contains(.revisionComparison) == true {
+                Button { model.prepareComparison(revision: revision) } label: {
+                    Label("比较版本", systemImage: "arrow.left.arrow.right")
+                }
+                .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
+                .disabled(model.isInteractionLocked)
+                .help("打开版本比较并选择两个固定修订")
+            }
+        }
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    @ViewBuilder
+    private func revisionMetadata(_ revision: Revision) -> some View {
+        let hash = Text(revision.shortID)
+            .font(.system(size: 12, design: .monospaced))
+            .foregroundStyle(palette.accent)
+        let author = Text(revision.author).lineLimit(1)
+        let date = Text(revision.date.formatted(date: .abbreviated, time: .shortened)).lineLimit(1)
+        let state = model.historySyncStatus?.states[revision.id]
+
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 6) {
+                hash
+                Text("·")
+                author
+                Text("·")
+                date
+                syncStateLabel(state)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    hash
+                    Text("·")
+                    author
+                    syncStateLabel(state)
+                }
+                HStack(spacing: 5) {
+                    Image(systemName: "calendar")
+                    date
+                }
+            }
+        }
+        .font(.system(size: 12))
+        .foregroundStyle(palette.secondaryText)
+        .contextMenu {
+            Button("复制完整修订号") { copyRevisionID(revision.id) }
+        }
+    }
+
+    @ViewBuilder
+    private func syncStateLabel(_ state: RevisionSyncState?) -> some View {
+        if let state, state != .synchronized {
+            Label(state.title, systemImage: syncSymbol(for: state))
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(state == .uncertain ? palette.secondaryText : palette.accent)
+                .help(syncHelp(for: state))
+        }
     }
 
     private func syncSymbol(for state: RevisionSyncState) -> String {
@@ -1069,6 +1208,7 @@ private struct HistoryGraphCell: View {
     let row: GitGraphLayout.Row
     let accent: Color
     let width: CGFloat
+    let height: CGFloat
     let drawsConnections: Bool
     var body: some View {
         Canvas { context, size in
@@ -1090,7 +1230,7 @@ private struct HistoryGraphCell: View {
             } }
             context.fill(Path(ellipseIn: CGRect(x: centerX - 3.5, y: size.height / 2 - 3.5, width: 7, height: 7)), with: .color(color(for: row.currentLane)))
         }
-        .frame(width: width, height: 30)
+        .frame(width: width, height: height)
     }
 
     private func color(for lane: Int) -> Color {

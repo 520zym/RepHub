@@ -8,14 +8,16 @@ public struct WorkspaceView: View {
     @Bindable private var appearance: AppearanceStore
     @Environment(\.colorScheme) private var systemColorScheme
     @State private var section: WorkspaceSection = .workingCopy
-    @State private var historyExpanded = true
+    @State private var showsCommitInspector = true
+    @State private var commitSelection = WorkspaceCommitSelection()
     @State private var commitMessage = ""
+    @State private var commitMessagesByBinding: [String: String] = [:]
     @State private var commitTargets: Set<String> = []
     @State private var showsOperationSheet = false
     @State private var showsCommitSheet = false
+    @State private var startsCommitWithAI = false
     @State private var migrationResultToOpen: URL?
     @State private var conflictToOpen: String?
-    @FocusState private var commitMessageFocused: Bool
 
     public init(model: WorkspaceModel, appearance: AppearanceStore) {
         self.model = model
@@ -52,9 +54,14 @@ public struct WorkspaceView: View {
             model.setHistoryVisible(value == .history)
         }
         .onChange(of: model.workspace?.id) { _, _ in
-            commitTargets = Set(model.workspace?.bindings.map(\.id) ?? [])
+            commitTargets = Set(commitBindings.map(\.id))
+            commitSelection = WorkspaceCommitSelection()
             commitMessage = ""
+            commitMessagesByBinding = [:]
+            model.fileBrowser.mode = .changes
+            reconcileCommitSelection()
         }
+        .onChange(of: commitSelectionSignature) { _, _ in reconcileCommitSelection() }
         .onChange(of: model.workingCopyPresentationRequest) { _, _ in
             section = .workingCopy
             model.setHistoryVisible(false)
@@ -71,6 +78,7 @@ public struct WorkspaceView: View {
             .interactiveDismissDisabled(model.isOperationInProgress)
         }
         .sheet(isPresented: $showsCommitSheet, onDismiss: {
+            preserveCommitDraft()
             if !model.repositoryCommit.isBusy { model.repositoryCommit.dismiss() }
         }) {
             RepositoryCommitView(
@@ -80,15 +88,18 @@ public struct WorkspaceView: View {
                 workspace: model.workspace,
                 dismiss: {
                     guard !model.repositoryCommit.isBusy else { return }
+                    preserveCommitDraft()
                     model.repositoryCommit.dismiss()
                     showsCommitSheet = false
                 },
                 committed: model.applyCommitResponse,
                 viewHistory: { bindingID, revisionID in
+                    preserveCommitDraft()
                     model.repositoryCommit.dismiss()
                     showsCommitSheet = false
                     model.showCommittedRevision(bindingID: bindingID, revisionID: revisionID)
-                }
+                },
+                startsWithAI: startsCommitWithAI
             )
         }
         .sheet(isPresented: $model.showsRepositoryAcquisition) {
@@ -172,39 +183,59 @@ public struct WorkspaceView: View {
     }
 
     private func workingCopy(size: CGSize, palette: AppPalette) -> some View {
-        let inset: CGFloat = 8
-        let initialHistoryHeight = min(290, max(210, size.height * 0.32))
-        return Group {
-            if historyExpanded {
-                SoftVerticalSplit(fixedSide: .bottom, initialHeight: initialHistoryHeight, minimumFixed: 120, flexibleMinimum: 180,
-                    storageKey: "workspace.history") {
-                    workingCopyEditor(palette: palette, showsBindingPicker: false)
-                        .padding(.bottom, inset / 2)
-                } bottom: {
-                    HistoryWorkspaceView(model: model, appearance: appearance, showAsMainView: false)
-                        .padding(.top, inset / 2)
-                }
-            } else {
-                workingCopyEditor(palette: palette, showsBindingPicker: true)
-            }
+        VStack(spacing: 10) {
+            if !currentConflicts.isEmpty { conflictBanner(palette: palette) }
+            workingCopyEditor(palette: palette)
         }
-        .padding(inset)
+        .padding(10)
         .frame(width: size.width, height: size.height, alignment: .topLeading)
     }
 
-    private func workingCopyEditor(palette: AppPalette, showsBindingPicker: Bool) -> some View {
-        SoftHorizontalSplit(initialWidth: 240, minimumFixed: 110, flexibleMinimum: 200,
-            storageKey: "workspace.files") {
-            WorkspaceFileTreeView(model: model, palette: palette, showsBindingPicker: showsBindingPicker)
+    private func workingCopyEditor(palette: AppPalette) -> some View {
+        SoftHorizontalSplit(initialWidth: 280, minimumFixed: 120, flexibleMinimum: 360,
+            storageKey: "workspace.current.files") {
+            WorkspaceFileTreeView(model: model, palette: palette, showsBindingPicker: true,
+                                  selectedChangePaths: selectedChangePaths)
+                .clipShape(RoundedRectangle(cornerRadius: 9))
+                .padding(.trailing, 5)
         } trailing: {
-            VStack(spacing: 0) {
-                DiffView(model: model, appearance: appearance, focusLine: model.diffFocusLine, focusToken: model.diffFocusToken)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                commitBar(palette: palette)
+            if showsCommitInspector {
+                SoftHorizontalSplit(fixedSide: .trailing, initialWidth: 292, minimumFixed: 170, flexibleMinimum: 280,
+                                    storageKey: "workspace.current.commit") {
+                    workingDiff.padding(.horizontal, 5)
+                } trailing: {
+                    WorkspaceCommitInspector(palette: palette, bindings: commitBindings,
+                        message: unifiedCommitMessage, targets: $commitTargets, selectedCount: selectedCommitCount,
+                        blockedReason: commitBlockedReason, aiAvailable: model.repositoryCommit.ai != nil,
+                        isLocked: model.isInteractionLocked, collapse: { showsCommitInspector = false },
+                        prepare: { prepareSelectedCommit() }, prepareAI: { prepareSelectedCommit(withAI: true) })
+                        .clipShape(RoundedRectangle(cornerRadius: 9)).padding(.leading, 5)
+                }
+            } else {
+                workingDiff.padding(.leading, 5)
             }
         }
-        .background(palette.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 9))
+    }
+
+    private var workingDiff: some View {
+        DiffView(model: model, appearance: appearance, focusLine: model.diffFocusLine, focusToken: model.diffFocusToken)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipShape(RoundedRectangle(cornerRadius: 9))
+    }
+
+    private func conflictBanner(palette: AppPalette) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 19)).foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("当前工作区有 \(currentConflicts.count) 个冲突").font(.system(size: 13, weight: .semibold))
+                Text("处理后可继续提交此来源的变更。").font(.system(size: 12)).foregroundStyle(palette.secondaryText)
+            }
+            Spacer(minLength: 0)
+            Button("解决冲突", action: resolveCurrentConflict)
+                .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary))
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10)
+        .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
     }
 
     @ToolbarContentBuilder private func toolbar(palette: AppPalette) -> some ToolbarContent {
@@ -305,26 +336,30 @@ public struct WorkspaceView: View {
                     .accessibilityLabel("刷新")
                     .disabled(model.selectedBinding == nil || model.isLoading || model.isInteractionLocked).help("刷新仓库 · ⌘R")
                 Button { showsOperationSheet = true } label: {
-                    Label("更新", systemImage: "arrow.triangle.2.circlepath").labelStyle(.titleAndIcon)
+                    Label(model.selectedBinding?.capabilities.contains(.push) == true ? "拉取" : "更新", systemImage: "arrow.down.to.line").labelStyle(.titleAndIcon)
                 }
                 .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary, compact: true))
                 .accessibilityLabel("更新工作区")
                 .disabled(model.workspace?.bindings.contains(where: { model.supports(.fetch, for: $0) || model.supports(.update, for: $0) }) != true || model.isInteractionLocked)
                 .help("获取远端或更新一个版本控制来源")
+                if model.selectedBinding?.capabilities.contains(.push) == true {
+                    Button(action: model.prepareManagement) { Label("推送", systemImage: "arrow.up.to.line") }
+                        .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
+                        .disabled(model.isInteractionLocked)
+                        .help("查看远端与目标分支，确认后推送")
+                }
                 Button { model.prepareManagement() } label: {
-                    Label("管理仓库", systemImage: "slider.horizontal.3").labelStyle(.iconOnly)
+                    Label("管理仓库", systemImage: "ellipsis").labelStyle(.iconOnly)
                 }
                 .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
                 .accessibilityLabel("管理仓库")
                 .disabled(model.selectedBinding == nil || model.isInteractionLocked)
                 .help("推送、分支、暂存、冲突与版本比较")
-                if section == .workingCopy {
-                    Button { historyExpanded.toggle() } label: {
-                        Label(historyExpanded ? "收起历史" : "显示历史", systemImage: "rectangle.bottomthird.inset.filled").labelStyle(.iconOnly)
+                if section == .workingCopy && !showsCommitInspector {
+                    Button { showsCommitInspector = true } label: {
+                        Label("准备提交", systemImage: "sidebar.right")
                     }
-                    .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
-                    .accessibilityLabel(historyExpanded ? "收起历史" : "显示历史")
-                    .help(historyExpanded ? "收起底部提交历史" : "显示底部提交历史")
+                    .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary, compact: true))
                     .disabled(model.isInteractionLocked)
                 }
                 Button { model.showAIReview(revision: section == .history ? model.selectedRevisionID : nil) } label: { Label("AI 审查", systemImage: "sparkles").labelStyle(.titleAndIcon) }
@@ -337,69 +372,89 @@ public struct WorkspaceView: View {
         .sharedBackgroundVisibility(.hidden)
     }
 
-    private func commitBar(palette: AppPalette) -> some View {
-        HStack(spacing: 12) {
-            TextField("提交说明…", text: $commitMessage)
-                .textFieldStyle(.plain).font(.system(size: 13))
-                .focused($commitMessageFocused)
-                .padding(.horizontal, 11).frame(height: 30)
-                .background(palette.surface, in: RoundedRectangle(cornerRadius: 7))
-                .overlay {
-                    if commitMessageFocused { RoundedRectangle(cornerRadius: 7).stroke(palette.accent.opacity(0.85), lineWidth: 1) }
-                }
-            commitTargetSelector
-            Button {
-                model.prepareCommit(initialTargets: commitTargets, initialMessage: commitMessage)
-                showsCommitSheet = true
-            } label: { Label("AI 生成", systemImage: "sparkles") }
-                .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
-                .disabled(model.repositoryCommit.ai == nil || model.isInteractionLocked || !hasCommitTarget)
-                .help("先选择实际提交文件，再为每个目标生成说明")
-            Button("提交") {
-                model.prepareCommit(initialTargets: commitTargets, initialMessage: commitMessage)
-                showsCommitSheet = true
-            }
-            .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
-            .disabled(model.isInteractionLocked || !hasCommitTarget)
-            .help(hasCommitTarget ? "选择提交文件并确认每个目标的说明" : "当前工作区没有支持提交的版本控制来源")
+    private var commitBindings: [RepositoryBinding] {
+        (model.workspace?.bindings ?? []).filter { $0.capabilities.contains(.commit) }
+    }
+
+    private var selectedChangePaths: Binding<Set<String>> {
+        Binding(get: {
+            guard let binding = model.selectedBinding else { return [] }
+            return commitSelection.paths(in: binding)
+        }, set: { paths in
+            guard let binding = model.selectedBinding else { return }
+            commitSelection.setPaths(paths, in: binding)
+        })
+    }
+
+    /// 工作区右侧只有一份“统一草稿”。用户在这里主动编辑时，明确以新内容覆盖各目标保留的独立草稿。
+    private var unifiedCommitMessage: Binding<String> {
+        Binding(get: { commitMessage }, set: { value in
+            commitMessage = value
+            commitMessagesByBinding = Dictionary(uniqueKeysWithValues: commitBindings.map { ($0.id, value) })
+        })
+    }
+
+    private var selectedCommitCount: Int {
+        commitSelection.count(in: commitBindings.filter { commitTargets.contains($0.id) })
+    }
+
+    private var currentConflicts: [FileChange] {
+        model.snapshot?.changes.filter { $0.kind == .conflicted } ?? []
+    }
+
+    private var commitBlockedReason: String? {
+        let conflicts = commitBindings.filter { commitTargets.contains($0.id) }.reduce(0) { count, binding in
+            count + (model.snapshots[binding.id]?.changes.filter { $0.kind == .conflicted }.count ?? 0)
         }
-        .padding(.horizontal, 12).frame(height: 56)
-        .background(palette.sidebar.opacity(0.45))
-        .background(palette.surface)
+        return conflicts > 0 ? "所选来源有 \(conflicts) 个冲突，请先处理。" : nil
     }
 
-    private var hasCommitTarget: Bool {
-        (model.workspace?.bindings ?? []).contains { $0.capabilities.contains(.commit) }
+    private var commitSelectionSignature: String {
+        model.snapshots.keys.sorted().map { id in
+            id + ":" + (model.snapshots[id]?.changes.map { $0.path + "=" + $0.kind.rawValue }.joined(separator: "\u{1F}") ?? "")
+        }.joined(separator: "\u{1E}")
     }
 
-    @ViewBuilder private var commitTargetSelector: some View {
-        let bindings = model.workspace?.bindings ?? []
-        if Set(bindings.map(\.root)).count > 1 || bindings.count > 2 {
-            Menu {
-                ForEach(bindings) { binding in
-                    Toggle(binding.displayLabel, isOn: Binding(
-                        get: { commitTargets.contains(binding.id) },
-                        set: { selected in if selected { commitTargets.insert(binding.id) } else { commitTargets.remove(binding.id) } }
-                    ))
-                    .help(binding.root.path)
-                }
-            } label: {
-                Label("提交目标 \(commitTargets.count)", systemImage: "checklist")
+    private func reconcileCommitSelection() {
+        for binding in commitBindings {
+            if let snapshot = model.snapshots[binding.id] {
+                commitSelection.reconcile(changes: snapshot.changes, in: binding)
             }
-            .buttonStyle(WorkbenchButtonStyle(palette: paletteForCommitBar, role: .quiet))
-            .help("选择要提交的版本控制来源")
+        }
+    }
+
+    private func prepareSelectedCommit(withAI: Bool = false) {
+        guard commitBlockedReason == nil, selectedCommitCount > 0, !commitTargets.isEmpty else { return }
+        startsCommitWithAI = withAI
+        model.prepareCommit(initialTargets: commitTargets, initialMessage: commitMessage,
+                            initialPathsByBinding: commitSelection.pathsByBinding(commitBindings),
+                            initialMessages: commitMessagesByBinding)
+        showsCommitSheet = true
+    }
+
+    private func resolveCurrentConflict() {
+        guard let conflict = currentConflicts.first else { return }
+        if model.selectedBinding?.capabilities.contains(.conflictResolution) == true {
+            model.showConflictEditor(path: conflict.path)
         } else {
-            ForEach(bindings) { binding in
-                Toggle(binding.displayLabel, isOn: Binding(
-                    get: { commitTargets.contains(binding.id) },
-                    set: { selected in if selected { commitTargets.insert(binding.id) } else { commitTargets.remove(binding.id) } }
-                )).toggleStyle(.checkbox).font(.system(size: 12)).fixedSize().help(binding.root.path)
-            }
+            model.prepareManagement()
         }
     }
 
-    private var paletteForCommitBar: AppPalette {
-        appearance.palette(for: appearance.preferredColorScheme ?? systemColorScheme)
+    private func preserveCommitDraft() {
+        let commit = model.repositoryCommit
+        if commit.phase == .finished, !commit.results.isEmpty, commit.results.allSatisfy({ $0.outcome == .succeeded }) {
+            commitMessage = ""
+            commitMessagesByBinding = [:]
+        } else {
+            guard !commit.preparations.isEmpty else { return }
+            commitMessagesByBinding = Dictionary(uniqueKeysWithValues: commit.preparations.map {
+                ($0.binding.id, commit.message(for: $0.binding.id))
+            })
+            if let id = commit.selectedBindingID {
+                commitMessage = commit.message(for: id)
+            }
+        }
     }
 
     private func statusBar(palette: AppPalette) -> some View {
@@ -414,8 +469,10 @@ public struct WorkspaceView: View {
             Spacer()
             if let snapshot = model.snapshot {
                 Text("\(snapshot.changes.count) 个变更")
-                Text("·")
-                Text("\(model.historyRevisions.count) 条历史")
+                if section == .history {
+                    Text("·")
+                    Text("\(model.historyRevisions.count) 条历史")
+                }
             }
             if model.isOperationInProgress { Text("操作进行中").padding(.leading, 8) }
             if let monitor = model.monitor, !monitor.pendingBindingIDs.isEmpty {

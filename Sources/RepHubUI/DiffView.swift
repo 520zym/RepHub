@@ -8,7 +8,7 @@ public struct DiffView: View {
     @Bindable private var model: WorkspaceModel
     @Bindable private var appearance: AppearanceStore
     @Environment(\.colorScheme) private var systemColorScheme
-    @State private var presentation: DiffPresentation = .sideBySide
+    @State private var presentation: DiffPresentation = .unified
     @State private var preparedDiff: PreparedDiff?
     @State private var preparedSource: String?
     @State private var preparedPath: String?
@@ -35,6 +35,9 @@ public struct DiffView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(appPalette.surface)
+        .onChange(of: model.historyFilePath != nil, initial: true) { _, isFileHistory in
+            presentation = isFileHistory ? .sideBySide : .unified
+        }
         .task(id: HighlightedPatchIdentity(text: model.patch?.text ?? "", path: model.selectedPath)) {
             await prepareCurrentPatch()
         }
@@ -68,18 +71,42 @@ public struct DiffView: View {
         } else if model.snapshot?.changes.isEmpty == true {
             ContentUnavailableView("工作区没有变更", systemImage: "checkmark.circle", description: Text("当前版本控制来源没有检测到本地变更。"))
         } else {
-            ContentUnavailableView("选择一个变更", systemImage: "doc.text.magnifyingglass", description: Text("选择工作区文件或历史提交后显示差异。"))
+            ContentUnavailableView("选择一个文件", systemImage: "doc.text.magnifyingglass", description: Text("在左侧查看当前工作区文件及未提交变更。"))
         }
     }
 
     private func diffHeader(appPalette: AppPalette) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
         HStack(spacing: 10) {
             Image(systemName: "doc.text").foregroundStyle(appPalette.accent)
             VStack(alignment: .leading, spacing: 2) {
-                Text(model.selectedPath ?? "所有变更").font(.system(size: 13, weight: .semibold)).lineLimit(1).truncationMode(.middle).frame(maxWidth: 360, alignment: .leading)
-                Text(comparisonLabel).font(.system(size: 11)).foregroundStyle(appPalette.secondaryText)
+                Text(model.selectedPath.map { ($0 as NSString).lastPathComponent } ?? "文件差异")
+                    .font(.system(size: 14, weight: .semibold)).lineLimit(1).truncationMode(.middle)
+                if let path = model.selectedPath {
+                    Text((path as NSString).deletingLastPathComponent)
+                        .font(.system(size: 11)).foregroundStyle(appPalette.secondaryText).lineLimit(1).truncationMode(.middle)
+                }
             }
+            .help(model.selectedPath ?? "选择文件查看差异")
             Spacer(minLength: 8)
+            if let path = model.selectedPath, model.selectedBinding?.capabilities.contains(.fileHistory) == true {
+                Button { model.showFileHistory(path: path, reference: model.selectedRevisionID) } label: {
+                    Label("文件历史", systemImage: "clock.arrow.circlepath")
+                }
+                .buttonStyle(WorkbenchButtonStyle(palette: appPalette, role: .quiet, compact: true))
+                .disabled(model.isInteractionLocked || model.isUntrackedFilePreview)
+                .help("切换到提交历史，查看此文件的版本")
+            }
+            Menu {
+                Toggle("忽略空白", isOn: $ignoresWhitespace)
+            } label: { Image(systemName: "ellipsis") }
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                .help("差异显示选项")
+        }
+        HStack(spacing: 8) {
+            Text(comparisonLabel).font(.system(size: 11)).foregroundStyle(appPalette.secondaryText)
+                .lineLimit(1).truncationMode(.middle)
+            Spacer(minLength: 4)
             if model.isUntrackedFilePreview {
                 Label("未跟踪", systemImage: "questionmark.circle")
                     .font(.system(size: 11, weight: .medium))
@@ -93,16 +120,13 @@ public struct DiffView: View {
                 Label("内容已截断", systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
             }
             if model.filePreview == nil {
-                Toggle("忽略空白", isOn: $ignoresWhitespace)
-                    .toggleStyle(.button)
-                    .font(.system(size: 11, weight: .medium))
-                    .help("仅隐藏去掉空白后完全相同的增删行；不改变提交、补丁或 AI 输入。")
                 WorkbenchSegmentedPicker(title: "差异布局", selection: $presentation,
                     options: [.init(.sideBySide, "并排"), .init(.unified, "统一")], palette: appPalette, compact: true)
                     .frame(width: 112)
             }
         }
-        .padding(.horizontal, 14).padding(.vertical, 8)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
     }
 
     private var comparisonLabel: String {
@@ -299,7 +323,8 @@ private struct SideBySideDiff: View {
 
     private var unifiedBody: some View {
         let rows = displayedRows
-        return ScrollViewReader { proxy in
+        return GeometryReader { geometry in
+        ScrollViewReader { proxy in
             ScrollView([.horizontal, .vertical]) {
                 LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(rows.indices, id: \.self) { index in
@@ -309,13 +334,14 @@ private struct SideBySideDiff: View {
                     case let .paired(old, new): unifiedRow(old: old, new: new).id(unifiedRowID(old: old, new: new))
                     }
                 }
-                }.frame(minWidth: 620, alignment: .leading)
+                }.frame(minWidth: max(geometry.size.width, 620), alignment: .leading)
             }
             .defaultScrollAnchor(.topLeading)
             .onChange(of: focusToken) { _, _ in
                 guard let anchor = unifiedFocusAnchor else { return }
                 withAnimation(.easeOut(duration: 0.18)) { proxy.scrollTo(anchor, anchor: .center) }
             }
+        }
         }
     }
 

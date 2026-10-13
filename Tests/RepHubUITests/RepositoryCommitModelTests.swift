@@ -27,6 +27,20 @@ final class RepositoryCommitModelTests: XCTestCase {
         XCTAssertTrue(model.canCommit)
     }
 
+    func testInitialMessagesRestoreDraftsPerTarget() async throws {
+        let git = CommitFixtureProvider(id: .git)
+        let svn = CommitFixtureProvider(id: .svn)
+        let workspace = Workspace(directory: URL(fileURLWithPath: "/tmp/commit-ui"), bindings: [git.binding, svn.binding], issues: [])
+        let model = RepositoryCommitModel(service: RepositoryService(providers: [git, svn]))
+
+        model.prepare(in: workspace, initialTargets: [git.binding.id, svn.binding.id], initialMessage: "统一草稿",
+                      initialMessages: [git.binding.id: "Git 草稿", svn.binding.id: "SVN 草稿"])
+        try await waitUntil { model.phase == .ready }
+
+        XCTAssertEqual(model.message(for: git.binding.id), "Git 草稿")
+        XCTAssertEqual(model.message(for: svn.binding.id), "SVN 草稿")
+    }
+
     func testEmptySelectionDisablesCommit() async throws {
         let provider = CommitFixtureProvider(id: .git)
         let workspace = Workspace(directory: URL(fileURLWithPath: "/tmp/commit-ui"), bindings: [provider.binding], issues: [])
@@ -37,6 +51,93 @@ final class RepositoryCommitModelTests: XCTestCase {
         let preparation = try XCTUnwrap(model.selectedPreparation)
         model.clearSelection(in: preparation)
         XCTAssertFalse(model.canCommit)
+    }
+
+    func testNilInitialPathsKeepsAllEligibleFilesSelected() async throws {
+        let provider = CommitFixtureProvider(id: .git)
+        let workspace = Workspace(directory: URL(fileURLWithPath: "/tmp/commit-ui"), bindings: [provider.binding], issues: [])
+        let model = RepositoryCommitModel(service: RepositoryService(providers: [provider]))
+
+        model.prepare(in: workspace, initialTargets: [provider.binding.id], initialMessage: "提交")
+        try await waitUntil { model.phase == .ready }
+
+        XCTAssertEqual(model.selectedFiles(for: provider.binding.id), ["Sources/App.swift", "README.md"])
+    }
+
+    func testExplicitEmptyPathsDoNotFallBackToAllFiles() async throws {
+        let provider = CommitFixtureProvider(id: .git)
+        let workspace = Workspace(directory: URL(fileURLWithPath: "/tmp/commit-ui"), bindings: [provider.binding], issues: [])
+        let model = RepositoryCommitModel(service: RepositoryService(providers: [provider]))
+
+        model.prepare(in: workspace, initialTargets: [provider.binding.id], initialMessage: "提交",
+                      initialPathsByBinding: [provider.binding.id: []])
+        try await waitUntil { model.phase == .ready }
+
+        XCTAssertTrue(model.selectedFiles(for: provider.binding.id).isEmpty)
+        XCTAssertFalse(model.canCommit)
+    }
+
+    func testExplicitPathsStayIsolatedPerBinding() async throws {
+        let git = CommitFixtureProvider(id: .git)
+        let svn = CommitFixtureProvider(id: .svn)
+        let workspace = Workspace(directory: URL(fileURLWithPath: "/tmp/commit-ui"), bindings: [git.binding, svn.binding], issues: [])
+        let model = RepositoryCommitModel(service: RepositoryService(providers: [git, svn]))
+
+        model.prepare(in: workspace, initialTargets: [git.binding.id, svn.binding.id], initialMessage: "提交",
+                      initialPathsByBinding: [git.binding.id: ["Sources/App.swift"]])
+        try await waitUntil { model.phase == .ready }
+
+        XCTAssertEqual(model.selectedFiles(for: git.binding.id), ["Sources/App.swift"])
+        XCTAssertTrue(model.selectedFiles(for: svn.binding.id).isEmpty)
+    }
+
+    func testPreparedTargetDefaultsToFirstTargetWithSelectedFiles() async throws {
+        let git = CommitFixtureProvider(id: .git)
+        let svn = CommitFixtureProvider(id: .svn)
+        let workspace = Workspace(directory: URL(fileURLWithPath: "/tmp/commit-ui"), bindings: [git.binding, svn.binding], issues: [])
+        let model = RepositoryCommitModel(service: RepositoryService(providers: [git, svn]))
+
+        model.prepare(in: workspace, initialTargets: [git.binding.id, svn.binding.id], initialMessage: "提交",
+                      initialPathsByBinding: [
+                        git.binding.id: [],
+                        svn.binding.id: ["Sources/App.swift"]
+                      ])
+        try await waitUntil { model.phase == .ready }
+
+        XCTAssertEqual(model.selectedBindingID, svn.binding.id)
+    }
+
+    func testUntrackedDirectoryPathIncludesPreparedDescendantsWithoutTrailingSlash() async throws {
+        let provider = CommitFixtureProvider(id: .svn, files: [
+            RepositoryCommitFile(change: .init(path: "docs", kind: .untracked), fingerprint: "directory", isDirectory: true),
+            RepositoryCommitFile(change: .init(path: "docs/guide/intro.md", kind: .untracked), fingerprint: "one"),
+            RepositoryCommitFile(change: .init(path: "docs/guide/images/logo.png", kind: .untracked), fingerprint: "two"),
+            RepositoryCommitFile(change: .init(path: "docs-old/notes.md", kind: .untracked), fingerprint: "three"),
+            RepositoryCommitFile(change: .init(path: "docs/blocked.md", kind: .untracked), fingerprint: "four", restriction: "受限")
+        ])
+        let workspace = Workspace(directory: URL(fileURLWithPath: "/tmp/commit-ui"), bindings: [provider.binding], issues: [])
+        let model = RepositoryCommitModel(service: RepositoryService(providers: [provider]))
+
+        model.prepare(in: workspace, initialTargets: [provider.binding.id], initialMessage: "提交",
+                      initialPathsByBinding: [provider.binding.id: ["docs"]])
+        try await waitUntil { model.phase == .ready }
+
+        XCTAssertEqual(model.selectedFiles(for: provider.binding.id), ["docs", "docs/guide/intro.md", "docs/guide/images/logo.png"])
+    }
+
+    func testTrackedDirectoryPathDoesNotImplicitlyIncludeDescendants() async throws {
+        let provider = CommitFixtureProvider(id: .svn, files: [
+            RepositoryCommitFile(change: .init(path: "docs", kind: .modified), fingerprint: "directory", isDirectory: true),
+            RepositoryCommitFile(change: .init(path: "docs/guide.md", kind: .modified), fingerprint: "child")
+        ])
+        let workspace = Workspace(directory: URL(fileURLWithPath: "/tmp/commit-ui"), bindings: [provider.binding], issues: [])
+        let model = RepositoryCommitModel(service: RepositoryService(providers: [provider]))
+
+        model.prepare(in: workspace, initialTargets: [provider.binding.id], initialMessage: "提交",
+                      initialPathsByBinding: [provider.binding.id: ["docs"]])
+        try await waitUntil { model.phase == .ready }
+
+        XCTAssertEqual(model.selectedFiles(for: provider.binding.id), ["docs"])
     }
 
     func testSwitchingTargetInvalidatesPreviousPreview() async throws {
@@ -108,7 +209,15 @@ final class RepositoryCommitModelTests: XCTestCase {
 
 private struct CommitFixtureProvider: RepositoryCommitProvider {
     let id: ProviderID
+    let files: [RepositoryCommitFile]
     let log = CommitFixtureLog()
+    init(id: ProviderID, files: [RepositoryCommitFile] = [
+        RepositoryCommitFile(change: FileChange(path: "Sources/App.swift", kind: .modified), fingerprint: "one"),
+        RepositoryCommitFile(change: FileChange(path: "README.md", kind: .modified), fingerprint: "two")
+    ]) {
+        self.id = id
+        self.files = files
+    }
     var displayName: String { id == .git ? "Git" : "Subversion" }
     var binding: RepositoryBinding {
         RepositoryBinding(providerID: id, providerName: displayName, root: URL(fileURLWithPath: "/tmp/commit-ui"),
@@ -124,10 +233,11 @@ private struct CommitFixtureProvider: RepositoryCommitProvider {
     func changedFiles(in binding: RepositoryBinding, revision: String) async throws -> [FileChange] { [] }
     func diff(in binding: RepositoryBinding, path: String?, revision: String?) async throws -> RepositoryPatch { RepositoryPatch(text: "diff") }
     func prepareCommit(in binding: RepositoryBinding) async throws -> RepositoryCommitPreparation {
-        RepositoryCommitPreparation(binding: binding, baseRevision: id == .git ? "git-base" : "svn-base", files: [
-            RepositoryCommitFile(change: FileChange(path: "Sources/App.swift", kind: .modified), fingerprint: "one"),
-            RepositoryCommitFile(change: FileChange(path: "README.md", kind: .modified), fingerprint: "two", restriction: id == .svn ? "需要先解决冲突" : nil)
-        ])
+        let preparedFiles = files.map { file in
+            guard id == .svn, file.change.path == "README.md" else { return file }
+            return RepositoryCommitFile(change: file.change, fingerprint: file.fingerprint, restriction: "需要先解决冲突", isDirectory: file.isDirectory)
+        }
+        return RepositoryCommitPreparation(binding: binding, baseRevision: id == .git ? "git-base" : "svn-base", files: preparedFiles)
     }
     func commitDiff(in binding: RepositoryBinding, file: RepositoryCommitFile) async throws -> RepositoryPatch { RepositoryPatch(text: "diff -- \(file.change.path)") }
     func commit(_ request: RepositoryCommitRequest, in binding: RepositoryBinding, progress: @escaping RepositoryOperationProgressHandler) async throws -> RepositoryCommitResult {

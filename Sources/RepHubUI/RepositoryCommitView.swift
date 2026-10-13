@@ -12,10 +12,12 @@ struct RepositoryCommitView: View {
     let dismiss: () -> Void
     let committed: @MainActor @Sendable (WorkspaceCommitResult) -> Void
     let viewHistory: (String, String) -> Void
+    var startsWithAI = false
     @Environment(\.colorScheme) private var systemColorScheme
     @State private var showsAI = false
     @State private var aiBindingID: String?
     @State private var aiSelectedPaths: Set<String> = []
+    @State private var didOpenInitialAI = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -40,6 +42,18 @@ struct RepositoryCommitView: View {
         .foregroundStyle(palette.text)
         .tint(palette.accent)
         .interactiveDismissDisabled(model.isBusy)
+        .onChange(of: model.phase, initial: true) { _, phase in
+            if startsWithAI, !didOpenInitialAI, phase == .ready,
+               let preparation = model.selectedPreparation, preparation.blockingReason == nil, model.ai != nil,
+               model.enabledBindingIDs.contains(preparation.binding.id),
+               !model.selectedFiles(for: preparation.binding.id).isEmpty {
+                didOpenInitialAI = true
+                aiBindingID = preparation.binding.id
+                aiSelectedPaths = model.selectedFiles(for: preparation.binding.id)
+                model.prepareAI()
+                showsAI = true
+            }
+        }
         .sheet(isPresented: $showsAI) {
             if let ai = model.ai {
                 AIRunView(model: ai, palette: palette,

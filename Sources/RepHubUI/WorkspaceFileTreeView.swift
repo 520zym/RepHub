@@ -7,20 +7,27 @@ import VersionControlCore
 struct WorkspaceFileTreeView: View {
     @Bindable var model: WorkspaceModel
     @Bindable var browser: WorkspaceFileBrowser
+    @Binding var selectedChangePaths: Set<String>
     let palette: AppPalette
     let showsBindingPicker: Bool
-    @State private var cachedChangeRows: [WorkspaceChangeRow] = []
+    @State private var cachedConflictRows: [WorkspaceChangeRow] = []
+    @State private var cachedOrdinaryRows: [WorkspaceChangeRow] = []
 
-    init(model: WorkspaceModel, palette: AppPalette, showsBindingPicker: Bool) {
+    init(model: WorkspaceModel, palette: AppPalette, showsBindingPicker: Bool,
+         selectedChangePaths: Binding<Set<String>>) {
         self.model = model
         self.browser = model.fileBrowser
         self.palette = palette
         self.showsBindingPicker = showsBindingPicker
+        self._selectedChangePaths = selectedChangePaths
     }
 
     private var changes: [FileChange] {
         (model.snapshot?.changes ?? []).filter { browser.filter.isEmpty || $0.path.localizedCaseInsensitiveContains(browser.filter) }
     }
+
+    private var conflictedChanges: [FileChange] { changes.filter { $0.kind == .conflicted } }
+    private var ordinaryChanges: [FileChange] { changes.filter { $0.kind != .conflicted } }
 
     private var changesByPath: [String: FileChange] {
         Dictionary((model.snapshot?.changes ?? []).map { ($0.path, $0) }, uniquingKeysWith: { _, latest in latest })
@@ -135,7 +142,27 @@ struct WorkspaceFileTreeView: View {
     private func fileRow(_ row: WorkspaceFileBrowserRow, changes: [String: FileChange], forceLeaf: Bool = false) -> some View {
         let entry = row.entry
         let change = changes[entry.path]
-        return Button {
+        return HStack(spacing: 7) {
+            if entry.isDirectory && !forceLeaf {
+                Image(systemName: browser.isExpanded(entry.path) ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 9, weight: .semibold)).frame(width: 9)
+            } else { Color.clear.frame(width: 9, height: 1) }
+            Image(systemName: entry.isDirectory ? "folder" : fileIcon(entry.name, isLink: entry.isSymbolicLink))
+                .foregroundStyle(entry.isDirectory ? palette.accent : palette.secondaryText).frame(width: 16)
+            Text(entry.name).lineLimit(1).truncationMode(.middle)
+            Spacer(minLength: 1)
+            if browser.isLoading(entry.path) { ProgressView().controlSize(.mini) }
+            if let change {
+                if change.kind != .conflicted { selectionControl(for: change) }
+                changeBadge(change)
+            }
+        }
+        .font(.system(size: 12))
+        .padding(.leading, 9 + CGFloat(min(row.depth, 5)) * 13).padding(.trailing, 9)
+        .frame(maxWidth: .infinity, minHeight: 29, alignment: .leading)
+        .contentShape(Rectangle())
+        .background(entry.path == model.selectedPath ? palette.selection : .clear, in: RoundedRectangle(cornerRadius: 6))
+        .onTapGesture {
             if entry.isDirectory {
                 browser.toggleDirectory(entry)
             } else if let change {
@@ -143,26 +170,8 @@ struct WorkspaceFileTreeView: View {
             } else if !entry.isDirectory {
                 model.selectWorkspaceFile(path: entry.path)
             }
-        } label: {
-            HStack(spacing: 7) {
-                if entry.isDirectory && !forceLeaf {
-                    Image(systemName: browser.isExpanded(entry.path) ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .semibold)).frame(width: 9)
-                } else { Color.clear.frame(width: 9, height: 1) }
-                Image(systemName: entry.isDirectory ? "folder" : fileIcon(entry.name, isLink: entry.isSymbolicLink))
-                    .foregroundStyle(entry.isDirectory ? palette.accent : palette.secondaryText).frame(width: 16)
-                Text(entry.name).lineLimit(1).truncationMode(.middle)
-                Spacer(minLength: 1)
-                if browser.isLoading(entry.path) { ProgressView().controlSize(.mini) }
-                if let change { changeBadge(change) }
-            }
-            .font(.system(size: 12))
-            .padding(.leading, 9 + CGFloat(min(row.depth, 5)) * 13).padding(.trailing, 9)
-            .frame(maxWidth: .infinity, minHeight: 29, alignment: .leading)
-            .contentShape(Rectangle())
-            .background(entry.path == model.selectedPath ? palette.selection : .clear, in: RoundedRectangle(cornerRadius: 6))
         }
-        .buttonStyle(.plain).help(entry.path)
+        .help(entry.path)
         .accessibilityLabel(entry.path)
         .contextMenu {
             if entry.isDirectory, let change {
@@ -215,35 +224,14 @@ struct WorkspaceFileTreeView: View {
             Image(systemName: "folder.fill").foregroundStyle(palette.accent)
             Text(model.selectedBinding?.root.lastPathComponent ?? model.workspace?.name ?? "工作区").fontWeight(.medium)
         }.font(.system(size: 13)).padding(.horizontal, 12).frame(height: 30)
-        ForEach(cachedChangeRows) { row in
-            Button {
-                if row.isDirectory {
-                    if model.treeState.workingCollapsed.contains(row.id) { model.treeState.workingCollapsed.remove(row.id) }
-                    else { model.treeState.workingCollapsed.insert(row.id) }
-                } else if let change = row.change { model.selectChange(change) }
-            } label: {
-                HStack(spacing: 7) {
-                    if row.isDirectory { Image(systemName: model.treeState.workingCollapsed.contains(row.id) ? "chevron.right" : "chevron.down").font(.system(size: 9, weight: .semibold)).frame(width: 9) }
-                    else { Color.clear.frame(width: 9, height: 1) }
-                    Image(systemName: row.isDirectory ? "folder" : fileIcon(row.title, isLink: false)).foregroundStyle(row.isDirectory ? palette.accent : palette.secondaryText).frame(width: 16)
-                    Text(row.title).lineLimit(1).truncationMode(.middle)
-                    Spacer(minLength: 1)
-                    if let change = row.change { changeBadge(change) }
-                }
-                .font(.system(size: 12)).padding(.leading, 9 + CGFloat(min(row.depth, 5)) * 13).padding(.trailing, 9)
-                .frame(maxWidth: .infinity, minHeight: 29, alignment: .leading).contentShape(Rectangle())
-                .background(row.change.map { $0.path == model.selectedPath } == true ? palette.selection : .clear, in: RoundedRectangle(cornerRadius: 6))
-            }
-            .buttonStyle(.plain).help(row.id).accessibilityLabel(row.change?.path ?? row.id)
-            .contextMenu {
-                if row.isDirectory, let change = row.change {
-                    Button("查看变更", systemImage: "rectangle.and.text.magnifyingglass") { model.selectChange(change) }
-                if change.kind == .untracked { Button("添加忽略规则…", systemImage: "eye.slash") { model.showIgnoreRule(path: change.path) } }
-                } else if let change = row.change {
-                    Button("查看文件历史", systemImage: "clock.arrow.circlepath") { model.showFileHistory(path: change.path) }
-                    fileTools(path: change.path, change: change)
-                }
-            }
+        if !conflictedChanges.isEmpty {
+            changeGroupHeader(title: "冲突", count: conflictedChanges.count, systemImage: "exclamationmark.triangle.fill", tint: palette.removed)
+            changeRows(cachedConflictRows)
+        }
+        if !ordinaryChanges.isEmpty {
+            changeGroupHeader(title: conflictedChanges.isEmpty ? "变更" : "其他变更", count: ordinaryChanges.count,
+                              systemImage: "doc.text", tint: palette.secondaryText)
+            changeRows(cachedOrdinaryRows)
         }
         if changes.isEmpty && !model.isLoading {
             Text(browser.filter.isEmpty ? "工作区没有变更" : "没有匹配的文件")
@@ -251,11 +239,65 @@ struct WorkspaceFileTreeView: View {
         }
     }
 
-    private func rebuildChangeRows() {
-        cachedChangeRows = makeChangeRows()
+    private func changeGroupHeader(title: String, count: Int, systemImage: String, tint: Color) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: systemImage).foregroundStyle(tint).frame(width: 16)
+            Text(title).fontWeight(.semibold)
+            Text("\(count)").font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(tint).padding(.horizontal, 6).padding(.vertical, 2)
+                .background(tint.opacity(0.11), in: Capsule())
+            Spacer(minLength: 0)
+        }
+        .font(.system(size: 12))
+        .padding(.horizontal, 12).padding(.top, 10).padding(.bottom, 4)
     }
 
-    private func makeChangeRows() -> [WorkspaceChangeRow] {
+    private func changeRows(_ rows: [WorkspaceChangeRow]) -> some View {
+        ForEach(rows) { row in
+            HStack(spacing: 7) {
+                if row.isDirectory {
+                    Image(systemName: model.treeState.workingCollapsed.contains(row.id) ? "chevron.right" : "chevron.down")
+                        .font(.system(size: 9, weight: .semibold)).frame(width: 9)
+                } else { Color.clear.frame(width: 9, height: 1) }
+                Image(systemName: row.isDirectory ? "folder" : fileIcon(row.title, isLink: false))
+                    .foregroundStyle(row.isDirectory ? palette.accent : palette.secondaryText).frame(width: 16)
+                Text(row.title).lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 1)
+                if let change = row.change {
+                    if change.kind != .conflicted { selectionControl(for: change) }
+                    changeBadge(change)
+                }
+            }
+            .font(.system(size: 12)).padding(.leading, 9 + CGFloat(min(row.depth, 5)) * 13).padding(.trailing, 9)
+            .frame(maxWidth: .infinity, minHeight: 29, alignment: .leading).contentShape(Rectangle())
+            .background(row.change.map { $0.path == model.selectedPath } == true ? palette.selection : .clear, in: RoundedRectangle(cornerRadius: 6))
+            .onTapGesture {
+                if row.isDirectory {
+                    if model.treeState.workingCollapsed.contains(row.id) { model.treeState.workingCollapsed.remove(row.id) }
+                    else { model.treeState.workingCollapsed.insert(row.id) }
+                } else if let change = row.change { model.selectChange(change) }
+            }
+            .help(row.id).accessibilityLabel(row.change?.path ?? row.id)
+            .contextMenu { changeContextMenu(for: row) }
+        }
+    }
+
+    @ViewBuilder private func changeContextMenu(for row: WorkspaceChangeRow) -> some View {
+        if row.isDirectory, let change = row.change {
+            Button("查看变更", systemImage: "rectangle.and.text.magnifyingglass") { model.selectChange(change) }
+            if change.kind == .untracked { Button("添加忽略规则…", systemImage: "eye.slash") { model.showIgnoreRule(path: change.path) } }
+        } else if let change = row.change {
+            Button("查看文件历史", systemImage: "clock.arrow.circlepath") { model.showFileHistory(path: change.path) }
+            fileTools(path: change.path, change: change)
+        }
+    }
+
+    private func rebuildChangeRows() {
+        cachedConflictRows = makeChangeRows(from: conflictedChanges, prefix: "conflicts/")
+        cachedOrdinaryRows = makeChangeRows(from: ordinaryChanges, prefix: "changes/")
+    }
+
+    private func makeChangeRows(from files: [FileChange], prefix rowPrefix: String) -> [WorkspaceChangeRow] {
         var result: [WorkspaceChangeRow] = []
         func collect(_ files: [FileChange], prefix: String, depth: Int) {
             let groups = Dictionary(grouping: files) { file in String(file.path.dropFirst(prefix.count).split(separator: "/").first ?? "") }
@@ -265,20 +307,39 @@ struct WorkspaceFileTreeView: View {
                 let directoryChange = members.first(where: { $0.path == fullPath })
                 let descendants = members.filter { $0.path != fullPath }
                 if descendants.isEmpty, let directoryChange {
-                    result.append(.init(id: fullPath, title: name, depth: depth, change: directoryChange, isDirectory: false))
+                    result.append(.init(id: rowPrefix + fullPath, title: name, depth: depth, change: directoryChange, isDirectory: false))
                 } else {
-                    result.append(.init(id: fullPath, title: name, depth: depth, change: directoryChange, isDirectory: true))
-                    if !model.treeState.workingCollapsed.contains(fullPath) { collect(descendants, prefix: fullPath + "/", depth: depth + 1) }
+                    let rowID = rowPrefix + fullPath
+                    result.append(.init(id: rowID, title: name, depth: depth, change: directoryChange, isDirectory: true))
+                    if !model.treeState.workingCollapsed.contains(rowID) { collect(descendants, prefix: fullPath + "/", depth: depth + 1) }
                 }
             }
         }
-        collect(changes, prefix: "", depth: 1)
+        collect(files, prefix: "", depth: 1)
         return result
     }
 
     @ViewBuilder private func changeBadge(_ change: FileChange) -> some View {
-        Text(change.kind.symbol).font(.system(size: 10, weight: .semibold, design: .monospaced))
+        Text(change.kind == .conflicted ? "C" : change.kind.symbol)
+            .font(.system(size: 10, weight: .semibold, design: .monospaced))
             .foregroundStyle(change.kind == .deleted || change.kind == .conflicted ? palette.removed : palette.accent)
+            .frame(minWidth: 11, alignment: .trailing)
+    }
+
+    private func selectionControl(for change: FileChange) -> some View {
+        Button {
+            if selectedChangePaths.contains(change.path) { selectedChangePaths.remove(change.path) }
+            else { selectedChangePaths.insert(change.path) }
+        } label: {
+            Image(systemName: selectedChangePaths.contains(change.path) ? "checkmark.square.fill" : "square")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(selectedChangePaths.contains(change.path) ? palette.accent : palette.secondaryText.opacity(0.7))
+                .frame(width: 18, height: 18)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(selectedChangePaths.contains(change.path) ? "从本次提交中移除" : "加入本次提交")
+        .accessibilityLabel("\(change.path)，\(selectedChangePaths.contains(change.path) ? "已选择提交" : "未选择提交")")
     }
 
     private func fileIcon(_ name: String, isLink: Bool) -> String {

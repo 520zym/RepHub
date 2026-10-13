@@ -61,7 +61,9 @@ public final class RepositoryCommitModel {
             && !selectedTargets.isEmpty
     }
 
-    public func prepare(in workspace: Workspace, initialTargets: Set<String>, initialMessage: String) {
+    public func prepare(in workspace: Workspace, initialTargets: Set<String>, initialMessage: String,
+                        initialPathsByBinding: [String: Set<String>]? = nil,
+                        initialMessages: [String: String]? = nil) {
         guard !isBusy else { return }
         requestID += 1
         previewTask?.cancel()
@@ -85,13 +87,20 @@ public final class RepositoryCommitModel {
                 let prepared = try await service.prepareCommits(in: workspace)
                 guard let self, self.requestID == request else { return }
                 self.preparations = prepared
-                self.selectedBindingID = prepared.first(where: { initialTargets.contains($0.binding.id) })?.binding.id ?? prepared.first?.binding.id
                 for preparation in prepared {
-                    self.messages[preparation.binding.id] = initialMessage
+                    self.messages[preparation.binding.id] = initialMessages?[preparation.binding.id] ?? initialMessage
                     guard initialTargets.contains(preparation.binding.id), preparation.blockingReason == nil else { continue }
                     self.enabledBindingIDs.insert(preparation.binding.id)
-                    self.selectedFileIDs[preparation.binding.id] = Set(preparation.files.filter { $0.restriction == nil }.map(\.id))
+                    self.selectedFileIDs[preparation.binding.id] = Self.initiallySelectedFiles(
+                        in: preparation,
+                        explicitPaths: initialPathsByBinding.map { $0[preparation.binding.id] ?? [] }
+                    )
                 }
+                self.selectedBindingID = prepared.first { preparation in
+                    self.enabledBindingIDs.contains(preparation.binding.id)
+                        && preparation.blockingReason == nil
+                        && !(self.selectedFileIDs[preparation.binding.id] ?? []).isEmpty
+                }?.binding.id ?? prepared.first(where: { initialTargets.contains($0.binding.id) })?.binding.id ?? prepared.first?.binding.id
                 self.phase = .ready
             } catch is CancellationError {
                 guard let self, self.requestID == request else { return }
@@ -256,6 +265,30 @@ public final class RepositoryCommitModel {
         patch = nil
         isLoadingPreview = false
         previewError = nil
+    }
+
+    /// 显式范围来自工作区树，路径均相对各自工作副本。准备结果确认的未跟踪目录会包含后代；
+    /// 已跟踪目录仍只匹配自身，保留 SVN 非递归提交语义。末尾 `/` 保留为显式递归范围的兼容形式。
+    private static func initiallySelectedFiles(in preparation: RepositoryCommitPreparation,
+                                               explicitPaths: Set<String>?) -> Set<String> {
+        let eligible = preparation.files.filter { $0.restriction == nil }
+        guard let explicitPaths else { return Set(eligible.map(\.id)) }
+        let normalized = explicitPaths.compactMap { path -> (path: String, includesDescendants: Bool)? in
+            let includesDescendants = path.hasSuffix("/")
+            let value = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            guard !value.isEmpty else { return nil }
+            return (value, includesDescendants)
+        }
+        let selectedUntrackedDirectories = Set(eligible.lazy.filter { file in
+            file.isDirectory && file.change.kind == .untracked && normalized.contains { $0.path == file.change.path }
+        }.map { $0.change.path })
+        return Set(eligible.lazy.filter { file in
+            normalized.contains { selected in
+                file.change.path == selected.path
+                    || (selected.includesDescendants && file.change.path.hasPrefix(selected.path + "/"))
+                    || (selectedUntrackedDirectories.contains(selected.path) && file.change.path.hasPrefix(selected.path + "/"))
+            }
+        }.map(\.id))
     }
 
     private static func completionMessage(for results: [RepositoryCommitResult]) -> String {
