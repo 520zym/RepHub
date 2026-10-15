@@ -104,6 +104,7 @@ public final class WorkspaceModel {
 
     public init(service: RepositoryService, aiSettings: AISettingsStore? = nil, aiService: AIService? = nil,
                 recentRepositories: RecentRepositoryStore = RecentRepositoryStore(),
+                remoteHistory: RemoteRepositoryHistoryStore = RemoteRepositoryHistoryStore(),
                 workspaceLinks: WorkspaceLinkStore = WorkspaceLinkStore(), monitor: WorkspaceMonitor? = nil,
                 migrationService: RepositoryMigrationService? = nil,
                 workingCopyMigrationService: WorkingCopyMigrationService? = nil) {
@@ -116,7 +117,7 @@ public final class WorkspaceModel {
         self.repositoryMigration = migrationService.map(RepositoryMigrationModel.init(service:))
         self.workingCopyMigration = workingCopyMigrationService.map(WorkingCopyMigrationModel.init(service:))
         self.migrationMonitor = workingCopyMigrationService.map { MigrationUpdateMonitor(service: $0) }
-        self.repositoryAcquisition = RepositoryAcquisitionModel(service: service)
+        self.repositoryAcquisition = RepositoryAcquisitionModel(service: service, remoteHistory: remoteHistory)
         if let aiSettings, let aiService {
             self.aiReview = AIRunModel(settings: aiSettings, service: aiService)
             self.repositoryCommit = RepositoryCommitModel(service: service, ai: AIRunModel(settings: aiSettings, service: aiService))

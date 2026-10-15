@@ -34,7 +34,7 @@ struct RepositoryAcquisitionView: View {
         .background(palette.background)
         .foregroundStyle(palette.text)
         .onAppear { model.prepare() }
-        .onDisappear { model.hidePassword() }
+        .onDisappear { model.endSession() }
         .onChange(of: source) { _, _ in model.hidePassword() }
         .interactiveDismissDisabled(model.isBusy)
     }
@@ -142,7 +142,7 @@ struct RepositoryAcquisitionView: View {
     private var connectionPage: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                pageHeading("连接远程仓库", detail: "选择版本控制方式并填写远程地址。认证信息只保留在当前会话中。")
+                pageHeading("连接远程仓库", detail: "可选择最近使用的远程地址；SVN 账号会按服务器自动填入。")
                 if model.isLoadingOptions {
                     HStack(spacing: 8) { ProgressView().controlSize(.small); Text("正在准备版本控制方式…") }
                         .font(.system(size: 12)).foregroundStyle(palette.secondaryText)
@@ -151,12 +151,13 @@ struct RepositoryAcquisitionView: View {
                                                options: model.options.map { .init($0.providerID, $0.title) }, palette: palette)
                 }
                 field("远程地址") {
-                    TextField(model.supportsBrowsing ? "https://server/svn/repository" : "https://server/owner/repository.git", text: $model.remoteURL)
+                    TextField(model.supportsBrowsing ? "https://server/svn/repository" : "https://server/owner/repository.git", text: remoteURLBinding)
                         .textFieldStyle(.plain).textSelection(.enabled)
-                        .onChange(of: model.remoteURL) { _, _ in model.remoteLocationChanged() }
                 }
+                if !model.recentRemoteEntries.isEmpty { recentRemoteAddresses }
                 if model.supportsCredentials { credentialsForm }
-                else { note("Git 使用系统凭据、钥匙串或 SSH 代理；RepHub 不保存密码。") }
+                else { note("Git 使用系统凭据、钥匙串或 SSH 代理；RepHub 会记住成功使用的远程地址。") }
+                if let notice = model.historyNotice { note(notice) }
                 wizardError
             }
             .padding(22)
@@ -166,16 +167,15 @@ struct RepositoryAcquisitionView: View {
     private var credentialsForm: some View {
         VStack(alignment: .leading, spacing: 9) {
             Text("SVN 认证").font(.system(size: 12, weight: .medium)).foregroundStyle(palette.secondaryText)
-            inlineField("用户名", text: $model.username)
-                .onChange(of: model.username) { _, _ in model.remoteLocationChanged() }
+            if !model.savedAccounts.isEmpty { savedAccountPicker }
+            inlineField("用户名", text: usernameBinding)
             HStack(spacing: 10) {
                 Text("密码").font(.system(size: 12)).foregroundStyle(palette.secondaryText).frame(width: 62, alignment: .leading)
                 Group {
-                    if model.isPasswordVisible { TextField("仅本次会话使用", text: $model.password) }
-                    else { SecureField("仅本次会话使用", text: $model.password) }
+                    if model.isPasswordVisible { TextField("已安全记住的密码会自动填入", text: passwordBinding) }
+                    else { SecureField("已安全记住的密码会自动填入", text: passwordBinding) }
                 }
                 .textFieldStyle(.plain)
-                .onChange(of: model.password) { _, _ in model.remoteLocationChanged() }
                 Button(action: model.togglePasswordVisibility) {
                     Image(systemName: model.isPasswordVisible ? "eye.slash" : "eye")
                         .font(.system(size: 12, weight: .medium)).frame(width: 22, height: 22)
@@ -186,6 +186,60 @@ struct RepositoryAcquisitionView: View {
             }
             .padding(.horizontal, 10).frame(height: 32)
             .background(palette.secondaryText.opacity(0.05), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            if model.isLoadingSavedCredentials {
+                HStack(spacing: 6) { ProgressView().controlSize(.mini); Text("正在读取上次使用的 SVN 账号…") }
+                    .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
+            }
+        }
+    }
+
+    private var recentRemoteAddresses: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("最近使用").font(.system(size: 11, weight: .medium)).foregroundStyle(palette.secondaryText)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 4) {
+                    ForEach(model.recentRemoteEntries) { entry in
+                        HStack(spacing: 6) {
+                            Button { model.selectRecentRemote(entry) } label: {
+                                Text(entry.url.removingPercentEncoding ?? entry.url)
+                                    .font(.system(size: 11, design: .monospaced)).lineLimit(1).truncationMode(.middle)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.plain).foregroundStyle(palette.secondaryText)
+                            Button { model.removeRecentRemote(entry) } label: {
+                                Image(systemName: "xmark").font(.system(size: 8, weight: .semibold)).frame(width: 18, height: 18)
+                            }
+                            .buttonStyle(.plain).foregroundStyle(palette.secondaryText)
+                            .accessibilityLabel("移除最近地址")
+                        }
+                        .padding(.horizontal, 9).frame(height: 25)
+                        .background(palette.sidebar.opacity(0.45), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    }
+                }
+            }
+            .frame(maxHeight: 96)
+        }
+    }
+
+    private var savedAccountPicker: some View {
+        HStack(spacing: 8) {
+            Text("已记住账号").font(.system(size: 11)).foregroundStyle(palette.secondaryText)
+            Menu {
+                ForEach(model.savedAccounts) { account in
+                    Button("填入 \(account.username)") { model.selectSavedAccount(account) }
+                }
+                Divider()
+                ForEach(model.savedAccounts) { account in
+                    Button("忘记 \(account.username)", role: .destructive) { model.removeSavedAccount(account) }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Text(model.username.isEmpty ? "选择账号" : model.username).lineLimit(1).truncationMode(.tail)
+                    Image(systemName: "chevron.up.chevron.down").font(.system(size: 8, weight: .semibold))
+                }
+            }
+            .menuStyle(.borderlessButton)
+            .frame(maxWidth: 220, alignment: .leading)
         }
     }
 
@@ -221,6 +275,7 @@ struct RepositoryAcquisitionView: View {
                 .background(palette.sidebar.opacity(0.42), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
             if let selected = model.selectedRemoteURL { note("将检出：\(selected.removingPercentEncoding ?? selected)") }
+            if let notice = model.historyNotice { note(notice) }
             wizardError
         }
         .padding(22)
@@ -247,7 +302,9 @@ struct RepositoryAcquisitionView: View {
                 if model.supportsCredentials, !model.username.isEmpty { reviewRow("认证用户", value: model.username) }
             }
             .padding(16).background(palette.sidebar.opacity(0.54), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-            note("密码不会显示、保存或写入日志。")
+            note(model.supportsCredentials
+                 ? "密码不会显示或写入日志；检出成功后会安全记住，以便下次自动填入。"
+                 : "Git 凭据由系统钥匙串或 SSH 代理管理。")
             wizardError
             Spacer()
         }
@@ -278,6 +335,7 @@ struct RepositoryAcquisitionView: View {
             } else {
                 Button("下一步", action: model.advanceWizard)
                     .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
+                    .disabled(model.isLoadingSavedCredentials)
             }
         }
         .padding(.horizontal, 22).padding(.vertical, 16).background(palette.surface)
@@ -297,6 +355,7 @@ struct RepositoryAcquisitionView: View {
                         cancelTitle: "取消获取",
                         cancel: nil
                     )
+                    if let notice = model.historyNotice { note(notice) }
                     transferOutcome
                 }
                 .padding(.horizontal, 22).padding(.top, 22).padding(.bottom, 12)
@@ -423,6 +482,18 @@ struct RepositoryAcquisitionView: View {
             get: { model.selectedProviderID ?? model.options.first!.providerID },
             set: { model.selectProvider($0) }
         )
+    }
+
+    private var remoteURLBinding: Binding<String> {
+        Binding(get: { model.remoteURL }, set: { model.setRemoteURLFromUser($0) })
+    }
+
+    private var usernameBinding: Binding<String> {
+        Binding(get: { model.username }, set: { model.setUsernameFromUser($0) })
+    }
+
+    private var passwordBinding: Binding<String> {
+        Binding(get: { model.password }, set: { model.setPasswordFromUser($0) })
     }
 
     private var selectedSourceSummary: String? {

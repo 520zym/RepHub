@@ -4,7 +4,7 @@ import Observation
 import RepositoryApplication
 import VersionControlCore
 
-/// 新建工作副本的短生命周期状态。输入认证信息只保留在内存中，不写入界面设置或磁盘。
+/// 新建工作副本的短生命周期状态。输入框中的认证信息只保留在内存；成功使用后才交给受保护的凭据存储。
 @MainActor
 @Observable
 public final class RepositoryAcquisitionModel {
@@ -45,21 +45,31 @@ public final class RepositoryAcquisitionModel {
     public private(set) var result: RepositoryAcquisitionResult?
     public private(set) var errorMessage: String?
     public private(set) var wizardStep: WizardStep = .connection
+    public private(set) var isLoadingSavedCredentials = false
+    public private(set) var historyNotice: String?
 
     private let service: RepositoryService
+    private let remoteHistory: RemoteRepositoryHistoryStore
     private var browsingTask: Task<Void, Never>?
     private var acquisitionTask: Task<Void, Never>?
+    private var credentialTask: Task<Void, Never>?
     private var requestID = 0
     private var directoryNameIsSuggested = true
     private var hasStartedAcquisition = false
+    private var credentialRequestID = 0
+    private var credentialInputRevision = 0
+    private var activeCredentialServer: String?
 
-    public init(service: RepositoryService) {
+    public init(service: RepositoryService,
+                remoteHistory: RemoteRepositoryHistoryStore = RemoteRepositoryHistoryStore()) {
         self.service = service
+        self.remoteHistory = remoteHistory
     }
 
     isolated deinit {
         browsingTask?.cancel()
         acquisitionTask?.cancel()
+        credentialTask?.cancel()
     }
 
     public var selectedOption: RepositoryAcquisitionOption? {
@@ -75,9 +85,20 @@ public final class RepositoryAcquisitionModel {
         guard let destinationParent, !directoryName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         return destinationParent.appendingPathComponent(directoryName.trimmingCharacters(in: .whitespacesAndNewlines), isDirectory: true)
     }
+    public var recentRemoteEntries: [RemoteRepositoryHistoryEntry] {
+        guard let selectedProviderID else { return [] }
+        return remoteHistory.entries(for: selectedProviderID)
+    }
+    public var savedAccounts: [SavedRepositoryAccount] { remoteHistory.accounts(for: remoteURL) }
 
     public func prepare() {
-        guard options.isEmpty, !isLoadingOptions else { return }
+        // 已成功获取后再次打开入口，开始新一轮选择；地址仍可从历史中取回。
+        if !isBusy, case .succeeded? = result?.outcome { reset() }
+        if !options.isEmpty {
+            scheduleCredentialAutofillIfNeeded()
+            return
+        }
+        guard !isLoadingOptions else { return }
         isLoadingOptions = true
         Task { [weak self, service] in
             let options = await service.acquisitionOptions()
@@ -85,6 +106,7 @@ public final class RepositoryAcquisitionModel {
             self.options = options
             self.selectedProviderID = self.selectedProviderID ?? options.first?.providerID
             self.isLoadingOptions = false
+            self.scheduleCredentialAutofillIfNeeded()
         }
     }
 
@@ -93,7 +115,87 @@ public final class RepositoryAcquisitionModel {
         selectedProviderID = providerID
         wizardStep = .connection
         isPasswordVisible = false
+        historyNotice = nil
+        clearCredentials()
+        activeCredentialServer = nil
+        credentialRequestID += 1
+        credentialTask?.cancel()
         invalidateRemoteTree()
+        scheduleCredentialAutofillIfNeeded()
+    }
+
+    /// 仅由地址输入框和最近地址菜单调用；自动填充不反向调用它，以免覆盖用户手动修改。
+    public func setRemoteURLFromUser(_ value: String) {
+        remoteURL = value
+        historyNotice = nil
+        remoteLocationChanged()
+        scheduleCredentialAutofillIfNeeded()
+        if !supportsBrowsing, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            updateSuggestedDirectoryName(for: value)
+        }
+    }
+
+    public func selectRecentRemote(_ entry: RemoteRepositoryHistoryEntry) {
+        guard entry.providerID == selectedProviderID else { return }
+        setRemoteURLFromUser(entry.url)
+    }
+
+    public func setUsernameFromUser(_ value: String) {
+        credentialRequestID += 1
+        credentialTask?.cancel()
+        isLoadingSavedCredentials = false
+        historyNotice = nil
+        credentialInputRevision += 1
+        username = value
+        password = ""
+        hidePassword()
+        remoteLocationChanged()
+    }
+
+    public func setPasswordFromUser(_ value: String) {
+        credentialRequestID += 1
+        credentialTask?.cancel()
+        isLoadingSavedCredentials = false
+        historyNotice = nil
+        credentialInputRevision += 1
+        password = value
+        remoteLocationChanged()
+    }
+
+    public func selectSavedAccount(_ account: SavedRepositoryAccount) {
+        guard supportsCredentials,
+              RemoteRepositoryHistoryStore.credentialServer(for: remoteURL) == account.server else { return }
+        hidePassword()
+        clearCredentials()
+        invalidateRemoteTree()
+        activeCredentialServer = account.server
+        loadSavedCredentials(username: account.username, server: account.server)
+    }
+
+    public func removeRecentRemote(_ entry: RemoteRepositoryHistoryEntry) { remoteHistory.remove(entry) }
+
+    public func removeSavedAccount(_ account: SavedRepositoryAccount) {
+        // “忘记”必须使正在返回的旧密码失效，不能在删除后又填回输入框。
+        credentialRequestID += 1
+        credentialTask?.cancel()
+        isLoadingSavedCredentials = false
+        let token = credentialRequestID
+        let inputRevision = credentialInputRevision
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.remoteHistory.removeAccount(account)
+                guard self.credentialRequestID == token,
+                      self.credentialInputRevision == inputRevision else { return }
+                if self.username == account.username,
+                   RemoteRepositoryHistoryStore.credentialServer(for: self.remoteURL) == account.server {
+                    self.clearCredentials()
+                    self.invalidateRemoteTree()
+                }
+            } catch {
+                self.historyNotice = "无法忘记 SVN 账号：\(error.localizedDescription)"
+            }
+        }
     }
 
     /// URL 与身份信息都会影响 SVN 服务端可见目录，因此不能继续使用此前读取的树。
@@ -114,7 +216,7 @@ public final class RepositoryAcquisitionModel {
     }
 
     public func advanceWizard() {
-        guard !isBusy else { return }
+        guard !isBusy, !isLoadingSavedCredentials else { return }
         errorMessage = nil
         switch wizardStep {
         case .connection:
@@ -278,6 +380,10 @@ public final class RepositoryAcquisitionModel {
                 self.progressMessage = result.summary
                 self.transferProgress.finish(result.summary)
                 if case .succeeded = result.outcome {
+                    await self.recordSuccessfulRemoteUse(providerID: option.providerID, url: sourceURL,
+                                                         credentials: credentials)
+                    // 密码保存可在关闭窗口后才完成；此时不能再清空新界面或触发旧的导航回调。
+                    guard self.requestID == token else { return }
                     self.clearCredentials()
                     onSuccess(result.destination)
                 }
@@ -316,9 +422,13 @@ public final class RepositoryAcquisitionModel {
     public func reset() {
         guard !isBusy else { return }
         remoteURL = ""
-        username = ""
-        password = ""
+        clearCredentials()
+        activeCredentialServer = nil
+        credentialRequestID += 1
+        credentialTask?.cancel()
+        isLoadingSavedCredentials = false
         isPasswordVisible = false
+        historyNotice = nil
         destinationParent = nil
         directoryName = ""
         directoryNameIsSuggested = true
@@ -355,6 +465,11 @@ public final class RepositoryAcquisitionModel {
                 }
                 self.isBrowsing = false
                 self.progressMessage = ""
+                // 仅浏览用户最初输入的根地址成功后记忆；展开子目录不会污染地址历史。
+                if makesSelection {
+                    await self.recordSuccessfulRemoteUse(providerID: providerID, url: self.remoteURL,
+                                                         credentials: credentials)
+                }
             } catch is CancellationError {
                 guard let self, self.requestID == token else { return }
                 self.isBrowsing = false
@@ -385,6 +500,104 @@ public final class RepositoryAcquisitionModel {
     private func clearCredentials() {
         username = ""
         password = ""
+        credentialInputRevision += 1
+    }
+
+    /// 关闭窗口时清除内存中短生命周期的凭据；成功保存的历史不受影响。
+    public func endSession() {
+        hidePassword()
+        clearCredentials()
+        activeCredentialServer = nil
+        requestID += 1
+        credentialRequestID += 1
+        credentialTask?.cancel()
+        isLoadingSavedCredentials = false
+    }
+
+    private func scheduleCredentialAutofillIfNeeded() {
+        let server = RemoteRepositoryHistoryStore.credentialServer(for: remoteURL)
+        // 同服务器只按服务器维度读取凭据。路径编辑期间保留正在进行的读取，也不覆盖手工修改。
+        if supportsCredentials, let server, activeCredentialServer == server { return }
+        credentialRequestID += 1
+        credentialTask?.cancel()
+        isLoadingSavedCredentials = false
+        let token = credentialRequestID
+        guard supportsCredentials, let server else {
+            activeCredentialServer = nil
+            clearCredentials()
+            return
+        }
+        // 继续编辑同一服务器内的路径时，不重新覆盖用户已编辑的账号或密码。
+        guard activeCredentialServer != server else { return }
+        activeCredentialServer = server
+        clearCredentials()
+        let inputRevision = credentialInputRevision
+        let url = remoteURL
+        isLoadingSavedCredentials = true
+        credentialTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(260))
+            guard !Task.isCancelled, let self else { return }
+            do {
+                let credentials = try await self.remoteHistory.credentials(for: url)
+                guard !Task.isCancelled,
+                      self.credentialRequestID == token,
+                      self.activeCredentialServer == server,
+                      self.credentialInputRevision == inputRevision,
+                      RemoteRepositoryHistoryStore.credentialServer(for: self.remoteURL) == server else { return }
+                self.isLoadingSavedCredentials = false
+                if let credentials {
+                    self.username = credentials.username
+                    self.password = credentials.password
+                }
+            } catch {
+                guard self.credentialRequestID == token else { return }
+                self.isLoadingSavedCredentials = false
+                self.historyNotice = "无法读取已记住的 SVN 账号：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func loadSavedCredentials(username expectedUsername: String, server: String) {
+        credentialRequestID += 1
+        credentialTask?.cancel()
+        let token = credentialRequestID
+        let inputRevision = credentialInputRevision
+        let url = remoteURL
+        isLoadingSavedCredentials = true
+        credentialTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let credentials = try await self.remoteHistory.credentials(for: url, username: expectedUsername)
+                guard !Task.isCancelled,
+                      self.credentialRequestID == token,
+                      self.activeCredentialServer == server,
+                      self.credentialInputRevision == inputRevision,
+                      RemoteRepositoryHistoryStore.credentialServer(for: self.remoteURL) == server else { return }
+                self.isLoadingSavedCredentials = false
+                if let credentials {
+                    self.username = credentials.username
+                    self.password = credentials.password
+                }
+            } catch {
+                guard self.credentialRequestID == token else { return }
+                self.isLoadingSavedCredentials = false
+                self.historyNotice = "无法读取已记住的 SVN 账号：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func recordSuccessfulRemoteUse(providerID: ProviderID, url: String,
+                                           credentials: RepositoryCredentials?) async {
+        let normalized = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return }
+        remoteHistory.record(providerID: providerID, url: normalized)
+        guard providerID == .svn, let credentials,
+              !credentials.username.isEmpty, !credentials.password.isEmpty else { return }
+        do {
+            try await remoteHistory.remember(credentials, for: normalized)
+        } catch {
+            historyNotice = "地址已记住，但无法保存 SVN 密码：\(error.localizedDescription)"
+        }
     }
 
     private func suggestedDirectoryName(for url: String) -> String {

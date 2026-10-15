@@ -91,6 +91,172 @@ final class RepositoryAcquisitionModelTests: XCTestCase {
         XCTAssertEqual(model.selectedRemoteURL, selectedURL)
         XCTAssertEqual(model.directoryName, "root")
     }
+
+    func testSuccessfulSVNBrowseRecordsRootAddressAndCredentials() async throws {
+        let secrets = MemoryRepositoryCredentialStore()
+        let history = RemoteRepositoryHistoryStore(defaults: nil, secrets: secrets)
+        let provider = AcquisitionFixtureProvider { location in
+            RemoteDirectoryListing(url: location.url, entries: [])
+        }
+        let model = RepositoryAcquisitionModel(service: RepositoryService(providers: [provider]), remoteHistory: history)
+        await prepare(model)
+        model.selectProvider(.svn)
+        model.remoteURL = "https://example.test:8443/svn/root"
+        model.username = "zym"
+        model.password = "secret"
+        model.browseRoot()
+        var credentials: RepositoryCredentials?
+        for _ in 0..<25 {
+            credentials = try await history.credentials(for: "https://example.test:8443/svn/another-path")
+            if credentials != nil { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        XCTAssertEqual(history.entries(for: .svn).map(\.url), ["https://example.test:8443/svn/root"])
+        XCTAssertEqual(credentials?.username, "zym")
+        XCTAssertEqual(credentials?.password, "secret")
+    }
+
+    func testChangingSVNServerDoesNotLetLateCredentialFillOverwriteManualInput() async throws {
+        let secrets = MemoryRepositoryCredentialStore()
+        let history = RemoteRepositoryHistoryStore(defaults: nil, secrets: secrets)
+        try await history.remember(RepositoryCredentials(username: "old", password: "old-password"),
+                                   for: "https://old.example.test/svn/root")
+        try await history.remember(RepositoryCredentials(username: "new", password: "new-password"),
+                                   for: "https://new.example.test/svn/root")
+        let provider = AcquisitionFixtureProvider { location in RemoteDirectoryListing(url: location.url, entries: []) }
+        let model = RepositoryAcquisitionModel(service: RepositoryService(providers: [provider]), remoteHistory: history)
+        await prepare(model)
+        model.selectProvider(.svn)
+        model.setRemoteURLFromUser("https://old.example.test/svn/root")
+        model.setRemoteURLFromUser("https://new.example.test/svn/root")
+        model.setUsernameFromUser("manual")
+        model.setPasswordFromUser("manual-password")
+        try await Task.sleep(for: .milliseconds(400))
+
+        XCTAssertEqual(model.username, "manual")
+        XCTAssertEqual(model.password, "manual-password")
+        XCTAssertFalse(model.isLoadingSavedCredentials)
+    }
+
+    func testEditingPathOnSameServerKeepsPendingAutofill() async throws {
+        let history = RemoteRepositoryHistoryStore(defaults: nil, secrets: MemoryRepositoryCredentialStore())
+        try await history.remember(RepositoryCredentials(username: "zym", password: "saved-password"),
+                                   for: "https://same.example.test/svn/first")
+        let provider = AcquisitionFixtureProvider { location in RemoteDirectoryListing(url: location.url, entries: []) }
+        let model = RepositoryAcquisitionModel(service: RepositoryService(providers: [provider]), remoteHistory: history)
+        await prepare(model)
+        model.selectProvider(.svn)
+        model.setRemoteURLFromUser("https://same.example.test/svn/first")
+        model.setRemoteURLFromUser("https://same.example.test/svn/second")
+        try await Task.sleep(for: .milliseconds(400))
+
+        XCTAssertEqual(model.username, "zym")
+        XCTAssertEqual(model.password, "saved-password")
+        XCTAssertFalse(model.isLoadingSavedCredentials)
+    }
+
+    func testForgettingAccountInvalidatesLateCredentialRead() async throws {
+        let secrets = DelayedCredentialStore()
+        let history = RemoteRepositoryHistoryStore(defaults: nil, secrets: secrets)
+        try await history.remember(RepositoryCredentials(username: "zym", password: "saved-password"),
+                                   for: "https://forget.example.test/svn/root")
+        await secrets.delayReads()
+        let provider = AcquisitionFixtureProvider { location in RemoteDirectoryListing(url: location.url, entries: []) }
+        let model = RepositoryAcquisitionModel(service: RepositoryService(providers: [provider]), remoteHistory: history)
+        await prepare(model)
+        model.selectProvider(.svn)
+        model.setRemoteURLFromUser("https://forget.example.test/svn/root")
+        await secrets.waitUntilReadStarted()
+        model.removeSavedAccount(try XCTUnwrap(history.accounts.first))
+        await secrets.releaseRead()
+        try await Task.sleep(for: .milliseconds(80))
+
+        XCTAssertTrue(model.username.isEmpty)
+        XCTAssertTrue(model.password.isEmpty)
+        XCTAssertFalse(model.isLoadingSavedCredentials)
+    }
+
+    func testFailedBrowseDoesNotReplaceSavedCredentials() async throws {
+        let history = RemoteRepositoryHistoryStore(defaults: nil, secrets: MemoryRepositoryCredentialStore())
+        try await history.remember(RepositoryCredentials(username: "old", password: "old-password"),
+                                   for: "https://failure.example.test/svn/root")
+        let provider = AcquisitionFixtureProvider { _ in throw VersionControlError.unsupported("fixture failure") }
+        let model = RepositoryAcquisitionModel(service: RepositoryService(providers: [provider]), remoteHistory: history)
+        await prepare(model)
+        model.selectProvider(.svn)
+        model.remoteURL = "https://failure.example.test/svn/root"
+        model.username = "new"
+        model.password = "new-password"
+        model.browseRoot()
+        try await Task.sleep(for: .milliseconds(80))
+
+        let retained = try await history.credentials(for: "https://failure.example.test/svn/other")
+        XCTAssertEqual(retained?.username, "old")
+        XCTAssertEqual(retained?.password, "old-password")
+    }
+
+    func testAddressHistoryRestoresFromPersistentDefaults() {
+        let suite = "RepHub.RepositoryAcquisitionModelTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let first = RemoteRepositoryHistoryStore(defaults: defaults, secrets: MemoryRepositoryCredentialStore())
+        first.record(providerID: .git, url: "https://example.test/team/repo.git")
+        let restored = RemoteRepositoryHistoryStore(defaults: defaults, secrets: MemoryRepositoryCredentialStore())
+
+        XCTAssertEqual(restored.entries(for: .git).map(\.url), ["https://example.test/team/repo.git"])
+    }
+
+    func testClosingAndReopeningRehydratesSavedCredentials() async throws {
+        let history = RemoteRepositoryHistoryStore(defaults: nil, secrets: MemoryRepositoryCredentialStore())
+        try await history.remember(RepositoryCredentials(username: "zym", password: "saved-password"),
+                                   for: "https://reopen.example.test/svn/root")
+        let provider = AcquisitionFixtureProvider { location in RemoteDirectoryListing(url: location.url, entries: []) }
+        let model = RepositoryAcquisitionModel(service: RepositoryService(providers: [provider]), remoteHistory: history)
+        await prepare(model)
+        model.setRemoteURLFromUser("https://reopen.example.test/svn/root")
+        try await Task.sleep(for: .milliseconds(400))
+        model.endSession()
+        XCTAssertTrue(model.password.isEmpty)
+        model.prepare()
+        try await Task.sleep(for: .milliseconds(400))
+
+        XCTAssertEqual(model.username, "zym")
+        XCTAssertEqual(model.password, "saved-password")
+    }
+
+    private func prepare(_ model: RepositoryAcquisitionModel) async {
+        model.prepare()
+        for _ in 0..<16 { await Task.yield() }
+    }
+
+    func testSuccessfulGitAcquisitionRecordsAddressAndReopensConnectionPage() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("RepHub-GitHistory-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let history = RemoteRepositoryHistoryStore()
+        let model = RepositoryAcquisitionModel(
+            service: RepositoryService(providers: [GitAcquisitionFixtureProvider(createsWorkingCopy: true)]),
+            remoteHistory: history)
+        await prepare(model)
+        let source = "https://example.test/team/new-repository.git"
+        model.setRemoteURLFromUser(source)
+        XCTAssertEqual(model.directoryName, "new-repository")
+        model.setDirectoryName("custom-name")
+        model.selectRecentRemote(RemoteRepositoryHistoryEntry(providerID: .git, url: source, lastUsedAt: Date()))
+        XCTAssertEqual(model.directoryName, "custom-name")
+        model.destinationParent = root
+        let finished = expectation(description: "Git acquisition finishes")
+        model.acquire { _ in finished.fulfill() }
+        await fulfillment(of: [finished], timeout: 3)
+        XCTAssertEqual(history.entries(for: .git).map(\.url), [source])
+
+        model.endSession()
+        model.prepare()
+        XCTAssertEqual(model.wizardStep, .connection)
+        XCTAssertFalse(model.transferHasFinished)
+        XCTAssertEqual(model.recentRemoteEntries.map(\.url), [source])
+    }
 }
 
 private actor LateBrowseGate {
@@ -122,6 +288,46 @@ private actor LateBrowseGate {
     }
 }
 
+private actor DelayedCredentialStore: RepositoryCredentialStore {
+    private var values: [String: String] = [:]
+    private var shouldDelayReads = false
+    private var readWaiters: [CheckedContinuation<Void, Never>] = []
+    private var readContinuation: CheckedContinuation<Void, Never>?
+
+    func delayReads() { shouldDelayReads = true }
+
+    func password(forServer server: String, username: String) async throws -> String? {
+        let value = values[key(server, username)]
+        if shouldDelayReads {
+            let waiters = readWaiters
+            readWaiters.removeAll()
+            waiters.forEach { $0.resume() }
+            await withCheckedContinuation { readContinuation = $0 }
+        }
+        return value
+    }
+
+    func save(_ credentials: RepositoryCredentials, forServer server: String) async throws {
+        values[key(server, credentials.username)] = credentials.password
+    }
+
+    func remove(forServer server: String, username: String) async throws {
+        values.removeValue(forKey: key(server, username))
+    }
+
+    func waitUntilReadStarted() async {
+        if readContinuation != nil { return }
+        await withCheckedContinuation { readWaiters.append($0) }
+    }
+
+    func releaseRead() {
+        readContinuation?.resume()
+        readContinuation = nil
+    }
+
+    private func key(_ server: String, _ username: String) -> String { server + "\u{0}" + username }
+}
+
 private struct AcquisitionFixtureProvider: RepositoryAcquisitionProvider {
     let browse: @Sendable (RemoteRepositoryLocation) async throws -> RemoteDirectoryListing
 
@@ -149,6 +355,7 @@ private struct AcquisitionFixtureProvider: RepositoryAcquisitionProvider {
 }
 
 private struct GitAcquisitionFixtureProvider: RepositoryAcquisitionProvider {
+    var createsWorkingCopy = false
     var id: ProviderID { .git }
     var displayName: String { "Fixture Git" }
     var acquisitionOption: RepositoryAcquisitionOption {
@@ -162,6 +369,10 @@ private struct GitAcquisitionFixtureProvider: RepositoryAcquisitionProvider {
     func diff(in binding: RepositoryBinding, path: String?, revision: String?) async throws -> RepositoryPatch { RepositoryPatch(text: "") }
     func acquire(_ location: RemoteRepositoryLocation, to destination: URL,
                  progress: @escaping RepositoryOperationProgressHandler) async throws {
+        if createsWorkingCopy {
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false)
+            return
+        }
         throw VersionControlError.unsupported("测试不执行获取。")
     }
 }

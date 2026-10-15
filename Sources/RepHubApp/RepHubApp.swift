@@ -35,6 +35,8 @@ struct RepHubApp: App {
         _workspace = State(initialValue: WorkspaceModel(service: repositories,
                                                         aiSettings: settings, aiService: service,
                                                         recentRepositories: RecentRepositoryStore(defaults: .standard),
+                                                        remoteHistory: RemoteRepositoryHistoryStore(defaults: .standard,
+                                                            secrets: KeychainRepositoryCredentialStore()),
                                                         workspaceLinks: WorkspaceLinkStore(defaults: .standard),
                                                         monitor: WorkspaceMonitor(service: repositories, defaults: .standard),
                                                         migrationService: migrations,

@@ -29,7 +29,8 @@ public struct RepositoryAcquisitionOption: Identifiable, Sendable {
     }
 }
 
-/// 仅在本次应用会话内使用，不编码、不写入配置或命令行参数。
+/// 仅在本次应用会话内使用，不编码、不写入配置或命令行参数。若用户选择记住 SVN 凭据，
+/// 由 `RepositoryCredentialStore` 单独保存密码，历史记录仅保留服务端和账号元数据。
 public struct RepositoryCredentials: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     public let username: String
     public let password: String
