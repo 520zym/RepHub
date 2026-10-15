@@ -17,12 +17,44 @@ public struct RepositoryOperationProgress: Sendable {
     public let fractionCompleted: Double?
     public let detail: String?
     public let records: [RepositoryProgressRecord]
+    /// 可量化的传输信息。`isEstimated` 为真时，它只表示适配器已观察到的本地写入或处理量，
+    /// 绝不能当作网络层下载字节。
+    public let transferStatistics: RepositoryTransferStatistics?
     public init(_ message: String, fractionCompleted: Double? = nil, detail: String? = nil,
-                records: [RepositoryProgressRecord] = []) {
+                records: [RepositoryProgressRecord] = [],
+                transferStatistics: RepositoryTransferStatistics? = nil) {
         self.message = message
         self.fractionCompleted = fractionCompleted.flatMap { $0.isFinite ? min(1, max(0, $0)) : nil }
         self.detail = detail
         self.records = records
+        self.transferStatistics = transferStatistics
+    }
+}
+
+/// 进度展示使用的传输统计。SVN CLI 不报告可信的网络字节时，适配器可报告本地写入估算，
+/// 并必须将 `isEstimated` 设为真。
+public struct RepositoryTransferStatistics: Sendable, Equatable {
+    public let processedBytes: Int64
+    public let elapsed: TimeInterval
+    public let isEstimated: Bool
+
+    public init(processedBytes: Int64, elapsed: TimeInterval, isEstimated: Bool) {
+        self.processedBytes = max(0, processedBytes)
+        self.elapsed = max(0, elapsed.isFinite ? elapsed : 0)
+        self.isEstimated = isEstimated
+    }
+
+    public var bytesPerSecond: Double? {
+        guard elapsed > 0 else { return nil }
+        return Double(processedBytes) / elapsed
+    }
+
+    /// 仅供需使用整数格式化器的界面消费。异常浮点值不转为整数；有限但超过
+    /// `Int64` 表示范围的速度饱和显示，避免 `Double -> Int64` 转换溢出。
+    public var roundedBytesPerSecond: Int64? {
+        guard let value = bytesPerSecond, value.isFinite, value >= 0 else { return nil }
+        guard value < Double(Int64.max) else { return Int64.max }
+        return Int64(value.rounded())
     }
 }
 

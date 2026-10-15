@@ -120,6 +120,23 @@ final class WorkspaceModelTests: XCTestCase {
         XCTAssertTrue(requests.isEmpty)
     }
 
+    func testTrackedOfficeDocumentUsesLocalSystemPreviewInsteadOfVersionControlDiff() async throws {
+        let directory = try makeDirectory()
+        let document = directory.appendingPathComponent("设计方案.docx")
+        try Data([0x50, 0x4b, 0x03, 0x04]).write(to: document)
+        let provider = WorkspaceFixtureProvider(workingChanges: [FileChange(path: "设计方案.docx", kind: .modified)])
+        let model = WorkspaceModel(service: RepositoryService(providers: [provider]))
+
+        model.open(directory)
+        try await waitUntil { !model.isLoading && model.filePreview?.documentKind == .word }
+
+        XCTAssertEqual(model.selectedPath, "设计方案.docx")
+        XCTAssertEqual(model.filePreview?.systemPreviewURL, document.standardizedFileURL)
+        XCTAssertNil(model.patch)
+        let requests = await provider.log.diffRequests()
+        XCTAssertFalse(requests.contains { $0.path == "设计方案.docx" }, "办公文档不应被请求为逐行版本控制差异")
+    }
+
     func testOpenAutomaticallySelectsReadableSourceFileAndLoadsWorkingDiff() async throws {
         let provider = WorkspaceFixtureProvider()
         let model = WorkspaceModel(service: RepositoryService(providers: [provider]))

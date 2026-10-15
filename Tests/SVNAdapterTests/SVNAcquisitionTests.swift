@@ -33,6 +33,10 @@ final class SVNAcquisitionTests: XCTestCase {
         XCTAssertTrue(entry.url.contains("%E5%AD%90"))
         XCTAssertTrue(entry.url.contains("%20"))
         XCTAssertTrue(entry.url.contains("%40"))
+        // 测试设施先创建 trunk (r1)、提交初始文件 (r2)，此处创建目录为 r3。
+        XCTAssertEqual(entry.latestRevision, "3")
+        XCTAssertNotNil(entry.latestDate)
+        XCTAssertFalse(entry.latestAuthor?.isEmpty ?? true)
 
         let destination = fixture.root.appendingPathComponent("checkout-target", isDirectory: true)
         let progress = ProgressMessages()
@@ -120,33 +124,38 @@ final class SVNAcquisitionTests: XCTestCase {
         server.executableURL = URL(fileURLWithPath: svnserve)
         server.arguments = [
             "--daemon", "--foreground", "--root", fixture.root.appendingPathComponent("remotes").path,
-            "--listen-host", "127.0.0.1", "--listen-port", String(port)
+            "--listen-host", "127.0.0.1", "--listen-port", String(port), "--threads"
         ]
         server.standardOutput = FileHandle.nullDevice
         server.standardError = FileHandle.nullDevice
         try server.run()
         defer {
             if server.isRunning { server.terminate() }
-            server.waitUntilExit()
         }
-        try await waitForLoopbackServer(port: port, process: server)
+        do {
+            try await waitForLoopbackServer(port: port, process: server)
 
-        let remote = "svn://127.0.0.1:\(port)/svn-repository/trunk"
-        let provider = SVNProvider(runner: fixture.runner)
-        let credentials = RepositoryCredentials(username: "fixture-user", password: "fixture-password")
-        let listing = try await provider.browseRemote(RemoteRepositoryLocation(url: remote, credentials: credentials))
-        XCTAssertTrue(listing.entries.contains { $0.name == "README.md" })
+            let remote = "svn://127.0.0.1:\(port)/svn-repository/trunk"
+            let provider = SVNProvider(runner: fixture.runner)
+            let credentials = RepositoryCredentials(username: "fixture-user", password: "fixture-password")
+            let listing = try await provider.browseRemote(RemoteRepositoryLocation(url: remote, credentials: credentials))
+            XCTAssertTrue(listing.entries.contains { $0.name == "README.md" })
 
-        let destination = fixture.root.appendingPathComponent("authenticated-checkout", isDirectory: true)
-        try await provider.acquire(RemoteRepositoryLocation(url: remote), to: destination, progress: { _ in })
-        XCTAssertTrue(FileManager.default.fileExists(atPath: destination.appendingPathComponent("README.md").path))
+            let destination = fixture.root.appendingPathComponent("authenticated-checkout", isDirectory: true)
+            try await provider.acquire(RemoteRepositoryLocation(url: remote), to: destination, progress: { _ in })
+            XCTAssertTrue(FileManager.default.fileExists(atPath: destination.appendingPathComponent("README.md").path))
 
-        let candidate = try await provider.detect(at: destination)
-        let binding = try XCTUnwrap(candidate)
-        let history = try await provider.history(in: binding, limit: 1, reference: nil)
-        XCTAssertEqual(history.first?.message, "fixture initial commit")
-        let update = try await provider.perform(.update, in: binding, progress: { _ in })
-        XCTAssertEqual(update.outcome, .succeeded)
+            let candidate = try await provider.detect(at: destination)
+            let binding = try XCTUnwrap(candidate)
+            let history = try await provider.history(in: binding, limit: 1, reference: nil)
+            XCTAssertEqual(history.first?.message, "fixture initial commit")
+            let update = try await provider.perform(.update, in: binding, progress: { _ in })
+            XCTAssertEqual(update.outcome, .succeeded)
+        } catch {
+            await stopLoopbackServer(server)
+            throw error
+        }
+        await stopLoopbackServer(server)
     }
 }
 
@@ -201,5 +210,15 @@ private func loopbackServerAcceptsConnections(port: UInt16) -> Bool {
     address.sin_addr = in_addr(s_addr: INADDR_LOOPBACK.bigEndian)
     return withUnsafePointer(to: &address) {
         $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0 }
+    }
+}
+
+/// 测试清理只作有界异步等待，避免工具进程异常时阻塞整个测试套件。
+private func stopLoopbackServer(_ process: Process) async {
+    guard process.isRunning else { return }
+    process.terminate()
+    let deadline = ProcessInfo.processInfo.systemUptime + 1
+    while process.isRunning, ProcessInfo.processInfo.systemUptime < deadline {
+        try? await Task.sleep(for: .milliseconds(20))
     }
 }

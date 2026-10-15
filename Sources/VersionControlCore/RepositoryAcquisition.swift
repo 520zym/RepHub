@@ -51,8 +51,25 @@ public struct RemoteDirectoryEntry: Identifiable, Hashable, Sendable {
     public let name: String
     public let url: String
     public let isDirectory: Bool
-    public init(name: String, url: String, isDirectory: Bool) {
-        self.name = name; self.url = url; self.isDirectory = isDirectory
+    /// SVN `list --xml` 会在一次目录读取中返回该节点最近一次提交的信息；
+    /// 其他版本控制系统没有等价数据时保持为空，界面不得为填充这些字段额外请求远端。
+    public let latestRevision: String?
+    public let latestDate: Date?
+    public let latestAuthor: String?
+    public init(
+        name: String,
+        url: String,
+        isDirectory: Bool,
+        latestRevision: String? = nil,
+        latestDate: Date? = nil,
+        latestAuthor: String? = nil
+    ) {
+        self.name = name
+        self.url = url
+        self.isDirectory = isDirectory
+        self.latestRevision = latestRevision
+        self.latestDate = latestDate
+        self.latestAuthor = latestAuthor
     }
 }
 

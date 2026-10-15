@@ -21,11 +21,51 @@ public struct WorkspaceFilePreview: Sendable {
     public let text: String?
     public let message: String?
     public let isTruncated: Bool
+    /// 仅当文件已经过工作副本边界、普通文件和符号链接检查后才提供。
+    /// 界面可将它交给系统 Quick Look；不能据此访问工作区外的路径。
+    public let systemPreviewURL: URL?
+    public let documentKind: WorkspaceDocumentPreviewKind?
+    /// 同一路径的文件更新后会变化；Quick Look 据此重新读取预览内容。
+    public let systemPreviewIdentity: WorkspaceSystemPreviewIdentity?
 
-    public init(text: String?, message: String?, isTruncated: Bool) {
+    public init(text: String?, message: String?, isTruncated: Bool,
+                systemPreviewURL: URL? = nil, documentKind: WorkspaceDocumentPreviewKind? = nil,
+                systemPreviewIdentity: WorkspaceSystemPreviewIdentity? = nil) {
         self.text = text
         self.message = message
         self.isTruncated = isTruncated
+        self.systemPreviewURL = systemPreviewURL
+        self.documentKind = documentKind
+        self.systemPreviewIdentity = systemPreviewIdentity
+    }
+}
+
+public struct WorkspaceSystemPreviewIdentity: Sendable, Hashable {
+    public let modificationTime: TimeInterval
+    public let fileSize: Int
+
+    public init(modificationTime: TimeInterval, fileSize: Int) {
+        self.modificationTime = modificationTime
+        self.fileSize = fileSize
+    }
+}
+
+/// 可交给 macOS Quick Look 的常见办公文档类型。
+/// 具体渲染能力仍由系统已安装的 Quick Look 组件决定，应用不解析 Office/PDF 二进制内容。
+public enum WorkspaceDocumentPreviewKind: String, Sendable, Hashable {
+    case pdf
+    case word
+    case presentation
+    case spreadsheet
+
+    public init?(path: String) {
+        switch (path as NSString).pathExtension.lowercased() {
+        case "pdf": self = .pdf
+        case "doc", "docx": self = .word
+        case "ppt", "pptx": self = .presentation
+        case "xls", "xlsx": self = .spreadsheet
+        default: return nil
+        }
     }
 }
 
@@ -33,6 +73,8 @@ public struct WorkspaceFilePreview: Sendable {
 /// 不运行版本控制工具、不递归枚举目录，也不跟随符号链接。
 public actor WorkspaceFileService {
     public static let previewLimit = 1_024 * 1_024
+    /// Quick Look 需要读取完整源文件；避免在工作区中误选异常大的附件后长期占用内存或 I/O。
+    public static let systemPreviewFileSizeLimit = 256 * 1_024 * 1_024
 
     private let fileManager: FileManager
 
@@ -90,21 +132,53 @@ public actor WorkspaceFileService {
             return WorkspaceFilePreview(text: nil, message: "只能预览普通文件。", isTruncated: false)
         }
 
+        let documentKind = WorkspaceDocumentPreviewKind(path: path)
+        let resourceValues = try resolved.url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        let fileSize = resourceValues.fileSize ?? 0
+        let systemPreviewIdentity = documentKind.map { _ in
+            WorkspaceSystemPreviewIdentity(
+                modificationTime: resourceValues.contentModificationDate?.timeIntervalSinceReferenceDate ?? 0,
+                fileSize: fileSize
+            )
+        }
+        let systemPreviewURL: URL?
+        let systemPreviewMessage: String?
+        if documentKind != nil, fileSize > Self.systemPreviewFileSizeLimit {
+            systemPreviewURL = nil
+            systemPreviewMessage = "文档超过 256 MiB，未交给系统预览。"
+        } else {
+            systemPreviewURL = resolved.url
+            systemPreviewMessage = nil
+        }
+
         let handle = try FileHandle(forReadingFrom: resolved.url)
         defer { try? handle.close() }
         let data = try handle.read(upToCount: Self.previewLimit + 1) ?? Data()
         let isTruncated = data.count > Self.previewLimit
         let content = isTruncated ? Data(data.prefix(Self.previewLimit)) : data
         guard !content.contains(0) else {
-            return WorkspaceFilePreview(text: nil, message: "该文件包含二进制数据，无法按文本预览。", isTruncated: isTruncated)
+            return WorkspaceFilePreview(text: nil,
+                                        message: systemPreviewMessage ?? "该文件包含二进制数据，无法按文本预览。",
+                                        isTruncated: isTruncated,
+                                        systemPreviewURL: systemPreviewURL,
+                                        documentKind: documentKind,
+                                        systemPreviewIdentity: systemPreviewIdentity)
         }
         guard let text = decodedUTF8(content, mayEndMidCharacter: isTruncated) else {
-            return WorkspaceFilePreview(text: nil, message: "该文件不是 UTF-8 文本，无法预览。", isTruncated: isTruncated)
+            return WorkspaceFilePreview(text: nil,
+                                        message: systemPreviewMessage ?? "该文件不是 UTF-8 文本，无法预览。",
+                                        isTruncated: isTruncated,
+                                        systemPreviewURL: systemPreviewURL,
+                                        documentKind: documentKind,
+                                        systemPreviewIdentity: systemPreviewIdentity)
         }
         return WorkspaceFilePreview(
             text: text,
-            message: isTruncated ? "文件超过 1 MiB，仅显示前 1 MiB。" : nil,
-            isTruncated: isTruncated
+            message: systemPreviewMessage ?? (isTruncated ? "文件超过 1 MiB，仅显示前 1 MiB。" : nil),
+            isTruncated: isTruncated,
+            systemPreviewURL: systemPreviewURL,
+            documentKind: documentKind,
+            systemPreviewIdentity: systemPreviewIdentity
         )
     }
 

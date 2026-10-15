@@ -79,6 +79,49 @@ struct WorkspaceFileServiceTests {
         #expect(large.message?.contains("1 MiB") == true)
     }
 
+    @Test("常见办公文档仅返回已校验的系统预览地址")
+    func providesSystemPreviewDescriptorForSupportedDocuments() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.write(Data([0x50, 0x4b, 0x03, 0x04]), path: "资料/方案.docx")
+        try fixture.write(Data([0x25, 0x50, 0x44, 0x46]), path: "资料/说明.pdf")
+        try fixture.write(Data([0x50, 0x4b, 0x03, 0x04]), path: "资料/预算.xlsx")
+        try FileManager.default.createSymbolicLink(
+            at: fixture.root.appendingPathComponent("资料/链接.pdf"),
+            withDestinationURL: fixture.root.appendingPathComponent("资料/说明.pdf")
+        )
+        let service = WorkspaceFileService()
+
+        let word = try await service.preview(in: fixture.root, path: "资料/方案.docx")
+        #expect(word.documentKind == .word)
+        #expect(word.systemPreviewURL == fixture.root.appendingPathComponent("资料/方案.docx").standardizedFileURL)
+        let pdf = try await service.preview(in: fixture.root, path: "资料/说明.pdf")
+        #expect(pdf.documentKind == .pdf)
+        #expect(pdf.systemPreviewURL == fixture.root.appendingPathComponent("资料/说明.pdf").standardizedFileURL)
+        let sheet = try await service.preview(in: fixture.root, path: "资料/预算.xlsx")
+        #expect(sheet.documentKind == .spreadsheet)
+        #expect(sheet.systemPreviewURL != nil)
+
+        let link = try await service.preview(in: fixture.root, path: "资料/链接.pdf")
+        #expect(link.systemPreviewURL == nil)
+        #expect(link.documentKind == nil)
+    }
+
+    @Test("过大的文档不会交给系统预览")
+    func rejectsOversizedSystemPreview() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let url = fixture.root.appendingPathComponent("archive.pdf")
+        FileManager.default.createFile(atPath: url.path, contents: Data([0]))
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.truncate(atOffset: UInt64(WorkspaceFileService.systemPreviewFileSizeLimit + 1))
+        try handle.close()
+        let preview = try await WorkspaceFileService().preview(in: fixture.root, path: "archive.pdf")
+        #expect(preview.documentKind == .pdf)
+        #expect(preview.systemPreviewURL == nil)
+        #expect(preview.message?.contains("256 MiB") == true)
+    }
+
     @Test("外部编辑只返回工作副本内普通文件，拒绝链接和元数据")
     func externalEditingKeepsWorkspaceBoundary() async throws {
         let fixture = try Fixture()

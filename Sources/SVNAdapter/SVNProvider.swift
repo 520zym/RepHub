@@ -58,7 +58,14 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         let document = try SVNXMLDocument(data: result.data)
         let entries = try document.listEntries.map { entry in
             let childURL = try remoteChildURL(parent: address, name: entry.name)
-            return RemoteDirectoryEntry(name: entry.name, url: childURL, isDirectory: entry.isDirectory)
+            return RemoteDirectoryEntry(
+                name: entry.name,
+                url: childURL,
+                isDirectory: entry.isDirectory,
+                latestRevision: entry.revision,
+                latestDate: optionalDate(entry.date),
+                latestAuthor: entry.author
+            )
         }.sorted { lhs, rhs in
             if lhs.isDirectory != rhs.isDirectory { return lhs.isDirectory }
             return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
@@ -2110,6 +2117,12 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         return formatter.date(from: value) ?? .distantPast
     }
 
+    private func optionalDate(_ value: String?) -> Date? {
+        guard let value, !value.isEmpty else { return nil }
+        let date = parseDate(value)
+        return date == .distantPast ? nil : date
+    }
+
     private func decodedURLPath(_ url: URL) -> String {
         let encodedPath = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath ?? url.path
         return encodedPath.removingPercentEncoding ?? encodedPath
@@ -2358,6 +2371,9 @@ final class SVNXMLDocument: NSObject, XMLParserDelegate {
     struct ListEntry {
         let name: String
         let isDirectory: Bool
+        let revision: String?
+        let author: String?
+        let date: String?
     }
 
     private(set) var infoEntry: InfoEntry?
@@ -2367,8 +2383,7 @@ final class SVNXMLDocument: NSObject, XMLParserDelegate {
     private var currentStatus: StatusEntry?
     private var currentLog: LogEntry?
     private var currentPathAction: String?
-    private var currentListKind: String?
-    private var currentListName: String?
+    private var currentList: ListEntry?
     private var elementStack: [String] = []
     private var text = ""
 
@@ -2399,8 +2414,21 @@ final class SVNXMLDocument: NSObject, XMLParserDelegate {
         case "logentry":
             currentLog = LogEntry(revision: attributeDict["revision"] ?? "")
         case "entry" where elementStack.contains("list"):
-            currentListKind = attributeDict["kind"]
-            currentListName = nil
+            currentList = ListEntry(
+                name: "",
+                isDirectory: attributeDict["kind"] == "dir",
+                revision: nil,
+                author: nil,
+                date: nil
+            )
+        case "commit" where currentList != nil:
+            currentList = ListEntry(
+                name: currentList?.name ?? "",
+                isDirectory: currentList?.isDirectory ?? false,
+                revision: attributeDict["revision"],
+                author: currentList?.author,
+                date: currentList?.date
+            )
         case "path" where currentLog != nil:
             currentPathAction = attributeDict["action"] ?? ""
         default:
@@ -2419,11 +2447,26 @@ final class SVNXMLDocument: NSObject, XMLParserDelegate {
         if elementName == "uuid", currentLog == nil { infoEntry?.repositoryUUID = value }
         if elementName == "wcroot-abspath" { infoEntry?.workingCopyRoot = value }
         if elementName == "depth", currentLog == nil { infoEntry?.depth = value }
-        if elementName == "author" { currentLog?.author = value }
-        if elementName == "date" { currentLog?.date = value }
+        if elementName == "author" {
+            if currentLog != nil { currentLog?.author = value }
+            else if let list = currentList {
+                currentList = ListEntry(name: list.name, isDirectory: list.isDirectory,
+                                        revision: list.revision, author: value, date: list.date)
+            }
+        }
+        if elementName == "date" {
+            if currentLog != nil { currentLog?.date = value }
+            else if let list = currentList {
+                currentList = ListEntry(name: list.name, isDirectory: list.isDirectory,
+                                        revision: list.revision, author: list.author, date: value)
+            }
+        }
         if elementName == "msg" { currentLog?.message = value }
         // list 的 <name> 允许前后空格；这里不能沿用普通 XML 字段的 trim 后值。
-        if elementName == "name", currentListKind != nil { currentListName = text }
+        if elementName == "name", let list = currentList {
+            currentList = ListEntry(name: text, isDirectory: list.isDirectory,
+                                    revision: list.revision, author: list.author, date: list.date)
+        }
         if elementName == "path", let action = currentPathAction {
             currentLog?.changedPaths.append(ChangedPath(path: value, action: action))
             currentPathAction = nil
@@ -2436,10 +2479,9 @@ final class SVNXMLDocument: NSObject, XMLParserDelegate {
             logEntries.append(log)
             currentLog = nil
         }
-        if elementName == "entry", let kind = currentListKind, let name = currentListName {
-            listEntries.append(ListEntry(name: name, isDirectory: kind == "dir"))
-            currentListKind = nil
-            currentListName = nil
+        if elementName == "entry", let list = currentList, !list.name.isEmpty {
+            listEntries.append(list)
+            currentList = nil
         }
         _ = elementStack.popLast()
         text = ""

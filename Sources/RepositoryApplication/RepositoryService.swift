@@ -236,7 +236,7 @@ public actor RepositoryService {
         return RepositoryOperationProgress(sanitize(update.message), fractionCompleted: update.fractionCompleted,
             detail: update.detail.map(sanitize), records: update.records.map {
                 RepositoryProgressRecord(kind: $0.kind, message: sanitize($0.message), path: $0.path.map(sanitize))
-            })
+            }, transferStatistics: update.transferStatistics)
     }
 
     public func open(directory: URL, linkedDirectories: [URL] = []) async throws -> Workspace {

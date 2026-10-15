@@ -47,4 +47,16 @@ final class TransferProgressTests: XCTestCase {
         XCTAssertNotNil(state.startedAt)
         XCTAssertNotNil(state.lastActivityAt)
     }
+
+    func testStoresAndClearsTransferStatistics() {
+        let state = TransferProgressState()
+        state.begin("正在检出")
+        let statistics = RepositoryTransferStatistics(processedBytes: 2_048, elapsed: 2, isEstimated: true)
+        state.consume(RepositoryOperationProgress("正在检出", transferStatistics: statistics))
+        XCTAssertEqual(state.transferStatistics?.processedBytes, 2_048)
+        XCTAssertEqual(state.transferStatistics?.isEstimated, true)
+
+        state.clear()
+        XCTAssertNil(state.transferStatistics)
+    }
 }

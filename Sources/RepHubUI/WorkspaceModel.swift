@@ -1206,7 +1206,15 @@ public final class WorkspaceModel {
         selectedRevisionID = nil
         selectedPath = path
         revisionFiles = []
-        if snapshot?.changes.contains(where: { $0.path == path && $0.kind != .untracked }) == true {
+        // 常见办公文档交给受边界保护的工作区文件服务，再由界面使用系统 Quick Look。
+        // 它们没有可靠的逐行 VCS 差异，不能把本地文件伪装成历史版本内容。
+        if WorkspaceDocumentPreviewKind(path: path) != nil {
+            let value = try await fileBrowser.preview(path: path)
+            guard acceptsHistoryLoad(token, restoresOperation: restoresOperation), selectedBindingID == binding.id,
+                  selectedRevisionID == nil, selectedPath == path else { return }
+            patch = nil
+            filePreview = value
+        } else if snapshot?.changes.contains(where: { $0.path == path && $0.kind != .untracked }) == true {
             let value = try await service.diff(in: binding, path: path, revision: nil)
             guard acceptsHistoryLoad(token, restoresOperation: restoresOperation), selectedBindingID == binding.id, selectedRevisionID == nil, selectedPath == path else { return }
             filePreview = nil

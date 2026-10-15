@@ -30,10 +30,12 @@ struct RepositoryAcquisitionView: View {
             .padding(.horizontal, 22).padding(.top, 4).padding(.bottom, 14)
             if source == .local { localContent } else { remoteContent }
         }
-        .frame(width: 680)
+        .frame(width: 720)
         .background(palette.background)
         .foregroundStyle(palette.text)
         .onAppear { model.prepare() }
+        .onDisappear { model.hidePassword() }
+        .onChange(of: source) { _, _ in model.hidePassword() }
         .interactiveDismissDisabled(model.isBusy)
     }
 
@@ -46,12 +48,12 @@ struct RepositoryAcquisitionView: View {
                 .background(palette.selection.opacity(0.65), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
             VStack(alignment: .leading, spacing: 2) {
                 Text("打开仓库").font(.system(size: 15, weight: .semibold))
-                Text(source == .local ? "识别已有 Git 或 SVN 工作副本" : "克隆 Git，或浏览并检出 SVN 目录")
+                Text(source == .local ? "识别已有 Git 或 SVN 工作副本" : remoteSubtitle)
                     .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
             }
             Spacer()
             if !model.isBusy {
-                Button(action: dismiss) { Image(systemName: "xmark").font(.system(size: 11, weight: .semibold)) }
+                Button(action: { model.hidePassword(); dismiss() }) { Image(systemName: "xmark").font(.system(size: 11, weight: .semibold)) }
                     .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
                     .accessibilityLabel("关闭打开仓库窗口")
             }
@@ -86,128 +88,258 @@ struct RepositoryAcquisitionView: View {
     }
 
     @ViewBuilder private var remoteContent: some View {
-        if model.isAcquiring {
-            acquisitionProgressContent
+        if model.isAcquiring || model.transferHasFinished {
+            transferPage
         } else {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 15) {
-                    if model.isLoadingOptions {
-                        HStack(spacing: 8) { ProgressView().controlSize(.small); Text("正在准备版本控制方式…") }
-                            .font(.system(size: 12)).foregroundStyle(palette.secondaryText)
-                    } else if !model.options.isEmpty {
-                        WorkbenchSegmentedPicker(
-                            title: "远程仓库类型",
-                            selection: providerBinding,
-                            options: model.options.map { .init($0.providerID, $0.title) },
-                            palette: palette
-                        )
-                        .disabled(model.isAcquiring)
+            VStack(alignment: .leading, spacing: 0) {
+                wizardProgress
+                Group {
+                    switch model.wizardStep {
+                    case .connection: connectionPage
+                    case .browse: browsePage
+                    case .destination: destinationPage
+                    case .review: reviewPage
                     }
-
-                    field("远程地址") {
-                        TextField(model.supportsBrowsing ? "https://server/svn/repository" : "https://server/owner/repository.git", text: $model.remoteURL)
-                            .textFieldStyle(.plain).textSelection(.enabled)
-                            .onChange(of: model.remoteURL) { _, _ in model.remoteLocationChanged() }
-                            .disabled(model.isAcquiring)
-                    }
-
-                    if model.supportsCredentials {
-                        DisclosureGroup("需要认证") {
-                            VStack(spacing: 9) {
-                                inlineField("用户名", text: $model.username)
-                                    .onChange(of: model.username) { _, _ in model.remoteLocationChanged() }
-                                HStack(spacing: 10) {
-                                    Text("密码").font(.system(size: 12)).foregroundStyle(palette.secondaryText).frame(width: 44, alignment: .leading)
-                                    SecureField("仅本次会话使用", text: $model.password)
-                                        .textFieldStyle(.plain)
-                                        .onChange(of: model.password) { _, _ in model.remoteLocationChanged() }
-                                }
-                                .padding(.horizontal, 10).frame(height: 30)
-                                .background(palette.secondaryText.opacity(0.05), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-                            }
-                            .padding(.top, 8)
-                        }
-                        .font(.system(size: 12, weight: .medium))
-                        .tint(palette.accent)
-                        .disabled(model.isAcquiring)
-                    } else {
-                        Text("Git 使用系统凭据、钥匙串或 SSH 代理；不会在 RepHub 中保存密码。")
-                            .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
-                    }
-
-                    if model.supportsBrowsing { remoteBrowser.disabled(model.isAcquiring) } else { gitHint }
-                    destinationForm
-                    feedback
-                    actionBar
                 }
-                .padding(22)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                wizardFooter
             }
-            .frame(height: model.supportsBrowsing ? 590 : 410)
+            .frame(height: 500)
         }
     }
 
-    private var acquisitionProgressContent: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text(model.selectedOption?.actionTitle ?? "正在获取")
-                .font(.system(size: 13, weight: .semibold))
-            RepositoryTransferProgressView(
-                progress: model.transferProgress,
-                palette: palette,
-                source: selectedSourceSummary,
-                destination: model.destinationURL?.path,
-                isCancelling: model.isCancelling,
-                cancelTitle: "取消获取",
-                cancel: model.cancel
-            )
-            Text("取消会停止当前传输；已产生的暂存内容会保留，便于检查。")
-                .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
+    private var remoteSubtitle: String {
+        if model.isAcquiring { return "正在安全获取工作副本" }
+        if model.transferHasFinished { return "查看获取结果或重试" }
+        switch model.wizardStep {
+        case .connection: return "连接 Git 或 SVN 远程仓库"
+        case .browse: return "浏览并选择 SVN 仓库中的目录"
+        case .destination: return "选择新的本地工作副本位置"
+        case .review: return "确认来源和本地目标后开始获取"
         }
-        .padding(22)
-        .frame(height: 480, alignment: .topLeading)
     }
 
-    private var remoteBrowser: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("仓库目录").font(.system(size: 12, weight: .medium)).foregroundStyle(palette.secondaryText)
+    private var wizardProgress: some View {
+        let steps: [RepositoryAcquisitionModel.WizardStep] = model.usesBrowseStep
+            ? [.connection, .browse, .destination, .review]
+            : [.connection, .destination, .review]
+        return HStack(spacing: 7) {
+            ForEach(steps, id: \.self) { step in
+                let complete = step.rawValue <= model.wizardStep.rawValue
+                HStack(spacing: 5) {
+                    Image(systemName: complete ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 12, weight: .medium))
+                    Text(step.title).font(.system(size: 11, weight: step == model.wizardStep ? .semibold : .regular))
+                }
+                .foregroundStyle(complete ? palette.accent : palette.secondaryText)
+                if step != steps.last { Spacer(minLength: 3) }
+            }
+        }
+        .padding(.horizontal, 22).padding(.vertical, 12)
+        .background(palette.sidebar.opacity(0.45))
+    }
+
+    private var connectionPage: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                pageHeading("连接远程仓库", detail: "选择版本控制方式并填写远程地址。认证信息只保留在当前会话中。")
+                if model.isLoadingOptions {
+                    HStack(spacing: 8) { ProgressView().controlSize(.small); Text("正在准备版本控制方式…") }
+                        .font(.system(size: 12)).foregroundStyle(palette.secondaryText)
+                } else if !model.options.isEmpty {
+                    WorkbenchSegmentedPicker(title: "远程仓库类型", selection: providerBinding,
+                                               options: model.options.map { .init($0.providerID, $0.title) }, palette: palette)
+                }
+                field("远程地址") {
+                    TextField(model.supportsBrowsing ? "https://server/svn/repository" : "https://server/owner/repository.git", text: $model.remoteURL)
+                        .textFieldStyle(.plain).textSelection(.enabled)
+                        .onChange(of: model.remoteURL) { _, _ in model.remoteLocationChanged() }
+                }
+                if model.supportsCredentials { credentialsForm }
+                else { note("Git 使用系统凭据、钥匙串或 SSH 代理；RepHub 不保存密码。") }
+                wizardError
+            }
+            .padding(22)
+        }
+    }
+
+    private var credentialsForm: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text("SVN 认证").font(.system(size: 12, weight: .medium)).foregroundStyle(palette.secondaryText)
+            inlineField("用户名", text: $model.username)
+                .onChange(of: model.username) { _, _ in model.remoteLocationChanged() }
+            HStack(spacing: 10) {
+                Text("密码").font(.system(size: 12)).foregroundStyle(palette.secondaryText).frame(width: 62, alignment: .leading)
+                Group {
+                    if model.isPasswordVisible { TextField("仅本次会话使用", text: $model.password) }
+                    else { SecureField("仅本次会话使用", text: $model.password) }
+                }
+                .textFieldStyle(.plain)
+                .onChange(of: model.password) { _, _ in model.remoteLocationChanged() }
+                Button(action: model.togglePasswordVisibility) {
+                    Image(systemName: model.isPasswordVisible ? "eye.slash" : "eye")
+                        .font(.system(size: 12, weight: .medium)).frame(width: 22, height: 22)
+                }
+                .buttonStyle(.plain).foregroundStyle(palette.secondaryText)
+                .accessibilityLabel(model.isPasswordVisible ? "隐藏密码" : "显示密码")
+                .help(model.isPasswordVisible ? "隐藏密码" : "显示密码")
+            }
+            .padding(.horizontal, 10).frame(height: 32)
+            .background(palette.secondaryText.opacity(0.05), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+    }
+
+    private var browsePage: some View {
+        VStack(alignment: .leading, spacing: 15) {
+            pageHeading("选择 SVN 目录", detail: "展开文件夹继续浏览；点文件夹名称选择检出目标，箭头只负责展开或收起。")
+            HStack(spacing: 9) {
+                Text(model.remoteURL.removingPercentEncoding ?? model.remoteURL)
+                    .font(.system(size: 11, design: .monospaced)).foregroundStyle(palette.secondaryText)
+                    .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
                 Spacer()
-                Button(model.isBrowsing ? "正在读取…" : "浏览") { model.browseRoot() }
+                if model.isBrowsing {
+                    Button("取消读取", action: model.cancel)
+                        .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
+                }
+                Button(model.isBrowsing ? "正在读取…" : "读取根目录") { model.browseRoot() }
                     .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary, compact: true))
-                    .disabled(model.isBusy || model.remoteURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(model.isBrowsing)
             }
             if let rootURL = model.rootListingURL, let listing = model.listings[rootURL] {
-                RemoteDirectoryTree(
-                    listing: listing,
-                    listings: model.listings,
-                    expandedURLs: model.expandedURLs,
-                    selectedURL: model.selectedRemoteURL,
-                    palette: palette,
-                    toggle: model.toggleDirectory,
-                    toggleRoot: model.toggleRootDirectory,
-                    select: model.selectDirectory
-                )
-                .frame(height: 176, alignment: .topLeading)
-                .background(palette.sidebar.opacity(0.48), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                RemoteDirectoryTree(listing: listing, listings: model.listings, expandedURLs: model.expandedURLs,
+                                    selectedURL: model.selectedRemoteURL, palette: palette,
+                                    toggle: model.toggleDirectory, toggleRoot: model.toggleRootDirectory, select: model.selectDirectory)
+                    .frame(maxHeight: .infinity, alignment: .topLeading)
+                    .background(palette.sidebar.opacity(0.52), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             } else {
-                Text("连接后可展开目录并选择一个 SVN 文件夹；文件不会作为检出目标。")
-                    .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
-                    .padding(.horizontal, 12).frame(height: 56, alignment: .leading)
-                    .background(palette.sidebar.opacity(0.42), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                VStack(spacing: 10) {
+                    if model.isBrowsing { ProgressView().controlSize(.small); Text("正在读取仓库目录…") }
+                    else { Image(systemName: "folder.badge.questionmark").font(.system(size: 24)); Text("尚未读取远程目录") }
+                }
+                .font(.system(size: 12)).foregroundStyle(palette.secondaryText)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(palette.sidebar.opacity(0.42), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
-            if let selected = model.selectedRemoteURL {
-                Text("检出目录：\(selected.removingPercentEncoding ?? selected)")
-                    .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
-                    .lineLimit(2).truncationMode(.middle).textSelection(.enabled)
-                    .help(selected.removingPercentEncoding ?? selected)
+            if let selected = model.selectedRemoteURL { note("将检出：\(selected.removingPercentEncoding ?? selected)") }
+            wizardError
+        }
+        .padding(22)
+    }
+
+    private var destinationPage: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            pageHeading("选择本地位置", detail: "获取会在选定父目录下新建工作副本文件夹，不会改动已有目录。")
+            sourceSummary
+            destinationForm
+            wizardError
+            Spacer()
+        }
+        .padding(22)
+    }
+
+    private var reviewPage: some View {
+        VStack(alignment: .leading, spacing: 17) {
+            pageHeading(model.selectedOption?.actionTitle == "检出" ? "确认检出" : "确认克隆", detail: "开始后会显示当前文件和传输状态；可随时取消。")
+            VStack(alignment: .leading, spacing: 13) {
+                reviewRow("方式", value: model.selectedOption?.title ?? "")
+                reviewRow("来源", value: selectedSourceSummary ?? "")
+                reviewRow("本地位置", value: model.destinationURL?.path ?? "")
+                if model.supportsCredentials, !model.username.isEmpty { reviewRow("认证用户", value: model.username) }
             }
+            .padding(16).background(palette.sidebar.opacity(0.54), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+            note("密码不会显示、保存或写入日志。")
+            wizardError
+            Spacer()
+        }
+        .padding(22)
+    }
+
+    private var sourceSummary: some View {
+        HStack(spacing: 9) {
+            Image(systemName: model.supportsBrowsing ? "folder" : "arrow.triangle.branch").foregroundStyle(palette.accent)
+            Text(selectedSourceSummary ?? model.remoteURL).font(.system(size: 11, design: .monospaced))
+                .lineLimit(2).truncationMode(.middle).textSelection(.enabled)
+        }
+        .foregroundStyle(palette.secondaryText).padding(12)
+        .background(palette.sidebar.opacity(0.48), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+    }
+
+    private var wizardFooter: some View {
+        HStack {
+            Button(model.wizardStep == .connection ? "取消" : "上一步") {
+                if model.wizardStep == .connection { model.hidePassword(); dismiss() }
+                else { model.goBackInWizard() }
+            }
+            .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
+            Spacer()
+            if model.wizardStep == .review {
+                Button(model.selectedOption?.actionTitle ?? "获取", action: acquire)
+                    .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
+            } else {
+                Button("下一步", action: model.advanceWizard)
+                    .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
+            }
+        }
+        .padding(.horizontal, 22).padding(.vertical, 16).background(palette.surface)
+    }
+
+    private var transferPage: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    pageHeading(transferTitle, detail: transferDetail)
+                    RepositoryTransferProgressView(
+                        progress: model.transferProgress,
+                        palette: palette,
+                        source: selectedSourceSummary,
+                        destination: model.destinationURL?.path,
+                        isCancelling: model.isCancelling,
+                        cancelTitle: "取消获取",
+                        cancel: nil
+                    )
+                    transferOutcome
+                }
+                .padding(.horizontal, 22).padding(.top, 22).padding(.bottom, 12)
+            }
+            transferControls
+        }
+        .frame(height: 500, alignment: .topLeading)
+    }
+
+    private var transferTitle: String {
+        model.isAcquiring ? (model.selectedOption?.actionTitle ?? "正在获取") : (model.result?.summary ?? "获取未完成")
+    }
+
+    private var transferDetail: String {
+        if model.isAcquiring { return "正在获取工作副本，可查看当前文件和传输状态。" }
+        return model.errorMessage ?? model.result?.details ?? ""
+    }
+
+    @ViewBuilder private var transferOutcome: some View {
+        if let result = model.result, !isSuccessful(result.outcome) {
+            resultMessage(result.summary, details: result.details, partial: result.partialDirectory)
+        } else if let message = model.errorMessage {
+            resultMessage("操作未完成", details: message, partial: nil)
         }
     }
 
-    private var gitHint: some View {
-        Text("将克隆远程仓库的默认分支到新的本地文件夹。")
-            .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
-            .padding(.horizontal, 12).frame(height: 38, alignment: .leading)
-            .background(palette.sidebar.opacity(0.42), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    private var transferControls: some View {
+        HStack {
+            if model.isAcquiring {
+                Button(model.isCancelling ? "正在取消…" : "取消获取", action: model.cancel)
+                    .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary))
+                    .disabled(model.isCancelling)
+            } else {
+                Button("返回确认", action: model.retryTransfer)
+                    .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
+                Spacer()
+                Button("关闭") { model.hidePassword(); dismiss() }
+                    .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 22).padding(.vertical, 14)
+        .background(palette.surface)
     }
 
     private var destinationForm: some View {
@@ -235,43 +367,39 @@ struct RepositoryAcquisitionView: View {
         }
     }
 
-    @ViewBuilder private var feedback: some View {
-        if model.isBrowsing {
-            HStack(spacing: 9) {
-                ProgressView().controlSize(.small)
-                Text(model.progressMessage.isEmpty ? "正在处理…" : model.progressMessage)
-                    .font(.system(size: 12, weight: .medium))
-            }
+    @ViewBuilder private var wizardError: some View {
+        if let message = model.errorMessage {
+            Text(message).font(.system(size: 11)).foregroundStyle(palette.secondaryText)
+                .padding(11).frame(maxWidth: .infinity, alignment: .leading)
+                .background(palette.selection.opacity(0.5), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+    }
+
+    private func pageHeading(_ title: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title).font(.system(size: 17, weight: .semibold))
+            Text(detail).font(.system(size: 12)).foregroundStyle(palette.secondaryText).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func note(_ text: String) -> some View {
+        Text(text).font(.system(size: 11)).foregroundStyle(palette.secondaryText)
             .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-            .background(palette.selection.opacity(0.52), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background(palette.sidebar.opacity(0.48), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+    }
+
+    private func reviewRow(_ name: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 14) {
+            Text(name).font(.system(size: 11)).foregroundStyle(palette.secondaryText).frame(width: 54, alignment: .leading)
+            Text(value).font(.system(size: 12)).lineLimit(2).truncationMode(.middle).textSelection(.enabled)
         }
-        if let result = model.result, !isSuccessful(result.outcome) {
-            resultMessage(result.summary, details: result.details, partial: result.partialDirectory)
-            if !model.transferProgress.records.isEmpty {
-                RepositoryTransferProgressView(
-                    progress: model.transferProgress,
-                    palette: palette,
-                    source: selectedSourceSummary,
-                    destination: model.destinationURL?.path,
-                    isCancelling: false,
-                    cancelTitle: "",
-                    cancel: nil
-                )
-            }
-        }
-        if let errorMessage = model.errorMessage {
-            resultMessage("操作未完成", details: errorMessage, partial: nil)
-            if !model.transferProgress.records.isEmpty {
-                RepositoryTransferProgressView(
-                    progress: model.transferProgress,
-                    palette: palette,
-                    source: selectedSourceSummary,
-                    destination: model.destinationURL?.path,
-                    isCancelling: false,
-                    cancelTitle: "",
-                    cancel: nil
-                )
-            }
+    }
+
+    private func acquire() {
+        model.acquire { destination in
+            model.hidePassword()
+            dismiss()
+            openAcquiredFolder(destination)
         }
     }
 
@@ -288,27 +416,6 @@ struct RepositoryAcquisitionView: View {
     private func isSuccessful(_ outcome: RepositoryOperationOutcome) -> Bool {
         if case .succeeded = outcome { return true }
         return false
-    }
-
-    private var actionBar: some View {
-        HStack {
-            if model.isBusy {
-                Button(model.isCancelling ? "正在取消…" : "取消", action: model.cancel)
-                    .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary))
-                    .disabled(model.isCancelling)
-            } else {
-                Button("取消", action: dismiss).buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
-            }
-            Spacer()
-            Button(model.selectedOption?.actionTitle ?? "获取") {
-                model.acquire { destination in
-                    dismiss()
-                    openAcquiredFolder(destination)
-                }
-            }
-            .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
-            .disabled(model.isBusy || model.selectedOption == nil || model.destinationParent == nil || model.directoryName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (model.supportsBrowsing && model.selectedRemoteURL == nil) || (!model.supportsBrowsing && model.remoteURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
-        }
     }
 
     private var providerBinding: Binding<ProviderID> {
@@ -428,6 +535,8 @@ private struct RemoteDirectoryChildren: View {
                     HStack(spacing: 7) {
                         Image(systemName: "folder").foregroundStyle(palette.accent).frame(width: 14)
                         Text(entry.name).lineLimit(1).truncationMode(.middle)
+                    Spacer(minLength: 6)
+                    remoteMetadata(for: entry)
                     }
                     .font(.system(size: 11, weight: selected ? .semibold : .regular))
                     .frame(maxWidth: .infinity, alignment: .leading).frame(height: 24)
@@ -440,9 +549,32 @@ private struct RemoteDirectoryChildren: View {
             HStack(spacing: 7) {
                 Image(systemName: "doc").foregroundStyle(palette.secondaryText).frame(width: 14)
                 Text(entry.name).lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 6)
+                remoteMetadata(for: entry)
             }
             .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
             .padding(.leading, CGFloat(depth) * 16 + 7).padding(.trailing, 7).frame(height: 24)
         }
+    }
+
+    @ViewBuilder private func remoteMetadata(for entry: RemoteDirectoryEntry) -> some View {
+        if entry.latestRevision != nil || entry.latestDate != nil {
+            HStack(spacing: 5) {
+                if let revision = entry.latestRevision { Text("r\(revision)") }
+                if let date = entry.latestDate { Text(date.formatted(date: .abbreviated, time: .shortened)) }
+            }
+            .font(.system(size: 9, design: .monospaced))
+            .foregroundStyle(palette.secondaryText)
+            .lineLimit(1)
+            .help(metadataHelp(for: entry))
+        }
+    }
+
+    private func metadataHelp(for entry: RemoteDirectoryEntry) -> String {
+        var parts: [String] = []
+        if let revision = entry.latestRevision { parts.append("修订 r\(revision)") }
+        if let date = entry.latestDate { parts.append(date.formatted(date: .long, time: .shortened)) }
+        if let author = entry.latestAuthor, !author.isEmpty { parts.append(author) }
+        return parts.joined(separator: " · ")
     }
 }

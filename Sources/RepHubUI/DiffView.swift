@@ -173,7 +173,36 @@ public struct DiffView: View {
 
     @ViewBuilder
     private func filePreviewContent(_ preview: WorkspaceFilePreview, palette: CodePalette) -> some View {
-        if let text = preview.text {
+        if let kind = preview.documentKind {
+            if let url = preview.systemPreviewURL, let identity = preview.systemPreviewIdentity {
+                VStack(spacing: 0) {
+                    HStack(spacing: 7) {
+                        Image(systemName: "eye")
+                        Text(kind.localizedPreviewTitle)
+                        Text("由 macOS 快速查看提供 · 只读")
+                            .foregroundStyle(palette.secondary)
+                        Spacer(minLength: 0)
+                    }
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(palette.foreground)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(palette.secondary.opacity(0.06))
+
+                    DocumentPreviewView(url: url, kind: kind, identity: identity)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .background(palette.background)
+            } else {
+                ContentUnavailableView(
+                    "暂时无法显示\(kind.localizedPreviewTitle)",
+                    systemImage: "doc.badge.gearshape",
+                    description: Text(preview.message ?? "当前 macOS 的快速查看无法打开此文件。")
+                )
+                .foregroundStyle(palette.secondary)
+                .background(palette.background)
+            }
+        } else if let text = preview.text {
             VStack(spacing: 0) {
                 if let message = preview.message, !message.isEmpty {
                     Label(message, systemImage: "info.circle")

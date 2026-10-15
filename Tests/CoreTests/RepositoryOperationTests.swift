@@ -5,6 +5,19 @@ import VersionControlCore
 
 @Suite("工作区更新编排")
 struct RepositoryOperationTests {
+    @Test("传输速度整数展示不因异常浮点值溢出")
+    func saturatesTransferSpeedForDisplay() {
+        let normal = RepositoryTransferStatistics(processedBytes: 1_500, elapsed: 1, isEstimated: true)
+        #expect(normal.roundedBytesPerSecond == 1_500)
+
+        let saturated = RepositoryTransferStatistics(processedBytes: .max, elapsed: 0.5, isEstimated: true)
+        #expect(saturated.roundedBytesPerSecond == Int64.max)
+
+        let nonFinite = RepositoryTransferStatistics(processedBytes: .max, elapsed: .leastNonzeroMagnitude, isEstimated: true)
+        #expect(nonFinite.bytesPerSecond?.isInfinite == true)
+        #expect(nonFinite.roundedBytesPerSecond == nil)
+    }
+
     @Test("只执行所选目标，完成后读取全部绑定并脱敏记录")
     func performsOneTargetAndRefreshesAll() async throws {
         let root = try fixtureDirectory()

@@ -199,11 +199,13 @@ private struct HistoryReaderPane: View {
     var body: some View {
         SoftVerticalSplit(
             fixedSide: .top,
-            initialHeight: isFileHistory ? 156 : 310,
-            minimumFixed: isFileHistory ? 104 : 116,
-            flexibleMinimum: 170,
+            // 摘要与文件树都属于“阅读提交”的上下文，不应为了给差异让位而压成一条。
+            // 使用新 key，避免旧版本保存的窄高度继续影响新布局。
+            initialHeight: isFileHistory ? 180 : 456,
+            minimumFixed: isFileHistory ? 132 : 188,
+            flexibleMinimum: 220,
             storageKey: (showAsMainView ? "history.reader.summary" : "history.compact.summary")
-                + (isFileHistory ? ".file" : ".repository")
+                + (isFileHistory ? ".file.v2" : ".repository.v2")
         ) {
             HistoryRevisionInspector(
                 model: model,
@@ -542,14 +544,14 @@ private struct HistoryRevisionTable: View {
                                         row: graphRows[index],
                                         accent: palette.accent,
                                         width: graphWidth,
-                                        height: 56,
+                                        height: 72,
                                         drawsConnections: drawsGraphConnections
                                     )
                                 }
-                                VStack(alignment: .leading, spacing: 5) {
+                                VStack(alignment: .leading, spacing: 7) {
                                     HStack(spacing: 6) {
                                         Text(revision.subject)
-                                            .font(.system(size: 14, weight: .medium))
+                                            .font(.system(size: 14.5, weight: .semibold))
                                             .lineLimit(1)
                                             .layoutPriority(2)
                                         if let state = syncStatus?.states[revision.id], state != .synchronized {
@@ -568,6 +570,7 @@ private struct HistoryRevisionTable: View {
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
                             }
+                            .frame(minHeight: 72, alignment: .center)
                             .tag(Optional(revision.id))
                             .contentShape(Rectangle())
                             .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 12))
@@ -778,63 +781,14 @@ private struct HistoryRevisionInspector: View {
     @State private var revisionTree: [PathTreeNode<FileChange>] = []
 
     var body: some View {
-        VStack(alignment: .leading, spacing: isCompact ? 7 : 12) {
+        VStack(alignment: .leading, spacing: isCompact ? 7 : 10) {
             if !issues.isEmpty {
                 HistoryIssueNotice(message: issues.joined(separator: "\n"), palette: palette, isExpanded: $issueDetailsExpanded)
             }
             if let revision = selectedRevision {
-                HStack(alignment: .top, spacing: 12) {
-                    Text(revision.subject)
-                        .font(.system(size: 18, weight: .semibold))
-                        .lineLimit(isCompact ? 2 : 3)
-                        .layoutPriority(1)
-                    Spacer(minLength: 0)
-                    revisionActions(revision)
-                }
-                referenceLabels(revision.references)
-                revisionMetadata(revision)
-                if !messageBody.isEmpty {
-                    DisclosureGroup(isExpanded: $messageDetailsExpanded) {
-                        ScrollView {
-                            Text(messageBody).font(.callout).textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .frame(maxHeight: 88)
-                    } label: {
-                        HStack(spacing: 7) {
-                            Text("提交说明").font(.system(size: 12, weight: .medium))
-                            Text(messageBody).font(.system(size: 12)).foregroundStyle(palette.secondaryText).lineLimit(1)
-                        }
-                    }
-                    .tint(palette.accent)
-                }
+                revisionSummary(revision)
                 if model.historyFilePath == nil {
-                    HStack {
-                        Text("变更的文件  \(model.revisionFiles.count)")
-                            .font(.subheadline.weight(.semibold))
-                        Spacer()
-                        Button {
-                            showsChangedFiles.toggle()
-                        } label: {
-                            Label(showsChangedFiles ? "收起文件" : "展开文件", systemImage: showsChangedFiles ? "chevron.up" : "chevron.down")
-                                .labelStyle(.iconOnly)
-                        }
-                        .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
-                        .accessibilityLabel(showsChangedFiles ? "收起变更文件" : "展开变更文件")
-                        .help(showsChangedFiles ? "收起变更文件树，为代码差异留出更多空间" : "展开变更文件树")
-                        if showsChangedFiles {
-                            TreeExpansionControls(directoryIDs: revisionTree.flatMap(\.directoryIDs), collapsed: revisionCollapsed, palette: palette)
-                        }
-                    }
-                    .padding(.top, 2)
-                    if showsChangedFiles {
-                        revisionFiles
-                    } else {
-                        Text("已收起 \(model.revisionFiles.count) 个变更文件")
-                            .font(.caption)
-                            .foregroundStyle(palette.secondaryText)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
+                    changedFilesSection
                 }
             } else {
                 ContentUnavailableView("选择一个提交", systemImage: "arrowshape.turn.up.right")
@@ -842,10 +796,85 @@ private struct HistoryRevisionInspector: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(isCompact ? 10 : 14).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(isCompact ? 10 : 14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(palette.sidebar.opacity(0.45))
         .background(palette.surface)
         .task(id: revisionTreeSignature) { rebuildRevisionTree() }
+    }
+
+    @ViewBuilder
+    private func revisionSummary(_ revision: Revision) -> some View {
+        VStack(alignment: .leading, spacing: isCompact ? 6 : 9) {
+            HStack(alignment: .top, spacing: 12) {
+                Text(revision.subject)
+                    .font(.system(size: 18, weight: .semibold))
+                    .lineLimit(isCompact ? 2 : 3)
+                    .layoutPriority(1)
+                Spacer(minLength: 0)
+                revisionActions(revision)
+            }
+            referenceLabels(revision.references)
+            revisionMetadata(revision)
+            if !messageBody.isEmpty {
+                DisclosureGroup(isExpanded: $messageDetailsExpanded) {
+                    ScrollView {
+                        Text(messageBody).font(.callout).textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 88)
+                } label: {
+                    HStack(spacing: 7) {
+                        Text("提交说明").font(.system(size: 12, weight: .medium))
+                        Text(messageBody).font(.system(size: 12)).foregroundStyle(palette.secondaryText).lineLimit(1)
+                    }
+                }
+                .tint(palette.accent)
+            }
+        }
+        .padding(isCompact ? 10 : 14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(palette.background.opacity(0.68), in: RoundedRectangle(cornerRadius: isCompact ? 10 : 14, style: .continuous))
+    }
+
+    @ViewBuilder
+    private var changedFilesSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("变更的文件")
+                        .font(.subheadline.weight(.semibold))
+                    Text("共 \(model.revisionFiles.count) 项")
+                        .font(.system(size: 11))
+                        .foregroundStyle(palette.secondaryText)
+                }
+                Spacer()
+                Button {
+                    showsChangedFiles.toggle()
+                } label: {
+                    Label(showsChangedFiles ? "收起文件" : "展开文件", systemImage: showsChangedFiles ? "chevron.up" : "chevron.down")
+                        .labelStyle(.iconOnly)
+                }
+                .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
+                .accessibilityLabel(showsChangedFiles ? "收起变更文件" : "展开变更文件")
+                .help(showsChangedFiles ? "收起变更文件树，为代码差异留出更多空间" : "展开变更文件树")
+                if showsChangedFiles {
+                    TreeExpansionControls(directoryIDs: revisionTree.flatMap(\.directoryIDs), collapsed: revisionCollapsed, palette: palette)
+                }
+            }
+            if showsChangedFiles {
+                revisionFiles
+            } else {
+                Text("已收起 \(model.revisionFiles.count) 个变更文件")
+                    .font(.caption)
+                    .foregroundStyle(palette.secondaryText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 4)
+            }
+        }
+        .padding(isCompact ? 9 : 12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(palette.sidebar.opacity(0.72), in: RoundedRectangle(cornerRadius: isCompact ? 10 : 14, style: .continuous))
     }
 
     private var selectedRevision: Revision? {

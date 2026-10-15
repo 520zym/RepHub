@@ -38,6 +38,59 @@ final class RepositoryAcquisitionModelTests: XCTestCase {
         model.selectDirectory("https://example.test/svn/%E6%96%B0%E7%89%88%E6%9C%AC")
         XCTAssertEqual(model.directoryName, "我自己的目录")
     }
+
+    func testSVNWizardHidesPasswordWhenEnteringBrowseStep() async throws {
+        let provider = AcquisitionFixtureProvider { location in
+            RemoteDirectoryListing(url: location.url, entries: [])
+        }
+        let model = RepositoryAcquisitionModel(service: RepositoryService(providers: [provider]))
+        model.prepare()
+        for _ in 0..<8 { await Task.yield() }
+        model.remoteURL = "https://example.test/svn/root"
+        model.togglePasswordVisibility()
+        XCTAssertTrue(model.isPasswordVisible)
+
+        model.advanceWizard()
+        for _ in 0..<8 { await Task.yield() }
+
+        XCTAssertEqual(model.wizardStep, .browse)
+        XCTAssertFalse(model.isPasswordVisible)
+        XCTAssertEqual(model.rootListingURL, "https://example.test/svn/root")
+    }
+
+    func testGitWizardSkipsBrowseStepAndRequiresDestination() async throws {
+        let provider = GitAcquisitionFixtureProvider()
+        let model = RepositoryAcquisitionModel(service: RepositoryService(providers: [provider]))
+        model.prepare()
+        for _ in 0..<8 { await Task.yield() }
+        model.remoteURL = "https://example.test/team/repo.git"
+
+        model.advanceWizard()
+        XCTAssertEqual(model.wizardStep, .destination)
+        model.advanceWizard()
+        XCTAssertEqual(model.wizardStep, .destination)
+        XCTAssertEqual(model.errorMessage, "请选择本地保存位置。")
+    }
+
+    func testExpandingDirectoryDoesNotChangeCheckoutSelection() async throws {
+        let provider = AcquisitionFixtureProvider { location in
+            RemoteDirectoryListing(url: location.url, entries: [])
+        }
+        let model = RepositoryAcquisitionModel(service: RepositoryService(providers: [provider]))
+        model.selectProvider(.svn)
+        let selectedURL = "https://example.test/svn/root"
+        model.selectDirectory(selectedURL)
+        let child = RemoteDirectoryEntry(
+            name: "child",
+            url: "https://example.test/svn/root/child",
+            isDirectory: true
+        )
+
+        model.toggleDirectory(child)
+
+        XCTAssertEqual(model.selectedRemoteURL, selectedURL)
+        XCTAssertEqual(model.directoryName, "root")
+    }
 }
 
 private actor LateBrowseGate {
@@ -89,6 +142,24 @@ private struct AcquisitionFixtureProvider: RepositoryAcquisitionProvider {
     func browseRemote(_ location: RemoteRepositoryLocation) async throws -> RemoteDirectoryListing {
         try await browse(location)
     }
+    func acquire(_ location: RemoteRepositoryLocation, to destination: URL,
+                 progress: @escaping RepositoryOperationProgressHandler) async throws {
+        throw VersionControlError.unsupported("测试不执行获取。")
+    }
+}
+
+private struct GitAcquisitionFixtureProvider: RepositoryAcquisitionProvider {
+    var id: ProviderID { .git }
+    var displayName: String { "Fixture Git" }
+    var acquisitionOption: RepositoryAcquisitionOption {
+        RepositoryAcquisitionOption(providerID: .git, title: "Git", actionTitle: "克隆")
+    }
+    func detect(at directory: URL) async throws -> RepositoryBinding? { nil }
+    func status(in binding: RepositoryBinding) async throws -> [FileChange] { [] }
+    func history(in binding: RepositoryBinding, limit: Int, reference: String?) async throws -> [Revision] { [] }
+    func branches(in binding: RepositoryBinding) async throws -> [BranchReference] { [] }
+    func changedFiles(in binding: RepositoryBinding, revision: String) async throws -> [FileChange] { [] }
+    func diff(in binding: RepositoryBinding, path: String?, revision: String?) async throws -> RepositoryPatch { RepositoryPatch(text: "") }
     func acquire(_ location: RemoteRepositoryLocation, to destination: URL,
                  progress: @escaping RepositoryOperationProgressHandler) async throws {
         throw VersionControlError.unsupported("测试不执行获取。")

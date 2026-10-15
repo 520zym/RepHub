@@ -10,6 +10,8 @@ public final class TransferProgressState {
     public private(set) var detail: String?
     /// 仅表示当前阶段；切换阶段时会清空，避免把上一阶段的百分比误认为总进度。
     public private(set) var fractionCompleted: Double?
+    /// `isEstimated` 为真时仅表示适配器观测到的本地处理量，界面必须明确标注估算口径。
+    public private(set) var transferStatistics: RepositoryTransferStatistics?
     public private(set) var records: [RepositoryProgressRecord] = []
     /// 适配器发来的记录累计数。它包括目录和信息记录，不能作为“已下载文件数”。
     public private(set) var totalRecordCount = 0
@@ -25,6 +27,7 @@ public final class TransferProgressState {
         self.phase = phase
         detail = nil
         fractionCompleted = nil
+        transferStatistics = nil
         records = []
         totalRecordCount = 0
         let now = Date()
@@ -42,6 +45,9 @@ public final class TransferProgressState {
         if let fraction = progress.fractionCompleted {
             fractionCompleted = fraction
         }
+        if let transferStatistics = progress.transferStatistics {
+            self.transferStatistics = transferStatistics
+        }
         detail = progress.detail
         append(progress.records)
         lastActivityAt = Date()
@@ -52,6 +58,7 @@ public final class TransferProgressState {
             phase = finalPhase
         }
         fractionCompleted = nil
+        transferStatistics = nil
         isActive = false
         lastActivityAt = Date()
     }
@@ -60,6 +67,7 @@ public final class TransferProgressState {
         phase = ""
         detail = nil
         fractionCompleted = nil
+        transferStatistics = nil
         records = []
         totalRecordCount = 0
         startedAt = nil

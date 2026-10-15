@@ -8,11 +8,28 @@ import VersionControlCore
 @MainActor
 @Observable
 public final class RepositoryAcquisitionModel {
+    public enum WizardStep: Int, CaseIterable {
+        case connection
+        case browse
+        case destination
+        case review
+
+        var title: String {
+            switch self {
+            case .connection: "连接"
+            case .browse: "选择目录"
+            case .destination: "本地位置"
+            case .review: "确认"
+            }
+        }
+    }
+
     public private(set) var options: [RepositoryAcquisitionOption] = []
     public var selectedProviderID: ProviderID?
     public var remoteURL = ""
     public var username = ""
     public var password = ""
+    public private(set) var isPasswordVisible = false
     public var destinationParent: URL?
     public var directoryName = ""
     public private(set) var listings: [String: RemoteDirectoryListing] = [:]
@@ -27,12 +44,14 @@ public final class RepositoryAcquisitionModel {
     public let transferProgress = TransferProgressState()
     public private(set) var result: RepositoryAcquisitionResult?
     public private(set) var errorMessage: String?
+    public private(set) var wizardStep: WizardStep = .connection
 
     private let service: RepositoryService
     private var browsingTask: Task<Void, Never>?
     private var acquisitionTask: Task<Void, Never>?
     private var requestID = 0
     private var directoryNameIsSuggested = true
+    private var hasStartedAcquisition = false
 
     public init(service: RepositoryService) {
         self.service = service
@@ -50,6 +69,8 @@ public final class RepositoryAcquisitionModel {
     public var supportsBrowsing: Bool { selectedOption?.supportsBrowsing == true }
     public var supportsCredentials: Bool { selectedOption?.supportsCredentials == true }
     public var isBusy: Bool { isBrowsing || isAcquiring }
+    public var usesBrowseStep: Bool { supportsBrowsing }
+    public var transferHasFinished: Bool { result != nil || (hasStartedAcquisition && errorMessage != nil) }
     public var destinationURL: URL? {
         guard let destinationParent, !directoryName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         return destinationParent.appendingPathComponent(directoryName.trimmingCharacters(in: .whitespacesAndNewlines), isDirectory: true)
@@ -70,6 +91,8 @@ public final class RepositoryAcquisitionModel {
     public func selectProvider(_ providerID: ProviderID) {
         guard selectedProviderID != providerID else { return }
         selectedProviderID = providerID
+        wizardStep = .connection
+        isPasswordVisible = false
         invalidateRemoteTree()
     }
 
@@ -78,6 +101,76 @@ public final class RepositoryAcquisitionModel {
         invalidateRemoteTree()
         result = nil
         errorMessage = nil
+    }
+
+    /// 密码只允许在当前短生命周期界面中临时显示，切换步骤、关闭或开始传输时会恢复遮挡。
+    public func togglePasswordVisibility() {
+        guard supportsCredentials, !isBusy else { return }
+        isPasswordVisible.toggle()
+    }
+
+    public func hidePassword() {
+        isPasswordVisible = false
+    }
+
+    public func advanceWizard() {
+        guard !isBusy else { return }
+        errorMessage = nil
+        switch wizardStep {
+        case .connection:
+            guard !remoteURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                errorMessage = "请先输入远程仓库地址。"
+                return
+            }
+            hidePassword()
+            if supportsBrowsing {
+                wizardStep = .browse
+                // 第一次进入目录页即读取根目录；从上一步返回后保留已经浏览的树。
+                if rootListingURL == nil { browseRoot() }
+            } else {
+                wizardStep = .destination
+            }
+        case .browse:
+            guard selectedRemoteURL != nil else {
+                errorMessage = "请选择要检出的 SVN 文件夹。"
+                return
+            }
+            wizardStep = .destination
+        case .destination:
+            guard destinationParent != nil else {
+                errorMessage = "请选择本地保存位置。"
+                return
+            }
+            guard !directoryName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                errorMessage = "请填写新的本地文件夹名称。"
+                return
+            }
+            wizardStep = .review
+        case .review:
+            break
+        }
+    }
+
+    public func goBackInWizard() {
+        guard !isBusy else { return }
+        errorMessage = nil
+        hidePassword()
+        switch wizardStep {
+        case .connection: break
+        case .browse: wizardStep = .connection
+        case .destination: wizardStep = supportsBrowsing ? .browse : .connection
+        case .review: wizardStep = .destination
+        }
+    }
+
+    public func retryTransfer() {
+        guard !isBusy else { return }
+        result = nil
+        errorMessage = nil
+        transferProgress.clear()
+        progressMessage = ""
+        hasStartedAcquisition = false
+        wizardStep = .review
     }
 
     public func chooseDestinationParent() {
@@ -110,14 +203,13 @@ public final class RepositoryAcquisitionModel {
 
     public func toggleDirectory(_ entry: RemoteDirectoryEntry) {
         guard entry.isDirectory, let selectedProviderID, !isAcquiring else { return }
-        selectedRemoteURL = entry.url
-        updateSuggestedDirectoryName(for: entry.url)
         if expandedURLs.contains(entry.url) {
             expandedURLs.remove(entry.url)
         } else if listings[entry.url] != nil {
             expandedURLs.insert(entry.url)
         } else {
-            browse(url: entry.url, providerID: selectedProviderID, makesSelection: true)
+            // 展开目录不等于把它设为检出目标；只有点目录名称才会改变选择。
+            browse(url: entry.url, providerID: selectedProviderID, makesSelection: false)
         }
     }
 
@@ -157,7 +249,9 @@ public final class RepositoryAcquisitionModel {
         let location = RemoteRepositoryLocation(url: sourceURL, credentials: credentials)
         requestID += 1
         let token = requestID
+        hasStartedAcquisition = true
         isAcquiring = true
+        hidePassword()
         isCancelling = false
         progressMessage = "正在准备\(option.actionTitle)…"
         transferProgress.begin(progressMessage)
@@ -224,6 +318,7 @@ public final class RepositoryAcquisitionModel {
         remoteURL = ""
         username = ""
         password = ""
+        isPasswordVisible = false
         destinationParent = nil
         directoryName = ""
         directoryNameIsSuggested = true
@@ -231,6 +326,8 @@ public final class RepositoryAcquisitionModel {
         result = nil
         errorMessage = nil
         progressMessage = ""
+        hasStartedAcquisition = false
+        wizardStep = .connection
         transferProgress.clear()
     }
 

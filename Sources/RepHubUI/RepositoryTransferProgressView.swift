@@ -64,7 +64,24 @@ struct RepositoryTransferProgressView: View {
                     .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
                     .lineLimit(2).truncationMode(.middle).help(detail)
             }
+            if let statistics = progress.transferStatistics {
+                transferStatisticsRow(statistics)
+            }
         }
+    }
+
+    private func transferStatisticsRow(_ statistics: RepositoryTransferStatistics) -> some View {
+        let total = ByteCountFormatter.string(fromByteCount: statistics.processedBytes, countStyle: .file)
+        let speed = statistics.roundedBytesPerSecond.map {
+            ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) + "/s"
+        } ?? "正在计算…"
+        let label = statistics.isEstimated ? "写入速度（估算）" : "传输速度"
+        return Text("\(label) \(speed) · 已处理 \(total)")
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(palette.secondaryText)
+            .help(statistics.isEstimated
+                ? "SVN 未提供网络字节；此数值按已确认写入目标文件夹的常规文件大小估算，不代表网络下载速度。"
+                : "由版本控制工具报告的传输统计。")
     }
 
     @ViewBuilder private var recordList: some View {
