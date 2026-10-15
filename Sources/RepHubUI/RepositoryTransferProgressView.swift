@@ -59,6 +59,9 @@ struct RepositoryTransferProgressView: View {
                 Text(String(format: "当前阶段 %.0f%%", fraction * 100))
                     .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
             }
+            if let migration = progress.migrationProgress {
+                migrationProgressRow(migration)
+            }
             if let detail = progress.detail, !detail.isEmpty {
                 Text(detail)
                     .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
@@ -68,6 +71,16 @@ struct RepositoryTransferProgressView: View {
                 transferStatisticsRow(statistics)
             }
         }
+    }
+
+    private func migrationProgressRow(_ migration: RepositoryMigrationProgress) -> some View {
+        let current = migration.currentRevision.map { " · 当前修订 \($0)" } ?? ""
+        return Text("整体修订：已完成 \(migration.completedRevisions)/\(migration.totalRevisions)\(current)")
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(palette.secondaryText)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .help("只在对应修订已完成转换并通过本地核对后计入完成数。")
     }
 
     private func transferStatisticsRow(_ statistics: RepositoryTransferStatistics) -> some View {
@@ -87,9 +100,9 @@ struct RepositoryTransferProgressView: View {
     @ViewBuilder private var recordList: some View {
         if progress.records.isEmpty {
             VStack(alignment: .leading, spacing: 4) {
-                Text(isCancelling ? "正在请求停止传输…" : (progress.isActive ? "等待服务器返回进度" : "没有收到文件或传输记录"))
+                Text(isCancelling ? "正在请求停止传输…" : (progress.isActive ? "等待当前步骤返回进度" : "没有收到文件或传输记录"))
                     .font(.system(size: 12, weight: .medium))
-                Text(progress.isActive ? "连接和协商阶段可能暂时没有逐文件输出。" : "本次操作未提供可展示的逐文件信息。")
+                Text(progress.isActive ? "当前步骤可能暂时没有逐文件输出；仍可随时取消。" : "本次操作未提供可展示的逐文件信息。")
                     .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
             }
             .padding(12).frame(maxWidth: .infinity, alignment: .leading)
@@ -167,8 +180,21 @@ struct RepositoryTransferProgressView: View {
             let origin = progress.lastActivityAt ?? progress.startedAt ?? context.date
             let idleSeconds = max(0, Int(context.date.timeIntervalSince(origin)))
             let elapsedSeconds = max(0, Int(context.date.timeIntervalSince(progress.startedAt ?? context.date)))
-            Text("已用 \(elapsedSeconds) 秒 · " + (idleSeconds == 0 ? "刚刚有活动" : "最后活动 \(idleSeconds) 秒前"))
+            Text("已用 \(elapsedSeconds) 秒 · \(idleDescription(idleSeconds))")
         }
         .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
+    }
+
+    private func idleDescription(_ idleSeconds: Int) -> String {
+        switch idleSeconds {
+        case 31...:
+            return "已 \(idleSeconds) 秒未收到新输出；当前步骤仍在等待，可继续等待或取消"
+        case 16...:
+            return "已 \(idleSeconds) 秒未收到新输出；当前步骤可能仍在处理，可取消"
+        case 1...:
+            return "最后活动 \(idleSeconds) 秒前"
+        default:
+            return "刚刚有活动"
+        }
     }
 }

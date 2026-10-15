@@ -15,6 +15,7 @@ struct RepHubApp: App {
     @State private var workspace: WorkspaceModel
     @State private var aiSettings: AISettingsStore
     @State private var aiUsage: AIUsageStore
+    @State private var authorDirectory: MigrationAuthorDirectoryStore
     private let aiService: AIService
 
     init() {
@@ -30,8 +31,10 @@ struct RepHubApp: App {
         let migrationTarget = GitMigrationTargetProvider()
         let migrations = RepositoryMigrationService(sources: [svn], targets: [migrationTarget])
         let workingCopyMigrations = WorkingCopyMigrationService(source: svn, target: migrationTarget)
+        let authors = MigrationAuthorDirectoryStore(defaults: .standard)
         _aiSettings = State(initialValue: settings)
         _aiUsage = State(initialValue: usage)
+        _authorDirectory = State(initialValue: authors)
         _workspace = State(initialValue: WorkspaceModel(service: repositories,
                                                         aiSettings: settings, aiService: service,
                                                         recentRepositories: RecentRepositoryStore(defaults: .standard),
@@ -40,7 +43,8 @@ struct RepHubApp: App {
                                                         workspaceLinks: WorkspaceLinkStore(defaults: .standard),
                                                         monitor: WorkspaceMonitor(service: repositories, defaults: .standard),
                                                         migrationService: migrations,
-                                                        workingCopyMigrationService: workingCopyMigrations))
+                                                        workingCopyMigrationService: workingCopyMigrations,
+                                                        authorDirectory: authors))
     }
 
     var body: some Scene {
@@ -88,10 +92,22 @@ struct RepHubApp: App {
                     .tabItem { Label("外观", systemImage: "paintpalette") }
                 AISettingsView(store: aiSettings, service: aiService, usageStore: aiUsage)
                     .tabItem { Label("AI 与场景", systemImage: "sparkles") }
+                AuthorDirectorySettingsContent(store: authorDirectory, appearance: appearance)
+                    .tabItem { Label("作者通讯录", systemImage: "person.crop.rectangle.stack") }
             }
             .frame(width: 760, height: 600)
             .preferredColorScheme(appearance.preferredColorScheme)
         }
+    }
+}
+
+private struct AuthorDirectorySettingsContent: View {
+    let store: MigrationAuthorDirectoryStore
+    @Bindable var appearance: AppearanceStore
+    @Environment(\.colorScheme) private var colorScheme
+    var body: some View {
+        MigrationAuthorDirectorySettingsView(store: store,
+            palette: appearance.palette(for: appearance.preferredColorScheme ?? colorScheme))
     }
 }
 

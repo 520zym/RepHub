@@ -17,6 +17,25 @@ struct WorkingCopyMigrationServiceTests {
         #expect(plan.authors["svn-user"]?.email.hasSuffix("@authors.invalid") == true)
     }
 
+    @Test("只读预检会报告可辨识的阶段进度")
+    func reportsPlanningStages() async throws {
+        let root = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let source = WorkingCopySourceFixture(root: root)
+        let service = WorkingCopyMigrationService(source: source, target: WorkingCopyTargetFixture())
+        let collector = ProgressCollector()
+
+        _ = try await service.plan(at: root, remoteURL: "https://example.test/project.git", branch: "main",
+                                   mode: .history, action: .initial) { update in
+            await collector.append(update)
+        }
+
+        let messages = await collector.messages
+        #expect(messages.contains("正在读取当前工作副本迁移记录…"))
+        #expect(messages.contains("正在核对 SVN 工作副本状态…"))
+        #expect(messages.contains("正在确认目标 Git 仓库状态…"))
+        #expect(messages.contains(where: { $0.hasPrefix("只读预检完成，已读取 1 条 SVN 修订") }))
+    }
+
     @Test("迁移记录中的地址凭据和重复映射被拒绝")
     func rejectsUnsafeRecord() async throws {
         let root = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: root) }
@@ -107,6 +126,11 @@ struct WorkingCopyMigrationServiceTests {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("rephub-wc-migration-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true); return directory
     }
+}
+
+private actor ProgressCollector {
+    private(set) var messages: [String] = []
+    func append(_ update: RepositoryOperationProgress) { messages.append(update.message) }
 }
 
 private struct WorkingCopySourceFixture: RepositoryWorkingCopyMigrationSourceProvider, VersionControlProvider {

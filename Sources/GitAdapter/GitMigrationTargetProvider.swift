@@ -66,15 +66,19 @@ public final class GitMigrationTargetProvider: RepositoryMigrationTargetProvider
         // clean filter 或用户现有暂存内容介入迁移。
         _ = try requireSuccess(try await git(["read-tree", "--empty"], in: repository), tool: "git")
         var indexRecords = Data()
-        for entry in entries {
-            guard entry.kind != .directory else { continue }
+        let files = entries.filter { $0.kind == .regular }
+        let regularObjectIDs = try await hashRegularFiles(files, in: repository, revisionID: revision.id, progress: progress)
+        for entry in entries where entry.kind != .directory {
+            try Task.checkCancellation()
             let objectID: String
             switch entry.kind {
             case .directory:
                 continue
             case .regular:
-                let hashed = try await git(["hash-object", "-w", "--no-filters", "--", entry.url.path], in: repository, timeout: 180)
-                objectID = try requireSuccess(hashed, tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let object = regularObjectIDs[entry.path] else {
+                    throw VersionControlError.invalidData("Git 未返回快照文件的对象 ID。")
+                }
+                objectID = object
             case .symbolicLink:
                 let target = try fileManager.destinationOfSymbolicLink(atPath: entry.url.path)
                 let hashed = try await git(
@@ -108,7 +112,7 @@ public final class GitMigrationTargetProvider: RepositoryMigrationTargetProvider
         ], in: repository, timeout: 180)
         _ = try requireSuccess(commit, tool: "git")
         let tip = try await currentTip(in: repository)
-        try materialize(entries, into: repository)
+        try await materialize(entries, into: repository, revisionID: revision.id, progress: progress)
         await progress(RepositoryOperationProgress("已生成 Git 提交 \(tip.prefix(12))。"))
         return tip
     }
@@ -149,6 +153,16 @@ public final class GitMigrationTargetProvider: RepositoryMigrationTargetProvider
     }
 
     public func exportMigrationTree(at directory: URL, revision: String, to destination: URL) async throws {
+        try await exportMigrationTree(at: directory, revision: revision, to: destination, progress: { _ in })
+    }
+
+    /// 导出只在迁移隔离仓库中进行。按受限批次读取 blob，避免为每一个文件单独启动 Git。
+    public func exportMigrationTree(
+        at directory: URL,
+        revision: String,
+        to destination: URL,
+        progress: @escaping RepositoryOperationProgressHandler
+    ) async throws {
         let repository = try validatedRepository(directory)
         guard isObjectID(revision), try await resolveCommit(revision, in: repository) == revision else {
             throw VersionControlError.invalidData("要导出的 Git 提交不存在。")
@@ -157,30 +171,8 @@ public final class GitMigrationTargetProvider: RepositoryMigrationTargetProvider
         // archive 会应用 export-subst 属性，不能作为“真实对象树”校验。这里逐 blob
         // 读取对象并保留 Git 的可执行位与符号链接内容。
         let listing = try requireSuccess(try await git(["ls-tree", "-r", "-z", "--full-tree", revision], in: repository), tool: "git")
-        for field in listing.data.split(separator: 0, omittingEmptySubsequences: true) {
-            let parts = field.split(separator: 9, maxSplits: 1, omittingEmptySubsequences: false)
-            guard parts.count == 2 else { throw VersionControlError.invalidData("Git 树记录格式错误。") }
-            let metadata = parts[0].split(separator: 32)
-            guard metadata.count == 3, String(decoding: metadata[1], as: UTF8.self) == "blob" else { throw VersionControlError.invalidData("Git 树包含不支持的对象。") }
-            let mode = String(decoding: metadata[0], as: UTF8.self)
-            let objectID = String(decoding: metadata[2], as: UTF8.self)
-            let path = String(decoding: parts[1], as: UTF8.self)
-            let output = try validatedExportPath(path, under: destination)
-            try fileManager.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let blob: Data
-            do {
-                blob = try requireSuccess(try await git(["cat-file", "blob", objectID], in: repository, timeout: 180), tool: "git").data
-            } catch VersionControlError.outputTooLarge {
-                throw VersionControlError.unsupported("迁移提交含有超过本地安全读取上限的单个文件，无法完成对象树预览校验。")
-            }
-            if mode == "120000" {
-                guard let link = String(data: blob, encoding: .utf8), !link.contains("\0") else { throw VersionControlError.invalidData("Git 符号链接内容无效。") }
-                try fileManager.createSymbolicLink(atPath: output.path, withDestinationPath: link)
-            } else {
-                try blob.write(to: output, options: .atomic)
-                if mode == "100755" { try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: output.path) }
-            }
-        }
+        let treeEntries = try listing.data.split(separator: 0, omittingEmptySubsequences: true).map(parseExportTreeEntry)
+        try await exportTreeEntries(treeEntries, in: repository, revision: revision, to: destination, progress: progress)
     }
 
     public func migrationPatch(at directory: URL, revision: String) async throws -> RepositoryPatch {
@@ -446,6 +438,22 @@ private extension GitMigrationTargetProvider {
         let mode: String
     }
 
+    struct ExportTreeEntry {
+        let mode: String
+        let objectID: String
+        let path: String
+    }
+
+    static let hashObjectBatchCount = 256
+    /// macOS 的参数与环境总大小可能只有约 256 KiB，给隔离环境和 Git 自己的参数保留余量。
+    static let hashObjectBatchArgumentBytes = 64 * 1024
+    static let catFileBatchQueryBytes = 512 * 1024
+    static let catFileBatchCount = 256
+    /// CommandRunner 会把 stdout 与 stderr 一起限制为 16 MiB。接近该上限的 blob
+    /// 不能带 batch 协议头读取，而是沿用旧的单对象读取，保持原有能力边界。
+    static let maxExportBlobBytes = 16 * 1024 * 1024
+    static let catFileBatchOutputBytes = 12 * 1024 * 1024
+
     func git(_ arguments: [String], in directory: URL? = nil, timeout: TimeInterval = 30, remote: Bool = false, standardInput: Data? = nil, maximumStandardInputBytes: Int = 4 * 1024) async throws -> CommandResult {
         let safeguards = ["--no-optional-locks", "-c", "core.pager=cat", "-c", "core.quotepath=false", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "submodule.recurse=false"]
         let protocols = ["-c", "protocol.allow=never", "-c", "protocol.file.allow=always", "-c", "protocol.http.allow=always", "-c", "protocol.https.allow=always", "-c", "protocol.ssh.allow=always"]
@@ -552,13 +560,254 @@ private extension GitMigrationTargetProvider {
         ), tool: "git")
     }
 
-    func materialize(_ entries: [SnapshotEntry], into repository: URL) throws {
-        let children = try fileManager.contentsOfDirectory(at: repository, includingPropertiesForKeys: nil)
-        for child in children where child.lastPathComponent != ".git" { try fileManager.removeItem(at: child) }
-        for entry in entries where entry.kind == .directory {
-            try fileManager.createDirectory(at: repository.appendingPathComponent(entry.path), withIntermediateDirectories: true)
+    /// `hash-object --stdin-paths` 的输入按换行分隔，无法安全表达含换行的合法 POSIX 路径；
+    /// 因此这里使用参数数组批量传入路径。CommandRunner 不经 shell，空格、引号与换行都保持为
+    /// 单个参数，同时受总参数字节数限制，避免 exec 参数上限。
+    func hashRegularFiles(
+        _ entries: [SnapshotEntry],
+        in repository: URL,
+        revisionID: String,
+        progress: @escaping RepositoryOperationProgressHandler
+    ) async throws -> [String: String] {
+        guard !entries.isEmpty else { return [:] }
+        var objectIDs: [String: String] = [:]
+        objectIDs.reserveCapacity(entries.count)
+        var start = 0
+        while start < entries.count {
+            try Task.checkCancellation()
+            var end = start
+            var argumentBytes = 0
+            while end < entries.count, end - start < Self.hashObjectBatchCount {
+                let nextBytes = entries[end].url.path.utf8.count + 1
+                if end > start, argumentBytes + nextBytes > Self.hashObjectBatchArgumentBytes { break }
+                argumentBytes += nextBytes
+                end += 1
+            }
+            let batch = Array(entries[start..<end])
+            await progress(RepositoryOperationProgress("正在写入 \(revisionID) 的 Git 文件对象（\(start + 1)–\(end) / \(entries.count)）…"))
+            let result = try requireSuccess(try await git(
+                ["hash-object", "-w", "--no-filters", "--"] + batch.map { $0.url.path },
+                in: repository,
+                timeout: 180
+            ), tool: "git")
+            let lines = result.output.split(whereSeparator: \.isNewline).map(String.init)
+            guard lines.count == batch.count else {
+                throw VersionControlError.invalidData("Git 返回的快照对象数量不完整。")
+            }
+            for (entry, objectID) in zip(batch, lines) {
+                guard isObjectID(objectID) else { throw VersionControlError.invalidData("Git 未返回有效对象 ID。") }
+                objectIDs[entry.path] = objectID
+            }
+            start = end
         }
-        for entry in entries where entry.kind != .directory {
+        return objectIDs
+    }
+
+    func parseExportTreeEntry(_ field: Data.SubSequence) throws -> ExportTreeEntry {
+        let parts = field.split(separator: 9, maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2 else { throw VersionControlError.invalidData("Git 树记录格式错误。") }
+        let metadata = parts[0].split(separator: 32)
+        guard metadata.count == 3, String(decoding: metadata[1], as: UTF8.self) == "blob" else {
+            throw VersionControlError.invalidData("Git 树包含不支持的对象。")
+        }
+        let mode = String(decoding: metadata[0], as: UTF8.self)
+        let objectID = String(decoding: metadata[2], as: UTF8.self)
+        let path = String(decoding: parts[1], as: UTF8.self)
+        guard isObjectID(objectID) else { throw VersionControlError.invalidData("Git 树包含无效对象 ID。") }
+        _ = try validatedRelativePath(path)
+        return ExportTreeEntry(mode: mode, objectID: objectID, path: path)
+    }
+
+    func exportTreeEntries(
+        _ entries: [ExportTreeEntry],
+        in repository: URL,
+        revision: String,
+        to destination: URL,
+        progress: @escaping RepositoryOperationProgressHandler
+    ) async throws {
+        guard !entries.isEmpty else { return }
+        let sizes = try await readBlobSizes(entries, in: repository)
+        var start = 0
+        while start < entries.count {
+            try Task.checkCancellation()
+            let firstSize = sizes[start]
+            guard firstSize <= Self.maxExportBlobBytes else {
+                throw VersionControlError.unsupported("迁移提交含有超过本地安全读取上限的单个文件，无法完成对象树预览校验。")
+            }
+            if firstSize > Self.catFileBatchOutputBytes {
+                let entry = entries[start]
+                await progress(RepositoryOperationProgress("正在核对 \(revision.prefix(12)) 的 Git 大文件（\(start + 1) / \(entries.count)）…"))
+                let blob = try await readSingleExportBlob(entry, in: repository)
+                try materializeExportBlob(blob, for: entry, under: destination)
+                start += 1
+                continue
+            }
+            var end = start
+            var outputBytes = 0
+            var queryBytes = 0
+            while end < entries.count, end - start < Self.catFileBatchCount {
+                let size = sizes[end]
+                guard size <= Self.maxExportBlobBytes else {
+                    throw VersionControlError.unsupported("迁移提交含有超过本地安全读取上限的单个文件，无法完成对象树预览校验。")
+                }
+                let querySize = entries[end].objectID.utf8.count + 1
+                // <oid> blob <size>\\n + 内容 + 内容后的换行。这里按最大位数预留，
+                // 防止许多空 blob 绕过字节上限。
+                let responseSize = querySize + 26 + size + 1
+                if end > start,
+                   (queryBytes + querySize > Self.catFileBatchQueryBytes || outputBytes + responseSize > Self.catFileBatchOutputBytes) {
+                    break
+                }
+                queryBytes += querySize
+                outputBytes += responseSize
+                end += 1
+            }
+            // 单个受支持 blob 可能大于常规批次预算，仍单独读取，避免无限循环。
+            if end == start { end += 1 }
+            let batch = Array(entries[start..<end])
+            await progress(RepositoryOperationProgress("正在核对 \(revision.prefix(12)) 的 Git 对象（\(start + 1)–\(end) / \(entries.count)）…"))
+            var input = Data()
+            for entry in batch { input.append(Data("\(entry.objectID)\n".utf8)) }
+            let result: CommandResult
+            do {
+                result = try requireSuccess(try await git(
+                    ["cat-file", "--batch"],
+                    in: repository,
+                    timeout: 180,
+                    standardInput: input,
+                    maximumStandardInputBytes: max(Self.catFileBatchQueryBytes, input.count)
+                ), tool: "git")
+            } catch VersionControlError.outputTooLarge {
+                throw VersionControlError.unsupported("迁移提交含有超过本地安全读取上限的单个文件，无法完成对象树预览校验。")
+            }
+            let blobs = try parseBatchBlobs(result.data, expected: batch, sizes: Array(sizes[start..<end]))
+            for (entry, blob) in zip(batch, blobs) {
+                try Task.checkCancellation()
+                try materializeExportBlob(blob, for: entry, under: destination)
+            }
+            start = end
+        }
+    }
+
+    func materializeExportBlob(_ blob: Data, for entry: ExportTreeEntry, under destination: URL) throws {
+        let output = try validatedExportPath(entry.path, under: destination)
+        try fileManager.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if entry.mode == "120000" {
+            guard let link = String(data: blob, encoding: .utf8), !link.contains("\0") else {
+                throw VersionControlError.invalidData("Git 符号链接内容无效。")
+            }
+            try fileManager.createSymbolicLink(atPath: output.path, withDestinationPath: link)
+        } else {
+            try blob.write(to: output, options: .atomic)
+            if entry.mode == "100755" {
+                try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: output.path)
+            }
+        }
+    }
+
+    func readSingleExportBlob(_ entry: ExportTreeEntry, in repository: URL) async throws -> Data {
+        do {
+            return try requireSuccess(try await git(["cat-file", "blob", entry.objectID], in: repository, timeout: 180), tool: "git").data
+        } catch VersionControlError.outputTooLarge {
+            throw VersionControlError.unsupported("迁移提交含有超过本地安全读取上限的单个文件，无法完成对象树预览校验。")
+        }
+    }
+
+    func readBlobSizes(_ entries: [ExportTreeEntry], in repository: URL) async throws -> [Int] {
+        var sizes: [Int] = []
+        sizes.reserveCapacity(entries.count)
+        var start = 0
+        while start < entries.count {
+            try Task.checkCancellation()
+            var end = start
+            var queryBytes = 0
+            while end < entries.count {
+                let next = entries[end].objectID.utf8.count + 1
+                if end > start, queryBytes + next > Self.catFileBatchQueryBytes { break }
+                queryBytes += next
+                end += 1
+            }
+            let batch = entries[start..<end]
+            let input = Data(batch.reduce(into: "") { $0 += "\($1.objectID)\n" }.utf8)
+            let result = try requireSuccess(try await git(
+                ["cat-file", "--batch-check"],
+                in: repository,
+                timeout: 180,
+                standardInput: input,
+                maximumStandardInputBytes: max(Self.catFileBatchQueryBytes, input.count)
+            ), tool: "git")
+            let lines = result.output.split(whereSeparator: \.isNewline)
+            guard lines.count == batch.count else { throw VersionControlError.invalidData("Git 对象大小核对结果不完整。") }
+            for (entry, line) in zip(batch, lines) {
+                let fields = line.split(separator: " ")
+                guard fields.count == 3,
+                      String(fields[0]) == entry.objectID,
+                      String(fields[1]) == "blob",
+                      let size = Int(fields[2]), size >= 0 else {
+                    throw VersionControlError.invalidData("Git 对象大小核对结果无效。")
+                }
+                sizes.append(size)
+            }
+            start = end
+        }
+        return sizes
+    }
+
+    func parseBatchBlobs(_ data: Data, expected entries: [ExportTreeEntry], sizes: [Int]) throws -> [Data] {
+        let bytes = [UInt8](data)
+        var offset = 0
+        var blobs: [Data] = []
+        blobs.reserveCapacity(entries.count)
+        func nextLine() throws -> ArraySlice<UInt8> {
+            guard let newline = bytes[offset...].firstIndex(of: 10) else {
+                throw VersionControlError.invalidData("Git 批量对象输出缺少协议头。")
+            }
+            defer { offset = newline + 1 }
+            return bytes[offset..<newline]
+        }
+        for (entry, expectedSize) in zip(entries, sizes) {
+            let header = try nextLine().split(separator: 32)
+            guard header.count == 3,
+                  String(decoding: header[0], as: UTF8.self) == entry.objectID,
+                  String(decoding: header[1], as: UTF8.self) == "blob",
+                  Int(String(decoding: header[2], as: UTF8.self)) == expectedSize,
+                  expectedSize <= bytes.count - offset else {
+                throw VersionControlError.invalidData("Git 批量对象输出格式无效。")
+            }
+            let end = offset + expectedSize
+            blobs.append(Data(bytes[offset..<end]))
+            offset = end
+            guard offset < bytes.count, bytes[offset] == 10 else {
+                throw VersionControlError.invalidData("Git 批量对象输出缺少内容分隔符。")
+            }
+            offset += 1
+        }
+        guard offset == bytes.count else { throw VersionControlError.invalidData("Git 批量对象输出包含未识别内容。") }
+        return blobs
+    }
+
+    func materialize(
+        _ entries: [SnapshotEntry],
+        into repository: URL,
+        revisionID: String,
+        progress: @escaping RepositoryOperationProgressHandler
+    ) async throws {
+        let children = try fileManager.contentsOfDirectory(at: repository, includingPropertiesForKeys: nil)
+        for child in children where child.lastPathComponent != ".git" {
+            try Task.checkCancellation()
+            try fileManager.removeItem(at: child)
+        }
+        let directories = entries.filter { $0.kind == .directory }
+        for (index, entry) in directories.enumerated() {
+            try Task.checkCancellation()
+            try fileManager.createDirectory(at: repository.appendingPathComponent(entry.path), withIntermediateDirectories: true)
+            if index == 0 || (index + 1).isMultiple(of: 128) || index + 1 == directories.count {
+                await progress(RepositoryOperationProgress("正在整理 \(revisionID) 的 Git 工作区（目录 \(index + 1) / \(directories.count)）…"))
+            }
+        }
+        let files = entries.filter { $0.kind != .directory }
+        for (index, entry) in files.enumerated() {
+            try Task.checkCancellation()
             let output = try validatedExportPath(entry.path, under: repository)
             try fileManager.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
             switch entry.kind {
@@ -568,6 +817,9 @@ private extension GitMigrationTargetProvider {
             case .symbolicLink:
                 try fileManager.createSymbolicLink(atPath: output.path, withDestinationPath: try fileManager.destinationOfSymbolicLink(atPath: entry.url.path))
             case .directory: break
+            }
+            if index == 0 || (index + 1).isMultiple(of: 128) || index + 1 == files.count {
+                await progress(RepositoryOperationProgress("正在整理 \(revisionID) 的 Git 工作区（文件 \(index + 1) / \(files.count)）…"))
             }
         }
     }

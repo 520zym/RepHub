@@ -63,12 +63,20 @@ public protocol RepositoryMigrationTargetProvider: Sendable {
     /// 恢复前核对已验证的检查点；nil 表示必须仍是没有提交的空仓库。
     func verifyMigrationCheckpoint(at directory: URL, expectedTip: String?, branch: String) async throws
     func exportMigrationTree(at directory: URL, revision: String, to destination: URL) async throws
+    func exportMigrationTree(at directory: URL, revision: String, to destination: URL,
+                             progress: @escaping RepositoryOperationProgressHandler) async throws
     func migrationPatch(at directory: URL, revision: String) async throws -> RepositoryPatch
     func publishMigration(at directory: URL, remoteURL: String, branch: String, expectedTip: String,
                           progress: @escaping RepositoryOperationProgressHandler) async throws -> MigrationPublicationResult
 }
 
 public extension RepositoryMigrationTargetProvider {
+    func exportMigrationTree(at directory: URL, revision: String, to destination: URL,
+                             progress: @escaping RepositoryOperationProgressHandler) async throws {
+        await progress(RepositoryOperationProgress("正在读取 Git 对象树并核对转换内容…"))
+        try await exportMigrationTree(at: directory, revision: revision, to: destination)
+    }
+
     func verifyMigrationCheckpoint(at directory: URL, expectedTip: String?, branch: String) async throws {
         guard let expectedTip else { throw VersionControlError.unsupported("无法核对空迁移检查点，请返回重新预检。") }
         try await verifyMigration(at: directory, expectedTip: expectedTip, branch: branch)

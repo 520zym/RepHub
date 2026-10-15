@@ -34,6 +34,9 @@ struct WorkingCopyMigrationIntegrationTests {
             action: .initial, progress: { _ in }
         )
         let initialPreview = try await service.prepare(initialPlan, progress: { _ in })
+        let stagingChildren = try FileManager.default.contentsOfDirectory(atPath: initialPreview.repository.deletingLastPathComponent().path)
+        #expect(stagingChildren.filter { $0.hasPrefix("source-") }.count == 1)
+        #expect(stagingChildren.filter { $0.hasPrefix("verified-") }.count == 1)
         #expect(!FileManager.default.fileExists(atPath: fixture.svnReader.appendingPathComponent(".git").path))
         #expect(try await remoteRefs(target, fixture: fixture).isEmpty)
         #expect(try Data(contentsOf: fixture.svnReader.appendingPathComponent("README.md")) == initialReadme)

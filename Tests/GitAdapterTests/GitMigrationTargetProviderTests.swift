@@ -101,6 +101,73 @@ struct GitMigrationTargetProviderTests {
         #expect(!FileManager.default.fileExists(atPath: marker.path))
     }
 
+    @Test("批量快照和对象导出保留大量文件、二进制、符号链接及特殊路径")
+    func batchesSnapshotHashingAndObjectExport() async throws {
+        let fixture = try await LocalRepositoryFixture.create()
+        defer { try? fixture.remove() }
+        let snapshot = fixture.root.appendingPathComponent("batch-source", isDirectory: true)
+        let preview = fixture.root.appendingPathComponent("batch-preview", isDirectory: true)
+        let exported = fixture.root.appendingPathComponent("batch-export", isDirectory: true)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        var expected: [String: Data] = [:]
+        for index in 0..<320 {
+            let directory = snapshot.appendingPathComponent("group-\(index / 40)", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let name = index == 17 ? "file with space\nand newline.bin" : "file-\(index).bin"
+            let path = "group-\(index / 40)/\(name)"
+            let data = Data((0..<1024).map { UInt8((index + $0) % 251) })
+            try data.write(to: directory.appendingPathComponent(name))
+            expected[path] = data
+        }
+        try FileManager.default.createSymbolicLink(
+            atPath: snapshot.appendingPathComponent("linked-file").path,
+            withDestinationPath: "group-0/file-0.bin"
+        )
+        let provider = GitMigrationTargetProvider(runner: fixture.runner)
+        try await provider.initializeMigration(at: preview, branch: "main")
+        let writeProgress = MigrationProgressCollector()
+        let tip = try await provider.appendMigrationSnapshot(
+            from: snapshot,
+            revision: MigrationRevision(id: "r-batch", author: "old", date: .now, message: "batch"),
+            author: MigrationAuthor(name: "Batch User", email: "batch@example.test"),
+            to: preview,
+            progress: { update in await writeProgress.append(update.message) }
+        )
+        #expect((await writeProgress.messages()).filter { $0.contains("Git 文件对象") }.count >= 2)
+        let exportProgress = MigrationProgressCollector()
+        try await provider.exportMigrationTree(at: preview, revision: tip, to: exported, progress: { update in
+            await exportProgress.append(update.message)
+        })
+        #expect((await exportProgress.messages()).contains { $0.contains("Git 对象") })
+        for (path, data) in expected {
+            #expect(try Data(contentsOf: exported.appendingPathComponent(path)) == data)
+        }
+        #expect(try FileManager.default.destinationOfSymbolicLink(atPath: exported.appendingPathComponent("linked-file").path) == "group-0/file-0.bin")
+    }
+
+    @Test("接近读取上限的 blob 保持旧单对象导出能力")
+    func exportsLargeBlobWithoutBatchProtocolOverhead() async throws {
+        let fixture = try await LocalRepositoryFixture.create()
+        defer { try? fixture.remove() }
+        let snapshot = fixture.root.appendingPathComponent("large-source", isDirectory: true)
+        let preview = fixture.root.appendingPathComponent("large-preview", isDirectory: true)
+        let exported = fixture.root.appendingPathComponent("large-export", isDirectory: true)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        let contents = Data(repeating: 0xA5, count: 15 * 1024 * 1024 + 1)
+        try contents.write(to: snapshot.appendingPathComponent("near-limit.bin"))
+        let provider = GitMigrationTargetProvider(runner: fixture.runner)
+        try await provider.initializeMigration(at: preview, branch: "main")
+        let tip = try await provider.appendMigrationSnapshot(
+            from: snapshot,
+            revision: MigrationRevision(id: "r-large", author: "old", date: .now, message: "large"),
+            author: MigrationAuthor(name: "Large User", email: "large@example.test"),
+            to: preview,
+            progress: { _ in }
+        )
+        try await provider.exportMigrationTree(at: preview, revision: tip, to: exported)
+        #expect(try Data(contentsOf: exported.appendingPathComponent("near-limit.bin")) == contents)
+    }
+
     @Test(".git 指向其他仓库时拒绝迁移核对")
     func rejectsGitPointerOutsideMigrationDirectory() async throws {
         let fixture = try await LocalRepositoryFixture.create()
@@ -132,4 +199,10 @@ struct GitMigrationTargetProviderTests {
         do { try await provider.checkMigrationTarget(remoteURL: "https://token@example.invalid/target.git", branch: "main") } catch { rejected = true }
         #expect(rejected)
     }
+}
+
+private actor MigrationProgressCollector {
+    private var values: [String] = []
+    func append(_ message: String) { values.append(message) }
+    func messages() -> [String] { values }
 }

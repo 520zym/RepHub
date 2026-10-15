@@ -50,7 +50,7 @@ struct RepositoryMigrationView: View {
             header
             Divider().opacity(0.25)
             Group {
-                if model.stage == .converting || model.stage == .publishing { progressContent }
+                if model.stage == .planning || model.stage == .converting || model.stage == .publishing { progressContent }
                 else if model.preview != nil { previewContent }
                 else { planningContent }
             }
@@ -183,18 +183,9 @@ struct RepositoryMigrationView: View {
                     planMetric("方式", value: plan.source.mode.title)
                 }
                 if !plan.authors.isEmpty {
-                    Divider().opacity(0.32)
-                    Text("作者映射").font(.system(size: 12, weight: .medium))
-                    Text("SVN 提交记录不提供邮箱；@authors.invalid 为明确占位值，可改为实际邮箱后再转换。")
-                        .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
-                    ForEach(plan.authors.keys.sorted(), id: \.self) { source in
-                        let author = plan.authors[source] ?? .init(name: source, email: "")
-                        HStack(spacing: 8) {
-                            Text(source).font(.system(size: 11, design: .monospaced)).frame(width: 125, alignment: .leading).lineLimit(1).truncationMode(.middle)
-                            TextField("名称", text: Binding(get: { author.name }, set: { model.updateAuthor(source, name: $0, email: author.email) })).textFieldStyle(.roundedBorder)
-                            TextField("邮箱", text: Binding(get: { author.email }, set: { model.updateAuthor(source, name: author.name, email: $0) })).textFieldStyle(.roundedBorder)
-                        }
-                    }
+                    MigrationAuthorMappingEditor(sourceURL: plan.source.location.url, authors: plan.authors,
+                        onUpdate: { source, author in model.updateAuthor(source, name: author.name, email: author.email) },
+                        store: model.authorDirectory, palette: palette)
                 }
             }
         }
@@ -202,11 +193,12 @@ struct RepositoryMigrationView: View {
 
     private var progressContent: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text(model.stage == .publishing ? "正在发布" : "正在转换") .font(.system(size: 15, weight: .semibold))
+            Text(model.stage == .planning ? "正在只读预检" : (model.stage == .publishing ? "正在发布" : "正在转换")) .font(.system(size: 15, weight: .semibold))
             RepositoryTransferProgressView(progress: model.transferProgress, palette: palette,
                                            source: model.selectedSourceURL ?? model.sourceURL, destination: model.destination?.path,
-                                           isCancelling: model.isCancelling, cancelTitle: "取消", cancel: model.cancel)
-            Text(model.stage == .publishing ? "发布只会在你确认预览后的这一步执行。" : "取消会保留已经生成的隔离结果，以便继续转换或检查。")
+                                           isCancelling: model.isCancelling, cancelTitle: "取消", cancel: model.cancel,
+                                           showsFileRecords: model.stage != .planning)
+            Text(model.stage == .planning ? "正在核对目标 Git 并读取 SVN 历史，预检不会写入仓库，可以随时取消。" : (model.stage == .publishing ? "发布只会在你确认预览后的这一步执行。" : "保留历史会逐个修订转换并核对内容。取消会保留已经生成的隔离结果，以便继续转换或检查。"))
                 .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
             Spacer()
         }.padding(22)

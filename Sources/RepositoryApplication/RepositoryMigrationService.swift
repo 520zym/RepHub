@@ -103,10 +103,13 @@ public actor RepositoryMigrationService {
         try rejectPasswordInURL(location.url)
         await progress(RepositoryOperationProgress("检查目标仓库…"))
         try await target.checkMigrationTarget(remoteURL: remote, branch: branch)
+        try Task.checkCancellation()
+        await progress(RepositoryOperationProgress("正在读取固定来源历史…"))
         let sourcePlan = try await source.planMigration(from: location, mode: mode, progress: progress)
         guard !sourcePlan.revisions.isEmpty, Set(sourcePlan.revisions.map(\.id)).count == sourcePlan.revisions.count else {
             throw VersionControlError.invalidData("来源没有可迁移的修订，或历史包含重复修订。")
         }
+        await progress(RepositoryOperationProgress("正在整理提交人与 Git 作者映射…"))
         var mapping = authors
         for author in sourcePlan.revisions.map(\.author) where mapping[author] == nil {
             let digest = SHA256.hash(data: Data(author.utf8)).prefix(6).map { String(format: "%02x", $0) }.joined()
@@ -114,6 +117,7 @@ public actor RepositoryMigrationService {
                                                email: "svn-\(digest)@authors.invalid")
         }
         try validateAuthors(mapping)
+        await progress(RepositoryOperationProgress("只读预检完成，已读取 \(sourcePlan.revisions.count) 条来源修订。", fractionCompleted: 1))
         return MigrationPlan(source: sourcePlan, targetProviderID: targetProviderID, remoteURL: remote,
                              branch: branch, destination: destination, authors: mapping)
     }
@@ -122,6 +126,7 @@ public actor RepositoryMigrationService {
 
     public func prepare(_ plan: MigrationPlan, progress: @escaping RepositoryOperationProgressHandler) async throws -> MigrationPreview {
         try begin(); defer { busy = false }
+        await progress(RepositoryOperationProgress("正在检查转换预览参数…"))
         let source = try sourceProvider(plan.source.providerID), target = try targetProvider(plan.targetProviderID)
         try validateAuthors(plan.authors)
         guard !plan.source.revisions.isEmpty,
@@ -143,6 +148,7 @@ public actor RepositoryMigrationService {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
             job = Job(plan: plan, folder: folder, repository: folder.appendingPathComponent("repository"))
             // 初始化失败也保留目录供定位，重新预检会生成不同的暂存目录。
+            await progress(RepositoryOperationProgress("正在初始化隔离 Git 预览仓库…"))
             try await target.initializeMigration(at: job.repository, branch: plan.branch)
             jobs[plan.id] = job
             // 空仓库也必须留下受限检查点；重启后可以安全恢复，且能识别首个提交
@@ -154,18 +160,31 @@ public actor RepositoryMigrationService {
                 try Task.checkCancellation()
                 let index = job.mappings.count + 1
                 let count = plan.source.revisions.count
-                let message = "转换修订 \(revision.id) · \(index)/\(count)"
-                await progress(RepositoryOperationProgress(message, fractionCompleted: Double(index - 1) / Double(count)))
+                await progress(revisionProgress("正在导出来源快照", revision: revision, index: index, total: count))
                 let sourceTree = job.folder.appendingPathComponent("source-\(UUID().uuidString)")
                 let targetTree = job.folder.appendingPathComponent("verified-\(UUID().uuidString)")
                 try await source.exportMigrationSnapshot(plan: plan.source, revision: revision, to: sourceTree) { update in
-                    await progress(RepositoryOperationProgress(message, fractionCompleted: Double(index - 1) / Double(count),
-                                                               detail: update.message, records: update.records))
+                    await progress(self.revisionProgress("正在导出来源快照", revision: revision, index: index, total: count,
+                                                         update: update))
                 }
+                try Task.checkCancellation()
+                await progress(revisionProgress("正在扫描来源快照", revision: revision, index: index, total: count))
                 let sourceFiles = try scan(sourceTree)
+                try Task.checkCancellation()
+                await progress(revisionProgress("正在写入 Git 快照", revision: revision, index: index, total: count))
                 let commit = try await target.appendMigrationSnapshot(from: sourceTree, revision: revision,
-                                                                      author: plan.authors[revision.author]!, to: job.repository, progress: progress)
-                try await target.exportMigrationTree(at: job.repository, revision: commit, to: targetTree)
+                                                                      author: plan.authors[revision.author]!, to: job.repository) { update in
+                    await progress(self.revisionProgress("正在写入 Git 快照", revision: revision, index: index, total: count,
+                                                         update: update))
+                }
+                try Task.checkCancellation()
+                await progress(revisionProgress("正在读取 Git 对象树", revision: revision, index: index, total: count))
+                try await target.exportMigrationTree(at: job.repository, revision: commit, to: targetTree) { update in
+                    await progress(self.revisionProgress("正在读取 Git 对象树", revision: revision, index: index, total: count,
+                                                         update: update))
+                }
+                try Task.checkCancellation()
+                await progress(revisionProgress("正在扫描并核对文件", revision: revision, index: index, total: count))
                 let comparisons = compare(sourceFiles, try scan(targetTree))
                 guard !comparisons.contains(where: { $0.state == .different }) else {
                     throw VersionControlError.invalidData("修订 \(revision.id) 的转换文件与源快照不一致，已停止；暂存内容保留在 \(job.folder.path)。")
@@ -179,8 +198,10 @@ public actor RepositoryMigrationService {
                 try saveCheckpoint(job)
                 if let oldSource { try? FileManager.default.removeItem(at: oldSource) }
                 if let oldTarget { try? FileManager.default.removeItem(at: oldTarget) }
+                await progress(revisionProgress("已转换来源修订", revision: revision, index: index, total: count, completed: true))
             }
             try Task.checkCancellation()
+            await progress(RepositoryOperationProgress("正在核对最终隔离 Git 预览…", fractionCompleted: 1))
             try await verify(job, target: target)
             _ = try validateDestination(plan.destination)
             // moveItem 无覆盖；本地目标在耗时转换期间被创建也必须失败。
@@ -297,6 +318,20 @@ public actor RepositoryMigrationService {
                 throw VersionControlError.invalidData("作者姓名或邮箱无效，请调整作者映射。")
             }
         }
+    }
+
+    private func revisionProgress(_ phase: String, revision: MigrationRevision, index: Int, total: Int,
+                                  update: RepositoryOperationProgress? = nil, completed: Bool = false) -> RepositoryOperationProgress {
+        let safeTotal = max(1, total)
+        let completedCount = completed ? index : max(0, index - 1)
+        return RepositoryOperationProgress("\(phase) · \(revision.id)",
+                                           fractionCompleted: update?.fractionCompleted ?? (completed ? 1 : nil),
+                                           detail: update?.detail ?? update?.message ?? "整体修订 \(index)/\(safeTotal)",
+                                           records: update?.records ?? [],
+                                           transferStatistics: update?.transferStatistics,
+                                           migrationProgress: RepositoryMigrationProgress(completedRevisions: completedCount,
+                                                                                          totalRevisions: safeTotal,
+                                                                                          currentRevision: revision.id))
     }
 
     private func rejectPasswordInURL(_ text: String) throws {

@@ -38,6 +38,7 @@ public final class RepositoryMigrationModel {
     public private(set) var publication: MigrationPublicationResult?
     public private(set) var preservedDirectory: URL?
     public let transferProgress = TransferProgressState()
+    public let authorDirectory: MigrationAuthorDirectoryStore
     public var fileSearch = ""
 
     private let service: RepositoryMigrationService
@@ -45,7 +46,9 @@ public final class RepositoryMigrationModel {
     private var previewTask: Task<Void, Never>?
     private var requestID = 0
 
-    public init(service: RepositoryMigrationService) { self.service = service }
+    public init(service: RepositoryMigrationService, authorDirectory: MigrationAuthorDirectoryStore = .init()) {
+        self.service = service; self.authorDirectory = authorDirectory
+    }
     isolated deinit { task?.cancel(); previewTask?.cancel() }
 
     public var isBusy: Bool { [.planning, .converting, .publishing].contains(stage) || isBrowsing }
@@ -142,12 +145,17 @@ public final class RepositoryMigrationModel {
                                    targetProviderID: .git, remoteURL: remoteURL, branch: requestedBranch,
                                    destination: destination, authors: [:], progress: handler)
         } receive: { model, plan in
-            model.plan = plan; model.clearPreview(); model.stage = .prepared; model.transferProgress.finish("迁移计划已生成")
+            let authors = model.authorDirectory.resolve(authors: plan.authors, sourceURL: plan.source.location.url)
+            model.plan = MigrationPlan(id: plan.id, source: plan.source, targetProviderID: plan.targetProviderID,
+                remoteURL: plan.remoteURL, branch: plan.branch, destination: plan.destination, authors: authors)
+            model.clearPreview(); model.stage = .prepared; model.transferProgress.finish("迁移计划已生成")
         }
     }
 
     public func preparePreview() {
         guard let plan, !isBusy else { return }
+        do { try authorDirectory.save(authors: plan.authors, sourceURL: plan.source.location.url) }
+        catch { errorMessage = "无法保存作者映射：\(error.localizedDescription)"; return }
         let handler = progressHandler
         begin(.converting, message: "正在在隔离目录生成转换预览…") { [service] in
             try await service.prepare(plan, progress: handler)

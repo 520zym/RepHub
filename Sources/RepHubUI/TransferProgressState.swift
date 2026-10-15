@@ -12,6 +12,8 @@ public final class TransferProgressState {
     public private(set) var fractionCompleted: Double?
     /// `isEstimated` 为真时仅表示适配器观测到的本地处理量，界面必须明确标注估算口径。
     public private(set) var transferStatistics: RepositoryTransferStatistics?
+    /// 迁移任务的整体修订进度，不随 Git/SVN 的内部阶段切换而重置。
+    public private(set) var migrationProgress: RepositoryMigrationProgress?
     public private(set) var records: [RepositoryProgressRecord] = []
     /// 适配器发来的记录累计数。它包括目录和信息记录，不能作为“已下载文件数”。
     public private(set) var totalRecordCount = 0
@@ -28,6 +30,7 @@ public final class TransferProgressState {
         detail = nil
         fractionCompleted = nil
         transferStatistics = nil
+        migrationProgress = nil
         records = []
         totalRecordCount = 0
         let now = Date()
@@ -41,12 +44,17 @@ public final class TransferProgressState {
         if !nextPhase.isEmpty, nextPhase != phase {
             phase = nextPhase
             fractionCompleted = nil
+            // 速度只属于报告它的阶段，不能带到下一阶段误导用户。
+            transferStatistics = nil
         }
         if let fraction = progress.fractionCompleted {
             fractionCompleted = fraction
         }
         if let transferStatistics = progress.transferStatistics {
             self.transferStatistics = transferStatistics
+        }
+        if let migrationProgress = progress.migrationProgress {
+            self.migrationProgress = migrationProgress
         }
         detail = progress.detail
         append(progress.records)
@@ -59,6 +67,7 @@ public final class TransferProgressState {
         }
         fractionCompleted = nil
         transferStatistics = nil
+        migrationProgress = nil
         isActive = false
         lastActivityAt = Date()
     }
@@ -68,6 +77,7 @@ public final class TransferProgressState {
         detail = nil
         fractionCompleted = nil
         transferStatistics = nil
+        migrationProgress = nil
         records = []
         totalRecordCount = 0
         startedAt = nil

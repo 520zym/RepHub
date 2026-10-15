@@ -20,14 +20,34 @@ public struct RepositoryOperationProgress: Sendable {
     /// 可量化的传输信息。`isEstimated` 为真时，它只表示适配器已观察到的本地写入或处理量，
     /// 绝不能当作网络层下载字节。
     public let transferStatistics: RepositoryTransferStatistics?
+    /// 迁移任务的整体修订进度，与当前工具阶段的百分比独立。
+    public let migrationProgress: RepositoryMigrationProgress?
     public init(_ message: String, fractionCompleted: Double? = nil, detail: String? = nil,
                 records: [RepositoryProgressRecord] = [],
-                transferStatistics: RepositoryTransferStatistics? = nil) {
+                transferStatistics: RepositoryTransferStatistics? = nil,
+                migrationProgress: RepositoryMigrationProgress? = nil) {
         self.message = message
         self.fractionCompleted = fractionCompleted.flatMap { $0.isFinite ? min(1, max(0, $0)) : nil }
         self.detail = detail
         self.records = records
         self.transferStatistics = transferStatistics
+        self.migrationProgress = migrationProgress
+    }
+}
+
+/// 迁移任务跨多个工具阶段时的可核对修订进度。
+/// `completedRevisions` 仅在对应修订已完成转换并通过本地核对后递增；它不是文件数或网络传输量。
+public struct RepositoryMigrationProgress: Sendable, Equatable {
+    public let completedRevisions: Int
+    public let totalRevisions: Int
+    public let currentRevision: String?
+
+    public init(completedRevisions: Int, totalRevisions: Int, currentRevision: String? = nil) {
+        let safeTotal = max(0, totalRevisions)
+        self.totalRevisions = safeTotal
+        self.completedRevisions = min(safeTotal, max(0, completedRevisions))
+        let revision = currentRevision?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.currentRevision = revision?.isEmpty == false ? revision : nil
     }
 }
 

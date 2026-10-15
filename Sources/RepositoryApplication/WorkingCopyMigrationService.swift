@@ -103,6 +103,7 @@ public actor WorkingCopyMigrationService {
                      action: WorkingCopyMigrationAction,
                      progress: @escaping RepositoryOperationProgressHandler) async throws -> WorkingCopyMigrationPlan {
         try begin(); defer { busy = false }
+        await progress(RepositoryOperationProgress("正在读取当前工作副本迁移记录…"))
         let root = try validatedWorkingCopyDirectory(directory)
         let remote = remoteURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let branch = branch.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -117,6 +118,7 @@ public actor WorkingCopyMigrationService {
                 throw VersionControlError.invalidData("补迁必须使用初次迁移记录中的 Git 地址和分支。")
             }
         }
+        await progress(RepositoryOperationProgress("正在核对 SVN 工作副本状态…"))
         let info = try await source.inspectMigrationWorkingCopy(at: root, requireClean: action == .initial)
         try rejectCredentialURL(info.sourceURL)
         if let previous {
@@ -125,17 +127,21 @@ public actor WorkingCopyMigrationService {
             }
         }
         if action == .supplement, let previous {
+            await progress(RepositoryOperationProgress("正在核对已有 SVN→Git 迁移记录…"))
             try await target.verifyWorkingCopyMigrationRecord(at: root, record: previous)
         }
+        await progress(RepositoryOperationProgress("正在核对本地 Git 工作区和目标分支…"))
         let expected = try await target.inspectWorkingCopyMigrationTarget(at: root, branch: branch,
                                                                             previousMigrationTip: previous?.mappings.last?.targetCommit)
         if action == .initial, expected != nil { throw VersionControlError.invalidRepository("首次迁移要求目录尚未由 Git 管理。") }
         // 补迁允许 Git 在上次迁移后继续提交；目标适配器负责确认旧迁移末端仍是
         // 当前 HEAD 的祖先，并返回当前 HEAD 作为这次三方应用的基线。
+        await progress(RepositoryOperationProgress("正在确认目标 Git 仓库状态…"))
         try await target.checkWorkingCopyMigrationRemote(remoteURL: remote, branch: branch, expectedTip: expected)
         // 首次迁移严格以当前 SVN BASE 为接管点；补迁必须读取远端 HEAD，不能要求
         // 用户先 update 本地 SVN 工作副本，否则会遗漏远端后来新增的修订。
         let through = action == .initial ? info.baseRevision : nil
+        await progress(RepositoryOperationProgress("正在读取固定 SVN 历史范围…"))
         let sourcePlan = try await source.planWorkingCopyHistory(from: RemoteRepositoryLocation(url: info.sourceURL), mode: mode,
                                                                   through: through, after: previous?.lastRevision,
                                                                   progress: progress)
@@ -145,11 +151,13 @@ public actor WorkingCopyMigrationService {
               Set(sourcePlan.revisions.map(\.id)).count == sourcePlan.revisions.count else {
             throw VersionControlError.invalidData("没有可迁移的 SVN 修订，或历史修订重复。")
         }
+        await progress(RepositoryOperationProgress("正在复核固定 SVN 来源身份…"))
         try await source.verifyWorkingCopyMigrationSource(sourcePlan.location, repositoryUUID: info.repositoryUUID,
                                                            revision: sourcePlan.anchor)
         if let previous, sourcePlan.revisions.contains(where: { $0.id == previous.lastRevision }) {
             throw VersionControlError.invalidData("补迁历史包含已经迁入的末端修订。")
         }
+        await progress(RepositoryOperationProgress("正在整理 SVN 提交人与 Git 作者映射…"))
         var authors: [String: MigrationAuthor] = [:]
         for name in sourcePlan.revisions.map(\.author) {
             let digest = SHA256.hash(data: Data(name.utf8)).prefix(6).map { String(format: "%02x", $0) }.joined()
@@ -157,6 +165,7 @@ public actor WorkingCopyMigrationService {
                                             email: "svn-\(digest)@authors.invalid")
         }
         try validateAuthors(authors)
+        await progress(RepositoryOperationProgress("只读预检完成，已读取 \(sourcePlan.revisions.count) 条 SVN 修订。", fractionCompleted: 1))
         return WorkingCopyMigrationPlan(action: action, workingCopy: info, source: sourcePlan, remoteURL: remote,
                                         branch: branch, expectedGitTip: expected, previousRecord: previous, authors: authors)
     }
@@ -164,16 +173,21 @@ public actor WorkingCopyMigrationService {
     public func prepare(_ plan: WorkingCopyMigrationPlan,
                         progress: @escaping RepositoryOperationProgressHandler) async throws -> WorkingCopyMigrationPreview {
         try begin(); defer { busy = false }
+        await progress(RepositoryOperationProgress("正在检查转换预览参数…"))
         try validatePlan(plan)
         if let job = jobs[plan.id] { return try await existingPreview(job, plan: plan) }
+        await progress(RepositoryOperationProgress("正在复核本地 SVN 工作副本状态…"))
         let root = try validatedWorkingCopyDirectory(plan.workingCopy.directory)
         let current = try await source.inspectMigrationWorkingCopy(at: root, requireClean: plan.action == .initial)
         try validateWorkingCopy(current, against: plan.workingCopy)
+        await progress(RepositoryOperationProgress("正在复核固定 SVN 来源身份…"))
         try await source.verifyWorkingCopyMigrationSource(plan.source.location, repositoryUUID: plan.workingCopy.repositoryUUID,
                                                            revision: plan.source.anchor)
         if plan.action == .supplement, let previous = plan.previousRecord {
+            await progress(RepositoryOperationProgress("正在复核上次迁移记录…"))
             try await target.verifyWorkingCopyMigrationRecord(at: root, record: previous)
         }
+        await progress(RepositoryOperationProgress("正在复核本地 Git 基线…"))
         let expected = try await target.inspectWorkingCopyMigrationTarget(at: root, branch: plan.branch,
                                                                             previousMigrationTip: plan.previousRecord?.mappings.last?.targetCommit)
         guard expected == plan.expectedGitTip else { throw VersionControlError.invalidRepository("工作副本 Git 状态已变化，请重新预检。") }
@@ -187,6 +201,7 @@ public actor WorkingCopyMigrationService {
         // 即使预览仓库准备、导出、冲突或核对失败，也让调用方能定位隔离结果；但不把它当作可用预览。
         jobs[plan.id] = job
         do {
+            await progress(RepositoryOperationProgress("正在准备隔离 Git 预览仓库…"))
             try await target.prepareWorkingCopyMigrationTarget(from: root, expectedTip: plan.expectedGitTip, to: repository, branch: plan.branch)
             if plan.action == .initial {
                 try await prepareInitial(&job, progress: progress)
@@ -292,48 +307,94 @@ public actor WorkingCopyMigrationService {
 private extension WorkingCopyMigrationService {
     private func prepareInitial(_ job: inout Job, progress: @escaping RepositoryOperationProgressHandler) async throws {
         for (offset, revision) in job.plan.source.revisions.enumerated() {
+            try Task.checkCancellation()
+            let index = offset + 1
+            let total = job.plan.source.revisions.count
             let sourceTree = job.folder.appendingPathComponent("source-\(UUID().uuidString)")
             let targetTree = job.folder.appendingPathComponent("verified-\(UUID().uuidString)")
-            try await source.exportMigrationSnapshot(plan: job.plan.source, revision: revision, to: sourceTree, progress: progress)
+            await progress(revisionProgress("正在导出 SVN 快照", revision: revision, index: index, total: total))
+            try await source.exportMigrationSnapshot(plan: job.plan.source, revision: revision, to: sourceTree) { update in
+                await progress(self.revisionProgress("正在导出 SVN 快照", revision: revision, index: index, total: total,
+                                                     update: update))
+            }
+            try Task.checkCancellation()
             let imported = decorated(revision, plan: job.plan)
+            await progress(revisionProgress("正在写入 Git 快照", revision: revision, index: index, total: total))
             let commit = try await target.appendMigrationSnapshot(from: sourceTree, revision: imported,
-                                                                   author: try author(for: revision, plan: job.plan), to: job.repository, progress: progress)
-            try await target.exportMigrationTree(at: job.repository, revision: commit, to: targetTree)
+                                                                   author: try author(for: revision, plan: job.plan), to: job.repository) { update in
+                await progress(self.revisionProgress("正在写入 Git 快照", revision: revision, index: index, total: total,
+                                                     update: update))
+            }
+            try Task.checkCancellation()
+            await progress(revisionProgress("正在读取 Git 对象树", revision: revision, index: index, total: total))
+            try await target.exportMigrationTree(at: job.repository, revision: commit, to: targetTree) { update in
+                await progress(self.revisionProgress("正在读取 Git 对象树", revision: revision, index: index, total: total,
+                                                     update: update))
+            }
+            try Task.checkCancellation()
+            await progress(revisionProgress("正在扫描并核对文件", revision: revision, index: index, total: total))
             let files = compare(try scan(sourceTree), try scan(targetTree))
             guard !files.contains(where: { $0.state == .different }) else { throw VersionControlError.invalidData("修订 \(revision.id) 与 Git 实际对象树不一致。") }
+            let oldLeft = job.leftTree
+            let oldRight = job.rightTree
             job.mappings.append(MigrationMapping(source: revision, author: try author(for: revision, plan: job.plan), targetCommit: commit))
             job.leftTree = sourceTree; job.rightTree = targetTree; job.files = files
-            await progress(RepositoryOperationProgress("已转换 \(offset + 1)/\(job.plan.source.revisions.count) 个 SVN 修订。", fractionCompleted: Double(offset + 1) / Double(job.plan.source.revisions.count)))
+            // 预览只需保留当前已核对的前后树。较早修订已经写入 Git 对象库并被独立
+            // 核对，继续保留全树会在长历史中无界占用临时磁盘。
+            if let oldLeft { try? FileManager.default.removeItem(at: oldLeft) }
+            if let oldRight { try? FileManager.default.removeItem(at: oldRight) }
+            await progress(revisionProgress("已转换 SVN 修订", revision: revision, index: index, total: total, completed: true))
         }
+        await progress(RepositoryOperationProgress("正在确认最终 SVN 快照仍与当前工作副本一致…"))
         try validateInitialWorkingTree(job)
     }
 
     private func prepareSupplement(_ job: inout Job, progress: @escaping RepositoryOperationProgressHandler) async throws {
         guard let beforeTip = job.plan.expectedGitTip, let previous = job.plan.previousRecord else { throw VersionControlError.invalidData("补迁缺少上次迁移末端。") }
         let baseline = job.folder.appendingPathComponent("verified-\(UUID().uuidString)")
-        try await target.exportMigrationTree(at: job.repository, revision: beforeTip, to: baseline)
+        await progress(RepositoryOperationProgress("正在导出当前 Git 基线用于补迁核对…"))
+        try await target.exportMigrationTree(at: job.repository, revision: beforeTip, to: baseline, progress: progress)
         let before = job.folder.appendingPathComponent("source-\(UUID().uuidString)")
         let old = MigrationRevision(id: previous.lastRevision, author: "", date: .distantPast, message: "")
         // `exportMigrationSnapshot` 只接受固定计划内的修订。补迁的前置版本不属于
         // “新增修订”列表，因此以同一来源、同一锚点建立仅含该固定旧修订的导出计划。
         let priorPlan = MigrationSourcePlan(providerID: job.plan.source.providerID, location: job.plan.source.location,
                                             anchor: job.plan.source.anchor, mode: job.plan.source.mode, revisions: [old])
+        await progress(RepositoryOperationProgress("正在导出 SVN 上次迁移锚点…"))
         try await source.exportMigrationSnapshot(plan: priorPlan, revision: old, to: before, progress: progress)
         var prior = before
-        for revision in job.plan.source.revisions {
+        for (offset, revision) in job.plan.source.revisions.enumerated() {
+            try Task.checkCancellation()
+            let index = offset + 1
+            let total = job.plan.source.revisions.count
             let after = job.folder.appendingPathComponent("source-\(UUID().uuidString)")
-            try await source.exportMigrationSnapshot(plan: job.plan.source, revision: revision, to: after, progress: progress)
+            await progress(revisionProgress("正在导出 SVN 快照", revision: revision, index: index, total: total))
+            try await source.exportMigrationSnapshot(plan: job.plan.source, revision: revision, to: after) { update in
+                await progress(self.revisionProgress("正在导出 SVN 快照", revision: revision, index: index, total: total,
+                                                     update: update))
+            }
+            try Task.checkCancellation()
+            await progress(revisionProgress("正在写入 Git 差异", revision: revision, index: index, total: total))
             let commit = try await target.appendWorkingCopyMigrationDelta(before: prior, after: after,
                                                                             revision: decorated(revision, plan: job.plan),
-                                                                            author: try author(for: revision, plan: job.plan),
-                                                                            to: job.repository, progress: progress)
+                                                                            author: try author(for: revision, plan: job.plan), to: job.repository) { update in
+                await progress(self.revisionProgress("正在写入 Git 差异", revision: revision, index: index, total: total,
+                                                     update: update))
+            }
             job.mappings.append(MigrationMapping(source: revision, author: try author(for: revision, plan: job.plan), targetCommit: commit))
+            if prior != before { try? FileManager.default.removeItem(at: prior) }
             prior = after
+            await progress(revisionProgress("已转换 SVN 修订", revision: revision, index: index, total: total, completed: true))
         }
         let final = job.folder.appendingPathComponent("verified-\(UUID().uuidString)")
         guard let tip = job.mappings.last?.targetCommit else { throw VersionControlError.invalidData("补迁未生成 Git 提交。") }
-        try await target.exportMigrationTree(at: job.repository, revision: tip, to: final)
+        await progress(RepositoryOperationProgress("正在导出补迁后的 Git 结果并核对…"))
+        try await target.exportMigrationTree(at: job.repository, revision: tip, to: final, progress: progress)
+        try Task.checkCancellation()
+        await progress(RepositoryOperationProgress("正在扫描补迁前后文件差异…"))
         job.leftTree = baseline; job.rightTree = final; job.files = compare(try scan(baseline), try scan(final))
+        if prior != before { try? FileManager.default.removeItem(at: prior) }
+        try? FileManager.default.removeItem(at: before)
     }
 
     private func existingPreview(_ job: Job, plan: WorkingCopyMigrationPlan) async throws -> WorkingCopyMigrationPreview {
@@ -368,6 +429,7 @@ private extension WorkingCopyMigrationService {
     }
 
     func workingEntry(at root: URL, path: String) throws -> MigrationFileEntry? {
+        try Task.checkCancellation()
         guard !path.isEmpty, !path.hasPrefix("/"), !path.split(separator: "/").contains("..") else { return nil }
         let url = root.appendingPathComponent(path)
         let resolvedRoot = root.resolvingSymlinksInPath().path
@@ -383,6 +445,7 @@ private extension WorkingCopyMigrationService {
         if type == .typeDirectory { return MigrationFileEntry(path: path, kind: .directory, digest: "", size: 0) }
         guard type == .typeRegular else { return nil }
         let data = try Data(contentsOf: url)
+        try Task.checkCancellation()
         let executable = ((attrs[.posixPermissions] as? NSNumber)?.intValue ?? 0) & 0o111 != 0
         return MigrationFileEntry(path: path, kind: .file, digest: digest(data), size: UInt64(data.count), executable: executable)
     }
@@ -397,6 +460,20 @@ private extension WorkingCopyMigrationService {
     func author(for revision: MigrationRevision, plan: WorkingCopyMigrationPlan) throws -> MigrationAuthor {
         guard let value = plan.authors[revision.author] else { throw VersionControlError.invalidData("缺少 SVN 作者映射。") }
         return value
+    }
+
+    func revisionProgress(_ phase: String, revision: MigrationRevision, index: Int, total: Int,
+                          update: RepositoryOperationProgress? = nil, completed: Bool = false) -> RepositoryOperationProgress {
+        let safeTotal = max(1, total)
+        let completedCount = completed ? index : max(0, index - 1)
+        return RepositoryOperationProgress("\(phase) · \(revision.id)",
+                                           fractionCompleted: update?.fractionCompleted ?? (completed ? 1 : nil),
+                                           detail: update?.detail ?? update?.message ?? "整体修订 \(index)/\(safeTotal)",
+                                           records: update?.records ?? [],
+                                           transferStatistics: update?.transferStatistics,
+                                           migrationProgress: RepositoryMigrationProgress(completedRevisions: completedCount,
+                                                                                          totalRevisions: safeTotal,
+                                                                                          currentRevision: revision.id))
     }
 
     func validatePlan(_ plan: WorkingCopyMigrationPlan) throws {
@@ -481,6 +558,7 @@ private extension WorkingCopyMigrationService {
         let manager = FileManager.default; var result: [MigrationFileEntry] = []
         func visit(_ directory: URL, prefix: String) throws {
             for child in try manager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
+                try Task.checkCancellation()
                 let name = child.lastPathComponent; if excludingRootMetadata && prefix.isEmpty && [".git", ".svn"].contains(name) { continue }
                 guard ![".git", ".svn"].contains(name.lowercased()) else { throw VersionControlError.unsupported("迁移范围包含嵌套版本控制元数据。") }
                 let path = prefix + name; let attributes = try manager.attributesOfItem(atPath: child.path)
@@ -490,7 +568,9 @@ private extension WorkingCopyMigrationService {
                 case .typeDirectory:
                     result.append(MigrationFileEntry(path: path, kind: .directory, digest: "", size: 0)); try visit(child, prefix: path + "/")
                 case .typeRegular:
-                    let data = try Data(contentsOf: child); let mode = ((attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0) & 0o111 != 0
+                    let data = try Data(contentsOf: child)
+                    try Task.checkCancellation()
+                    let mode = ((attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0) & 0o111 != 0
                     result.append(MigrationFileEntry(path: path, kind: .file, digest: digest(data), size: UInt64(data.count), executable: mode))
                 default: throw VersionControlError.unsupported("不能迁移特殊文件：\(path)")
                 }

@@ -16,7 +16,7 @@ struct WorkingCopyMigrationView: View {
             header
             Divider().opacity(0.24)
             Group {
-                if model.stage == .converting || model.stage == .applying { progress }
+                if model.stage == .planning || model.stage == .converting || model.stage == .applying { progress }
                 else if model.preview != nil { preview }
                 else { form }
             }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -47,11 +47,28 @@ struct WorkingCopyMigrationView: View {
     }.padding(22).disabled(model.isBusy) } }
     private func planCard(_ plan: WorkingCopyMigrationPlan) -> some View { card("迁移计划", "checkmark.seal") { VStack(alignment: .leading, spacing: 11) {
         HStack(spacing: 18) { metric("动作", plan.action.title); metric("历史", "\(plan.source.revisions.count) 条"); metric("截至版本", plan.source.anchor) }
-        if !plan.authors.isEmpty { Divider().opacity(0.3); Text("作者映射").font(.system(size: 12, weight: .medium)); Text("SVN 不提供邮箱；@authors.invalid 是明确占位值，可编辑为实际邮箱。").font(.system(size: 11)).foregroundStyle(palette.secondaryText)
-            ForEach(plan.authors.keys.sorted(), id: \.self) { source in let author = plan.authors[source] ?? .init(name: source, email: ""); HStack(spacing: 8) { Text(source).font(.system(size: 11, design: .monospaced)).frame(width: 120, alignment: .leading).lineLimit(1); TextField("名称", text: Binding(get: { author.name }, set: { model.updateAuthor(source, name: $0, email: author.email) })).textFieldStyle(.roundedBorder); TextField("邮箱", text: Binding(get: { author.email }, set: { model.updateAuthor(source, name: author.name, email: $0) })).textFieldStyle(.roundedBorder) } }
+        if !plan.authors.isEmpty {
+            MigrationAuthorMappingEditor(sourceURL: plan.source.location.url, authors: plan.authors,
+                onUpdate: { source, author in model.updateAuthor(source, name: author.name, email: author.email) },
+                store: model.authorDirectory, palette: palette)
         }
     } } }
-    private var progress: some View { VStack(alignment: .leading, spacing: 16) { Text(model.stage == .applying ? "正在应用并发布" : "正在准备转换预览").font(.system(size: 15, weight: .semibold)); RepositoryTransferProgressView(progress: model.transferProgress, palette: palette, source: model.directory?.path, destination: model.preservedDirectory?.path, isCancelling: model.isCancelling, cancelTitle: "取消", cancel: model.cancel); Text("隔离目录不是新的工程目录。预览确认前不会覆盖当前工作副本。") .font(.system(size: 11)).foregroundStyle(palette.secondaryText); Spacer() }.padding(22) }
+    private var progress: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text(model.stage == .planning ? "正在只读预检" : (model.stage == .applying ? "正在应用并发布" : "正在准备转换预览"))
+                    .font(.system(size: 15, weight: .semibold))
+                RepositoryTransferProgressView(progress: model.transferProgress, palette: palette,
+                    source: model.directory?.path, destination: model.preservedDirectory?.path,
+                    isCancelling: model.isCancelling, cancelTitle: "取消", cancel: model.cancel,
+                    showsFileRecords: model.stage != .planning)
+                Text(model.stage == .planning
+                     ? "依次核对本地工作副本、Git 目标和 SVN 历史。预检仅读取状态，可以随时取消。"
+                     : "保留历史会逐个修订转换并核对内容，所需时间取决于历史数量与文件规模。预览确认前不会覆盖当前工作副本。")
+                    .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
+            }.padding(22)
+        }
+    }
     private var preview: some View { VStack(spacing: 0) { WorkbenchSegmentedPicker(title: "转换预览", selection: $tab, options: [.init(.overview, "概览"), .init(.files, "文件"), .init(.history, "历史")], palette: palette).frame(width: 285).padding(.vertical, 13); Divider().opacity(0.2); switch tab { case .overview: overview; case .files: files; case .history: history } } }
     private var overview: some View { ScrollView { VStack(alignment: .leading, spacing: 16) { if let preview = model.preview { HStack(spacing: 12) { metricCard("本次新增", "\(currentMappings(preview: preview).count) 条"); metricCard("文件核对", "\(preview.files.count) 项"); metricCard("方式", preview.plan.action.title) }; card("来源 → 当前工作副本", "arrow.right.circle") { VStack(spacing: 7) { row("SVN 来源", preview.plan.workingCopy.sourceURL); row("仓库 UUID", preview.plan.workingCopy.repositoryUUID); row("本地 BASE", preview.plan.workingCopy.baseRevision); row("Git 目标", preview.plan.remoteURL); row("目标分支", preview.plan.branch) } }; if let previous = preview.plan.previousRecord { card("已迁移锚点", "arrow.triangle.branch") { VStack(spacing: 7) { row("开始修订", previous.startRevision); row("接管节点", previous.cutoverRevision); row("上次已迁", previous.lastRevision); row("本次截至", preview.plan.source.anchor) } } } else { card("首次接管锚点", "arrow.triangle.branch") { VStack(spacing: 7) { row("开始修订", preview.plan.source.revisions.first?.id ?? "—"); row("本地 BASE", preview.plan.workingCopy.baseRevision); row("接管节点", preview.plan.workingCopy.baseRevision); row("本次截至", preview.plan.source.anchor) } } }; if !preview.warnings.isEmpty { warnings(preview.warnings) }; Text("隔离预览：\(preview.repository.path)").font(.system(size: 11, design: .monospaced)).foregroundStyle(palette.secondaryText).textSelection(.enabled) } }.padding(22) } }
     private var files: some View { HStack(spacing: 0) { VStack(alignment: .leading, spacing: 8) { TextField("筛选文件…", text: $model.fileSearch).textFieldStyle(.roundedBorder); if model.action == .supplement { Text("标记表示本次补迁带来的内容变化；其他 Git 文件保持原样。") .font(.system(size: 10)).foregroundStyle(palette.secondaryText) }; WorkingFileTree(files: filteredFiles, expanded: model.expandedDirectories, selected: model.selectedFilePath, palette: palette, allowsDifferences: model.action == .supplement, toggle: model.toggleDirectory, select: model.loadFile) }.padding(12).frame(minWidth: 250, idealWidth: 320, maxWidth: 380).background(palette.sidebar.opacity(0.5)); Divider().opacity(0.2); fileContent.frame(maxWidth: .infinity, maxHeight: .infinity) } }
