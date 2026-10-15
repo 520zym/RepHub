@@ -14,6 +14,7 @@ public final class RepositoryCommitModel {
     public private(set) var preparations: [RepositoryCommitPreparation] = []
     public var selectedBindingID: String?
     public private(set) var enabledBindingIDs: Set<String> = []
+    public private(set) var allowsTargetSelection = false
     public private(set) var selectedFileIDs: [String: Set<String>] = [:]
     public private(set) var messages: [String: String] = [:]
     public private(set) var selectedFile: RepositoryCommitFile?
@@ -69,6 +70,7 @@ public final class RepositoryCommitModel {
         previewTask?.cancel()
         let request = requestID
         phase = .preparing
+        allowsTargetSelection = workspace.bindings.filter { $0.capabilities.contains(.commit) }.count > 1
         preparations = []
         selectedBindingID = nil
         enabledBindingIDs = []
@@ -89,7 +91,7 @@ public final class RepositoryCommitModel {
                 self.preparations = prepared
                 for preparation in prepared {
                     self.messages[preparation.binding.id] = initialMessages?[preparation.binding.id] ?? initialMessage
-                    guard initialTargets.contains(preparation.binding.id), preparation.blockingReason == nil else { continue }
+                    guard (!self.allowsTargetSelection || initialTargets.contains(preparation.binding.id)), preparation.blockingReason == nil else { continue }
                     self.enabledBindingIDs.insert(preparation.binding.id)
                     self.selectedFileIDs[preparation.binding.id] = Self.initiallySelectedFiles(
                         in: preparation,
@@ -124,6 +126,7 @@ public final class RepositoryCommitModel {
         task?.cancel()
         previewTask?.cancel()
         phase = .idle
+        allowsTargetSelection = false
         preparations = []
         selectedBindingID = nil
         enabledBindingIDs = []
@@ -151,7 +154,7 @@ public final class RepositoryCommitModel {
     }
 
     public func setBindingEnabled(_ enabled: Bool, for preparation: RepositoryCommitPreparation) {
-        guard phase == .ready, preparation.blockingReason == nil else { return }
+        guard phase == .ready, allowsTargetSelection, preparation.blockingReason == nil else { return }
         if enabled { enabledBindingIDs.insert(preparation.binding.id) }
         else { enabledBindingIDs.remove(preparation.binding.id) }
         invalidatePreview()

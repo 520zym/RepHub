@@ -5,6 +5,68 @@ import VersionControlCore
 
 @MainActor
 final class RepositoryCommitModelTests: XCTestCase {
+    func testSingleTargetIsAutomaticAndPreservesExplicitFileScope() async throws {
+        for id in [ProviderID.git, .svn] {
+            let provider = CommitFixtureProvider(id: id)
+            let workspace = Workspace(directory: provider.binding.root, bindings: [provider.binding], issues: [])
+            let model = RepositoryCommitModel(service: RepositoryService(providers: [provider]))
+            model.prepare(in: workspace, initialTargets: [], initialMessage: "单目标提交",
+                          initialPathsByBinding: [provider.binding.id: ["Sources/App.swift"]])
+            try await waitUntil { model.phase == .ready }
+
+            let preparation = try XCTUnwrap(model.selectedPreparation)
+            XCTAssertEqual(model.enabledBindingIDs, [provider.binding.id])
+            XCTAssertEqual(model.selectedFiles(for: provider.binding.id), ["Sources/App.swift"])
+            model.setBindingEnabled(false, for: preparation)
+            XCTAssertEqual(model.enabledBindingIDs, [provider.binding.id])
+            XCTAssertTrue(model.canCommit)
+
+            model.clearSelection(in: preparation)
+            XCTAssertFalse(model.canCommit)
+        }
+    }
+
+    func testSingleBlockedTargetIsNotEnabledAutomatically() async throws {
+        let provider = CommitFixtureProvider(id: .svn, blockingReason: "请先解决冲突")
+        let workspace = Workspace(directory: provider.binding.root, bindings: [provider.binding], issues: [])
+        let model = RepositoryCommitModel(service: RepositoryService(providers: [provider]))
+        model.prepare(in: workspace, initialTargets: [], initialMessage: "提交")
+        try await waitUntil { model.phase == .ready }
+
+        XCTAssertEqual(model.selectedPreparation?.blockingReason, "请先解决冲突")
+        XCTAssertTrue(model.enabledBindingIDs.isEmpty)
+        XCTAssertFalse(model.canCommit)
+    }
+
+    func testMultipleTargetsStillRequireExplicitSelection() async throws {
+        let git = CommitFixtureProvider(id: .git)
+        let svn = CommitFixtureProvider(id: .svn)
+        let model = RepositoryCommitModel(service: RepositoryService(providers: [git, svn]))
+        model.prepare(in: fixtureWorkspace(), initialTargets: [git.binding.id], initialMessage: "提交")
+        try await waitUntil { model.phase == .ready }
+
+        XCTAssertEqual(model.enabledBindingIDs, [git.binding.id])
+        let preparation = try XCTUnwrap(model.selectedPreparation)
+        model.setBindingEnabled(false, for: preparation)
+        XCTAssertTrue(model.enabledBindingIDs.isEmpty)
+        XCTAssertFalse(model.canCommit)
+    }
+
+    func testMissingCommitAdapterDoesNotAutoEnableAnUnselectedTarget() async throws {
+        let git = CommitFixtureProvider(id: .git)
+        let svn = CommitReadOnlyFixtureProvider()
+        let model = RepositoryCommitModel(service: RepositoryService(providers: [git, svn]))
+        model.prepare(in: fixtureWorkspace(), initialTargets: [CommitFixtureProvider(id: .svn).binding.id], initialMessage: "提交")
+        try await waitUntil { model.phase == .ready }
+
+        XCTAssertEqual(model.preparations.count, 1)
+        XCTAssertTrue(model.allowsTargetSelection)
+        XCTAssertTrue(model.enabledBindingIDs.isEmpty)
+        XCTAssertFalse(model.canCommit)
+        model.setBindingEnabled(true, for: try XCTUnwrap(model.selectedPreparation))
+        XCTAssertEqual(model.enabledBindingIDs, [git.binding.id])
+    }
+
     func testSelectionAndMessagesRemainIndependentPerTarget() async throws {
         let git = CommitFixtureProvider(id: .git)
         let svn = CommitFixtureProvider(id: .svn)
@@ -210,13 +272,15 @@ final class RepositoryCommitModelTests: XCTestCase {
 private struct CommitFixtureProvider: RepositoryCommitProvider {
     let id: ProviderID
     let files: [RepositoryCommitFile]
+    let blockingReason: String?
     let log = CommitFixtureLog()
     init(id: ProviderID, files: [RepositoryCommitFile] = [
         RepositoryCommitFile(change: FileChange(path: "Sources/App.swift", kind: .modified), fingerprint: "one"),
         RepositoryCommitFile(change: FileChange(path: "README.md", kind: .modified), fingerprint: "two")
-    ]) {
+    ], blockingReason: String? = nil) {
         self.id = id
         self.files = files
+        self.blockingReason = blockingReason
     }
     var displayName: String { id == .git ? "Git" : "Subversion" }
     var binding: RepositoryBinding {
@@ -237,7 +301,7 @@ private struct CommitFixtureProvider: RepositoryCommitProvider {
             guard id == .svn, file.change.path == "README.md" else { return file }
             return RepositoryCommitFile(change: file.change, fingerprint: file.fingerprint, restriction: "需要先解决冲突", isDirectory: file.isDirectory)
         }
-        return RepositoryCommitPreparation(binding: binding, baseRevision: id == .git ? "git-base" : "svn-base", files: preparedFiles)
+        return RepositoryCommitPreparation(binding: binding, baseRevision: id == .git ? "git-base" : "svn-base", files: preparedFiles, blockingReason: blockingReason)
     }
     func commitDiff(in binding: RepositoryBinding, file: RepositoryCommitFile) async throws -> RepositoryPatch { RepositoryPatch(text: "diff -- \(file.change.path)") }
     func commit(_ request: RepositoryCommitRequest, in binding: RepositoryBinding, progress: @escaping RepositoryOperationProgressHandler) async throws -> RepositoryCommitResult {
@@ -251,4 +315,15 @@ private actor CommitFixtureLog {
     private var count = 0
     func recordCommit() { count += 1 }
     func commitCount() -> Int { count }
+}
+
+/// 模拟声明了提交能力、但未实现提交适配接口的扩展来源。
+private struct CommitReadOnlyFixtureProvider: VersionControlProvider {
+    let id = ProviderID.svn
+    let displayName = "Subversion"
+    func detect(at directory: URL) async throws -> RepositoryBinding? { CommitFixtureProvider(id: id).binding }
+    func status(in binding: RepositoryBinding) async throws -> [FileChange] { [] }
+    func history(in binding: RepositoryBinding, limit: Int, reference: String?) async throws -> [Revision] { [] }
+    func changedFiles(in binding: RepositoryBinding, revision: String) async throws -> [FileChange] { [] }
+    func diff(in binding: RepositoryBinding, path: String?, revision: String?) async throws -> RepositoryPatch { RepositoryPatch(text: "") }
 }

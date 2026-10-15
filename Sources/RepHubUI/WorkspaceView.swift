@@ -205,7 +205,7 @@ public struct WorkspaceView: View {
                     workingDiff.padding(.horizontal, 5)
                 } trailing: {
                     WorkspaceCommitInspector(palette: palette, bindings: commitBindings,
-                        message: unifiedCommitMessage, targets: $commitTargets, selectedCount: selectedCommitCount,
+                        message: unifiedCommitMessage, targets: Binding(get: { effectiveCommitTargets }, set: { commitTargets = $0 }), selectedCount: selectedCommitCount,
                         blockedReason: commitBlockedReason, aiAvailable: model.repositoryCommit.ai != nil,
                         isLocked: model.isInteractionLocked, collapse: { showsCommitInspector = false },
                         prepare: { prepareSelectedCommit() }, prepareAI: { prepareSelectedCommit(withAI: true) })
@@ -376,6 +376,11 @@ public struct WorkspaceView: View {
         (model.workspace?.bindings ?? []).filter { $0.capabilities.contains(.commit) }
     }
 
+    private var effectiveCommitTargets: Set<String> {
+        if commitBindings.count == 1, let binding = commitBindings.first { return [binding.id] }
+        return commitTargets
+    }
+
     private var selectedChangePaths: Binding<Set<String>> {
         Binding(get: {
             guard let binding = model.selectedBinding else { return [] }
@@ -395,7 +400,7 @@ public struct WorkspaceView: View {
     }
 
     private var selectedCommitCount: Int {
-        commitSelection.count(in: commitBindings.filter { commitTargets.contains($0.id) })
+        commitSelection.count(in: commitBindings.filter { effectiveCommitTargets.contains($0.id) })
     }
 
     private var currentConflicts: [FileChange] {
@@ -403,7 +408,7 @@ public struct WorkspaceView: View {
     }
 
     private var commitBlockedReason: String? {
-        let conflicts = commitBindings.filter { commitTargets.contains($0.id) }.reduce(0) { count, binding in
+        let conflicts = commitBindings.filter { effectiveCommitTargets.contains($0.id) }.reduce(0) { count, binding in
             count + (model.snapshots[binding.id]?.changes.filter { $0.kind == .conflicted }.count ?? 0)
         }
         return conflicts > 0 ? "所选来源有 \(conflicts) 个冲突，请先处理。" : nil
@@ -424,9 +429,9 @@ public struct WorkspaceView: View {
     }
 
     private func prepareSelectedCommit(withAI: Bool = false) {
-        guard commitBlockedReason == nil, selectedCommitCount > 0, !commitTargets.isEmpty else { return }
+        guard commitBlockedReason == nil, selectedCommitCount > 0, !effectiveCommitTargets.isEmpty else { return }
         startsCommitWithAI = withAI
-        model.prepareCommit(initialTargets: commitTargets, initialMessage: commitMessage,
+        model.prepareCommit(initialTargets: effectiveCommitTargets, initialMessage: commitMessage,
                             initialPathsByBinding: commitSelection.pathsByBinding(commitBindings),
                             initialMessages: commitMessagesByBinding)
         showsCommitSheet = true

@@ -96,7 +96,12 @@ struct RepositoryCommitView: View {
     private var headerDetail: String {
         switch model.phase {
         case .preparing: "正在检查工作副本和提交限制"
-        case .ready: "Git 提交当前工作区所选文件；SVN 会直接提交到服务器"
+        case .ready:
+            if model.preparations.count == 1, let binding = model.preparations.first?.binding {
+                binding.capabilities.contains(.push) ? "提交到 \(binding.providerName) 本地仓库，推送为独立操作" : "提交到 \(binding.providerID == .svn ? "SVN" : binding.providerName) 服务器"
+            } else {
+                "Git 提交当前工作区所选文件；SVN 会直接提交到服务器"
+            }
         case .committing: "按 Git、SVN 的顺序提交；结果不明或取消时会停止后续目标"
         case .finished: "每个目标均保留了实际结果，不会自动重试"
         case .idle: "准备提交"
@@ -147,9 +152,11 @@ struct RepositoryCommitView: View {
                         .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
                 }
                 Spacer()
-                Toggle("启用", isOn: Binding(get: { model.enabledBindingIDs.contains(preparation.binding.id) }, set: { model.setBindingEnabled($0, for: preparation) }))
-                    .toggleStyle(.checkbox).font(.system(size: 11)).fixedSize()
-                    .disabled(preparation.blockingReason != nil)
+                if model.allowsTargetSelection {
+                    Toggle("启用", isOn: Binding(get: { model.enabledBindingIDs.contains(preparation.binding.id) }, set: { model.setBindingEnabled($0, for: preparation) }))
+                        .toggleStyle(.checkbox).font(.system(size: 11)).fixedSize()
+                        .disabled(preparation.blockingReason != nil)
+                }
                 Menu {
                     Button("全选可提交文件") { model.selectAll(in: preparation) }
                     Button("清空选择") { model.clearSelection(in: preparation) }

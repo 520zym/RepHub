@@ -36,7 +36,7 @@ struct WorkspaceCommitInspector: View {
                             .font(.system(size: 13)).scrollContentBackground(.hidden)
                             .padding(7).frame(minHeight: 150, maxHeight: 200)
                             .accessibilityLabel("提交说明")
-                            .help("在这里编辑会更新所有提交目标的说明；可在确认窗口分别修改。")
+                            .help(bindings.count > 1 ? "在这里编辑会更新所有提交目标的说明；可在确认窗口分别修改。" : "编辑本次提交说明，可在确认窗口继续修改。")
                         if message.isEmpty {
                             Text("描述这次修改…").font(.system(size: 13)).foregroundStyle(palette.secondaryText)
                                 .padding(.horizontal, 12).padding(.top, 14).allowsHitTesting(false)
@@ -50,15 +50,21 @@ struct WorkspaceCommitInspector: View {
                         .help("进入提交预检，按真实文件范围选择场景并生成说明")
 
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("提交目标").font(.system(size: 13, weight: .semibold))
-                        ForEach(bindings) { binding in
-                            Toggle(isOn: Binding(
-                                get: { targets.contains(binding.id) },
-                                set: { if $0 { targets.insert(binding.id) } else { targets.remove(binding.id) } }
-                            )) {
-                                Text(binding.displayLabel).lineLimit(2).font(.system(size: 13))
+                        if bindings.count == 1, let binding = bindings.first {
+                            Text("提交到 \(binding.providerID == .svn ? "SVN" : binding.providerName)")
+                                .font(.system(size: 13, weight: .semibold))
+                                .help(binding.root.path)
+                        } else {
+                            Text("提交目标").font(.system(size: 13, weight: .semibold))
+                            ForEach(bindings) { binding in
+                                Toggle(isOn: Binding(
+                                    get: { targets.contains(binding.id) },
+                                    set: { if $0 { targets.insert(binding.id) } else { targets.remove(binding.id) } }
+                                )) {
+                                    Text(binding.displayLabel).lineLimit(2).font(.system(size: 13))
+                                }
+                                .toggleStyle(.checkbox).help(binding.root.path)
                             }
-                            .toggleStyle(.checkbox).help(binding.root.path)
                         }
                         Text(targetDescription).font(.system(size: 12)).foregroundStyle(palette.secondaryText)
                             .fixedSize(horizontal: false, vertical: true)
@@ -84,7 +90,7 @@ struct WorkspaceCommitInspector: View {
                 .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
                 .disabled(!canPrepare)
                 .help("进入提交预检和确认，不会立即写入仓库")
-                Text(blockedReason ?? (targets.isEmpty ? "请选择提交目标" : selectedCount == 0 ? "请先勾选变更" : "确认后执行，Git 推送为独立操作。"))
+                Text(blockedReason ?? (targets.isEmpty ? "请选择提交目标" : selectedCount == 0 ? "请先勾选变更" : "核对文件和说明，确认后执行提交。"))
                     .font(.system(size: 11)).foregroundStyle(blockedReason == nil ? palette.secondaryText : .orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
