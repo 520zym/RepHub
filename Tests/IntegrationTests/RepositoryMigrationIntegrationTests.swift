@@ -183,6 +183,53 @@ struct RepositoryMigrationIntegrationTests {
         #expect(try await svnStatus(fixture).isEmpty)
     }
 
+    @Test("复制历史范围选项的预检条数与实际 Git 提交数一致")
+    func copyHistoryScopeMatchesPreflightAndActualCommitCount() async throws {
+        try requireTools()
+        let fixture = try await LocalRepositoryFixture.create()
+        defer { try? fixture.remove() }
+        try await seedCopiedMigrationModule(in: fixture)
+
+        let source = SVNProvider(runner: fixture.runner)
+        let location = RemoteRepositoryLocation(
+            url: fixture.svnURL.appendingPathComponent("迁移模块", isDirectory: true).absoluteString
+        )
+        let withAncestors = try await source.planMigration(
+            from: location, mode: .history, includeCopyHistory: true, progress: { _ in }
+        )
+        let currentPathOnly = try await source.planMigration(
+            from: location, mode: .history, includeCopyHistory: false, progress: { _ in }
+        )
+        #expect(withAncestors.revisions.map(\.message) == [
+            "旧路径创建复杂文件", "旧路径更新二进制与文本", "复制旧路径为迁移模块",
+            "新路径改名删除并更新", "新路径再次更新"
+        ])
+        #expect(currentPathOnly.revisions.map(\.message) == [
+            "复制旧路径为迁移模块", "新路径改名删除并更新", "新路径再次更新"
+        ])
+        #expect(withAncestors.includeCopyHistory)
+        #expect(!currentPathOnly.includeCopyHistory)
+
+        for (label, sourcePlan) in [("with-copy-history", withAncestors), ("current-path-only", currentPathOnly)] {
+            let target = fixture.root.appendingPathComponent("remotes/\(label).git", isDirectory: true)
+            try await git(["init", "--bare", target.path], fixture: fixture)
+            let migrationPlan = MigrationPlan(
+                source: sourcePlan, targetProviderID: .git, remoteURL: target.absoluteURL.absoluteString,
+                branch: "main", destination: fixture.root.appendingPathComponent("preview-\(label)", isDirectory: true),
+                authors: Dictionary(sourcePlan.revisions.map { revision in
+                    (revision.author, MigrationAuthor(name: revision.author, email: "\(revision.author)@example.test"))
+                }, uniquingKeysWith: { first, _ in first })
+            )
+            let preview = try await migrationService(for: fixture).prepare(migrationPlan, progress: { _ in })
+            #expect(preview.mappings.count == sourcePlan.revisions.count)
+            #expect(preview.mappings.map(\.source.id) == sourcePlan.revisions.map(\.id))
+            let actualCount = try await gitOutput(["rev-list", "--count", "HEAD"], in: preview.repository, fixture: fixture)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            #expect(actualCount == String(sourcePlan.revisions.count))
+            #expect(try await remoteRefs(target, fixture: fixture).isEmpty)
+        }
+    }
+
     @Test("首次真实 Git 提交后核对失败，恢复时不会重复追加或发布未核对历史")
     func refusesResumeWhenFirstCommitWasNotVerified() async throws {
         try requireTools()

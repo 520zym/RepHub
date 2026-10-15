@@ -21,6 +21,8 @@ public final class RepositoryMigrationModel {
     public var destinationParent: URL?
     public var directoryName = "migrated-repository"
     public var mode: MigrationMode = .history
+    /// 默认只迁移当前目录在最近一次复制/创建之后的历史，避免无意追溯庞大的祖先目录。
+    public var includeCopyHistory = false
     public private(set) var listings: [String: RemoteDirectoryListing] = [:]
     public private(set) var rootListingURL: String?
     public private(set) var expandedURLs = Set<String>()
@@ -68,7 +70,7 @@ public final class RepositoryMigrationModel {
         requestID += 1
         task?.cancel(); previewTask?.cancel()
         stage = .form; sourceURL = ""; username = ""; password = ""; targetURL = ""; branch = "main"
-        destinationParent = nil; directoryName = "migrated-repository"; mode = .history
+        destinationParent = nil; directoryName = "migrated-repository"; mode = .history; includeCopyHistory = false
         listings = [:]; rootListingURL = nil; expandedURLs = []; selectedSourceURL = nil
         plan = nil; preview = nil; filePreview = nil; selectedFilePath = nil; expandedFileDirectories = []; selectedCommit = nil; historyPatch = nil
         errorMessage = nil; publication = nil; transferProgress.clear()
@@ -137,13 +139,15 @@ public final class RepositoryMigrationModel {
         guard !targetURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { errorMessage = "请填写目标 Git 地址。"; return }
         guard let destination else { errorMessage = "请选择本地父目录并填写新目录名。"; return }
         let location = sourceLocation, requestedMode = mode
+        let requestedCopyHistory = requestedMode == .history && includeCopyHistory
         let remoteURL = targetURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let requestedBranch = branch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "main" : branch
         let handler = progressHandler
         begin(.planning, message: "正在只读检查来源与目标…") { [service] in
             try await service.plan(sourceProviderID: .svn, location: location, mode: requestedMode,
                                    targetProviderID: .git, remoteURL: remoteURL, branch: requestedBranch,
-                                   destination: destination, authors: [:], progress: handler)
+                                   destination: destination, authors: [:], includeCopyHistory: requestedCopyHistory,
+                                   progress: handler)
         } receive: { model, plan in
             let authors = model.authorDirectory.resolve(authors: plan.authors, sourceURL: plan.source.location.url)
             model.plan = MigrationPlan(id: plan.id, source: plan.source, targetProviderID: plan.targetProviderID,
@@ -182,6 +186,7 @@ public final class RepositoryMigrationModel {
                 guard let self, self.requestID == token else { return }
                 self.plan = restored; self.sourceURL = restored.source.location.url; self.selectedSourceURL = restored.source.location.url
                 self.targetURL = restored.remoteURL; self.branch = restored.branch; self.mode = restored.source.mode
+                self.includeCopyHistory = restored.source.includeCopyHistory
                 self.destinationParent = restored.destination.deletingLastPathComponent(); self.directoryName = restored.destination.lastPathComponent
                 self.preservedDirectory = await service.partialDirectory(for: restored.id)
                 self.stage = .prepared; self.transferProgress.finish("已恢复迁移计划，可继续生成预览")

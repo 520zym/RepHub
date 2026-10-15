@@ -1,0 +1,23 @@
+{
+  "legacyFullSnapshotSeconds": 11.589466041652486,
+  "maximumChangedBlobs": 648,
+  "maximumReusedBlobs": 647,
+  "progressDetails": [
+    "复用 0 个已核对 blob，变化 648 个文件。",
+    "复用 0 个 blob，写入 648 个变化文件；完整树已核对。",
+    "复用 647 个已核对 blob，变化 1 个文件。",
+    "更新 1 / 1 个变化路径。",
+    "复用 647 个 blob，写入 1 个变化文件；完整树已核对。",
+    "复用 646 个已核对 blob，变化 2 个文件。",
+    "更新 1 / 2 个变化路径。",
+    "更新 2 / 2 个变化路径。",
+    "复用 646 个 blob，写入 2 个变化文件；完整树已核对。",
+    "复用 646 个已核对 blob，变化 1 个文件。",
+    "更新 1 / 1 个变化路径。",
+    "复用 646 个 blob，写入 1 个变化文件；完整树已核对。"
+  ],
+  "revisions": 4,
+  "scope": "Git construction and verification: legacy exports and scans every revision; verified session exports and scans final revision only. Excludes SVN reads, source scans, and business checkpoints.",
+  "snapshotFiles": 650,
+  "verifiedSessionSeconds": 9.201983833336271
+}

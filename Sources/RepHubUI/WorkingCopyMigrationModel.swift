@@ -14,6 +14,8 @@ public final class WorkingCopyMigrationModel {
     public var remoteURL = ""
     public var branch = "main"
     public var mode: MigrationMode = .history
+    /// 首次接管默认只迁移当前目录创建/复制后的历史；补迁沿用既有迁移范围。
+    public var includeCopyHistory = false
     public var action: WorkingCopyMigrationAction = .initial
     public private(set) var record: WorkingCopyMigrationRecord?
     public private(set) var plan: WorkingCopyMigrationPlan?
@@ -47,7 +49,7 @@ public final class WorkingCopyMigrationModel {
     public func reset() {
         guard !isBusy else { return }
         requestID += 1; task?.cancel(); previewTask?.cancel()
-        stage = .form; directory = nil; remoteURL = ""; branch = "main"; mode = .history; action = .initial
+        stage = .form; directory = nil; remoteURL = ""; branch = "main"; mode = .history; includeCopyHistory = false; action = .initial
         record = nil; plan = nil; clearPreview(); errorMessage = nil; preservedDirectory = nil; result = nil; transferProgress.clear()
     }
     public func dismiss() { guard !isBusy else { return }; reset() }
@@ -79,8 +81,10 @@ public final class WorkingCopyMigrationModel {
         let remote = remoteURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let requestedBranch = branch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "main" : branch
         let requestedMode = mode, requestedAction = action, handler = progressHandler
+        let requestedCopyHistory = requestedAction == .initial && requestedMode == .history && includeCopyHistory
         start(.planning, message: "正在检查本地 SVN 工作副本与 Git 目标…") { [service] in
-            try await service.plan(at: directory, remoteURL: remote, branch: requestedBranch, mode: requestedMode, action: requestedAction, progress: handler)
+            try await service.plan(at: directory, remoteURL: remote, branch: requestedBranch, mode: requestedMode,
+                                   action: requestedAction, includeCopyHistory: requestedCopyHistory, progress: handler)
         } receive: { model, plan in
             var resolvedPlan = plan
             resolvedPlan.authors = model.authorDirectory.resolve(authors: plan.authors, sourceURL: plan.source.location.url)

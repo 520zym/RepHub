@@ -1,10 +1,11 @@
 import Foundation
+import CryptoKit
 import ToolExecution
 import VersionControlCore
 
 /// Git 迁移目标。它只接收已经由来源适配器导出的隔离快照；不会读取来源工作区，
 /// 也不会在预览阶段配置或推送任何远端。
-public final class GitMigrationTargetProvider: RepositoryMigrationTargetProvider, @unchecked Sendable {
+public final class GitMigrationTargetProvider: RepositoryMigrationTargetProvider, RepositoryVerifiedMigrationTargetProvider, @unchecked Sendable {
     public let id: ProviderID = .git
 
     private let runner: CommandRunner
@@ -115,6 +116,15 @@ public final class GitMigrationTargetProvider: RepositoryMigrationTargetProvider
         try await materialize(entries, into: repository, revisionID: revision.id, progress: progress)
         await progress(RepositoryOperationProgress("已生成 Git 提交 \(tip.prefix(12))。"))
         return tip
+    }
+
+    /// 已核对会话仅用于业务层创建的隔离预览仓库。会话不改变旧接口的语义：调用方在
+    /// 完成后仍会执行完整导出与扫描核对；它只减少中间修订重复写入相同 Git blob 的开销。
+    public func makeVerifiedMigrationSession(at repository: URL) async throws -> any RepositoryVerifiedMigrationSession {
+        let root = try validatedRepository(repository)
+        try await ensureCleanMigrationWorkingTree(in: root)
+        let initialTip = try await migrationTipOrNil(in: root)
+        return VerifiedMigrationSession(provider: self, repository: root, expectedTip: initialTip)
     }
 
     public func verifyMigration(at directory: URL, expectedTip: String, branch: String) async throws {
@@ -241,6 +251,397 @@ public final class GitMigrationTargetProvider: RepositoryMigrationTargetProvider
                 return MigrationPublicationResult(state: .unknown, message: "发布过程异常，结果需要核对：\(error.localizedDescription)")
             }
             throw error
+        }
+    }
+
+    /// 在一个预览转换内复用已经通过 SHA-256 内容核对的 blob。首次进入（包括从既有
+    /// 检查点恢复）故意全量 hash；之后才依据来源清单安全复用，不能把 Git 的 object id
+    /// 当作来源字节校验的替代品。
+    private actor VerifiedMigrationSession: RepositoryVerifiedMigrationSession {
+        private struct CachedBlob {
+            let entry: MigrationFileEntry
+            let objectID: String
+        }
+
+        private let provider: GitMigrationTargetProvider
+        private let repository: URL
+        private var expectedTip: String?
+        private var blobs: [String: CachedBlob] = [:]
+        private var previousManifest: [String: MigrationFileEntry]?
+        private var verifiedObjectDigests: [String: String] = [:]
+        private var busy = false
+        private var invalidated = false
+
+        init(provider: GitMigrationTargetProvider, repository: URL, expectedTip: String?) {
+            self.provider = provider
+            self.repository = repository
+            self.expectedTip = expectedTip
+        }
+
+        func appendVerifiedSnapshot(
+            from snapshot: URL,
+            files: [MigrationFileEntry],
+            revision: MigrationRevision,
+            author: MigrationAuthor,
+            progress: @escaping RepositoryOperationProgressHandler
+        ) async throws -> String {
+            guard !busy else {
+                throw VersionControlError.invalidRepository("Git 迁移会话正在写入另一条修订，请等待当前操作完成。")
+            }
+            guard !invalidated else {
+                throw VersionControlError.invalidRepository("Git 迁移会话上一操作未完成，不能继续复用。请重新生成迁移预览。")
+            }
+            busy = true
+            defer { busy = false }
+            do {
+                try Task.checkCancellation()
+                try provider.validateAuthor(author)
+                try await provider.ensureCleanMigrationWorkingTree(in: repository)
+                guard try await provider.migrationTipOrNil(in: repository) == expectedTip else {
+                    throw VersionControlError.invalidRepository("迁移预览的 Git 末端提交已变化，不能继续复用已核对会话。")
+                }
+                let manifest = try validateManifest(files)
+                let snapshotEntries = try provider.snapshotEntries(at: snapshot)
+                try validateSnapshot(snapshotEntries, against: manifest)
+
+                let previous = previousManifest
+                var nextBlobs: [String: CachedBlob] = [:]
+                var changed: [GitMigrationTargetProvider.SnapshotEntry] = []
+                var reused = 0
+                for entry in snapshotEntries where entry.kind != .directory {
+                    guard let declared = manifest[entry.path] else {
+                        throw VersionControlError.invalidData("来源快照缺少文件清单记录：\(entry.path)")
+                    }
+                    if let cached = blobs[entry.path], cached.entry == declared {
+                        nextBlobs[entry.path] = cached
+                        reused += 1
+                    } else {
+                        changed.append(entry)
+                    }
+                }
+                await progress(RepositoryOperationProgress(
+                    "准备 \(revision.id) 的 Git 对象…",
+                    detail: "复用 \(reused) 个已核对 blob，变化 \(changed.count) 个文件。"
+                ))
+
+                let changedObjects = try await writeChangedObjects(
+                    changed, manifest: manifest, revisionID: revision.id, progress: progress
+                )
+                for (path, objectID) in changedObjects {
+                    guard let declared = manifest[path] else { throw VersionControlError.invalidData("Git 对象缺少来源清单记录。") }
+                    nextBlobs[path] = CachedBlob(entry: declared, objectID: objectID)
+                }
+
+                try Task.checkCancellation()
+                _ = try requireSuccess(try await provider.git(["read-tree", "--empty"], in: repository), tool: "git")
+                var records = Data()
+                for entry in snapshotEntries where entry.kind != .directory {
+                    guard let blob = nextBlobs[entry.path] else { throw VersionControlError.invalidData("Git 快照缺少文件对象。") }
+                    let record = Data("\(entry.mode) \(blob.objectID)\t\(entry.path)\u{0}".utf8)
+                    if records.count + record.count > 1_000_000 {
+                        try await provider.updateIndex(records, in: repository)
+                        records.removeAll(keepingCapacity: true)
+                    }
+                    records.append(record)
+                }
+                try await provider.updateIndex(records, in: repository)
+                if snapshotEntries.allSatisfy({ $0.kind == .directory }) {
+                    _ = try requireSuccess(try await provider.git(["hash-object", "-t", "tree", "-w", "--stdin"], in: repository, standardInput: Data()), tool: "git")
+                }
+
+                let date = ISO8601DateFormatter().string(from: revision.date)
+                _ = try requireSuccess(try await provider.git([
+                    "-c", "user.name=RepHub Migration", "-c", "user.email=rephub@local", "-c", "commit.gpgSign=false",
+                    "commit", "--no-verify", "--no-gpg-sign", "--allow-empty", "--allow-empty-message", "--cleanup=verbatim",
+                    "--author=\(author.name) <\(author.email)>", "--date=\(date)", "-m", revision.message
+                ], in: repository, timeout: 180), tool: "git")
+                let tip = try await provider.currentTip(in: repository)
+                try await verifyCommitParent(tip)
+                try await verifyTree(tip: tip, entries: snapshotEntries, blobs: nextBlobs)
+                try await materializeDelta(
+                    snapshotEntries,
+                    previous: previous,
+                    manifest: manifest,
+                    revisionID: revision.id,
+                    progress: progress
+                )
+                try await provider.ensureCleanMigrationWorkingTree(in: repository)
+                blobs = nextBlobs
+                previousManifest = manifest
+                expectedTip = tip
+                await progress(RepositoryOperationProgress(
+                    "已生成 Git 提交 \(tip.prefix(12))。",
+                    detail: "复用 \(reused) 个 blob，写入 \(changed.count) 个变化文件；完整树已核对。"
+                ))
+                return tip
+            } catch {
+                invalidated = true
+                throw error
+            }
+        }
+
+        private func validateManifest(_ files: [MigrationFileEntry]) throws -> [String: MigrationFileEntry] {
+            var result: [String: MigrationFileEntry] = [:]
+            result.reserveCapacity(files.count)
+            for entry in files {
+                _ = try provider.validatedRelativePath(entry.path)
+                guard result[entry.path] == nil else { throw VersionControlError.invalidData("来源文件清单包含重复路径：\(entry.path)") }
+                switch entry.kind {
+                case .directory:
+                    guard entry.digest.isEmpty, entry.size == 0, !entry.executable else {
+                        throw VersionControlError.invalidData("目录文件清单记录无效：\(entry.path)")
+                    }
+                case .file, .symbolicLink:
+                    guard entry.digest.count == 64,
+                          entry.digest.utf8.allSatisfy({ ($0 >= 48 && $0 <= 57) || ($0 >= 97 && $0 <= 102) }),
+                          entry.kind == .file || !entry.executable else {
+                        throw VersionControlError.invalidData("来源文件清单摘要或属性无效：\(entry.path)")
+                    }
+                }
+                result[entry.path] = entry
+            }
+            return result
+        }
+
+        private func verifyCommitParent(_ tip: String) async throws {
+            let parents = try requireSuccess(try await provider.git(["show", "-s", "--format=%P", tip], in: repository), tool: "git")
+                .output.trimmingCharacters(in: .whitespacesAndNewlines)
+            let values = parents.split(whereSeparator: \.isWhitespace).map(String.init)
+            if let expectedTip {
+                guard values == [expectedTip] else {
+                    throw VersionControlError.invalidRepository("Git 提交父级与已核对迁移检查点不一致，不能继续迁移。")
+                }
+            } else {
+                guard values.isEmpty else {
+                    throw VersionControlError.invalidRepository("首个 Git 迁移提交意外包含父提交，不能继续迁移。")
+                }
+            }
+        }
+
+        private func validateSnapshot(
+            _ entries: [GitMigrationTargetProvider.SnapshotEntry],
+            against manifest: [String: MigrationFileEntry]
+        ) throws {
+            guard entries.count == manifest.count else { throw VersionControlError.invalidData("来源快照与文件清单的路径数量不一致。") }
+            for entry in entries {
+                guard let declared = manifest[entry.path] else { throw VersionControlError.invalidData("来源快照存在未声明路径：\(entry.path)") }
+                let expectedKind: MigrationFileEntry.Kind = switch entry.kind {
+                case .directory: .directory
+                case .regular: .file
+                case .symbolicLink: .symbolicLink
+                }
+                guard declared.kind == expectedKind,
+                      declared.executable == (entry.mode == "100755"),
+                      declared.size == entry.size else {
+                    throw VersionControlError.invalidData("来源快照与文件清单类型、权限或大小不一致：\(entry.path)")
+                }
+            }
+        }
+
+        private func writeChangedObjects(
+            _ changed: [GitMigrationTargetProvider.SnapshotEntry],
+            manifest: [String: MigrationFileEntry],
+            revisionID: String,
+            progress: @escaping RepositoryOperationProgressHandler
+        ) async throws -> [String: String] {
+            var result: [String: String] = [:]
+            var verification: [(objectID: String, entry: MigrationFileEntry)] = []
+            let regular = changed.filter { $0.kind == .regular }
+            let regularIDs = try await provider.hashRegularFiles(regular, in: repository, revisionID: revisionID, progress: progress)
+            for entry in regular {
+                try Task.checkCancellation()
+                guard let oid = regularIDs[entry.path], let declared = manifest[entry.path] else { throw VersionControlError.invalidData("Git 未返回来源文件对象。") }
+                let actual = try sha256(of: entry.url)
+                guard actual.digest == declared.digest, actual.size == declared.size else {
+                    throw VersionControlError.invalidData("来源文件在扫描后发生变化：\(entry.path)")
+                }
+                result[entry.path] = oid
+                verification.append((oid, declared))
+            }
+            for entry in changed where entry.kind == .symbolicLink {
+                try Task.checkCancellation()
+                guard let declared = manifest[entry.path] else { throw VersionControlError.invalidData("符号链接缺少来源清单记录。") }
+                let target = try provider.fileManager.destinationOfSymbolicLink(atPath: entry.url.path)
+                let source = Data(target.utf8)
+                guard UInt64(source.count) == declared.size,
+                      SHA256.hash(data: source).map({ String(format: "%02x", $0) }).joined() == declared.digest else {
+                    throw VersionControlError.invalidData("来源符号链接内容与已核对文件清单不一致：\(entry.path)")
+                }
+                let written = try requireSuccess(try await provider.git(
+                    ["hash-object", "-w", "--stdin"], in: repository,
+                    standardInput: source, maximumStandardInputBytes: 64 * 1024
+                ), tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard provider.isObjectID(written) else { throw VersionControlError.invalidData("Git 未返回有效符号链接对象。") }
+                result[entry.path] = written
+                verification.append((written, declared))
+            }
+            try await verifyGitBlobs(verification)
+            return result
+        }
+
+        /// 按受限批次读取首次出现的 blob。不能逐文件启动 cat-file：大型历史的首轮
+        /// 仍可能有数千个变化文件；只有超过批次上限的单 blob 才单独读取。
+        private func verifyGitBlobs(_ candidates: [(objectID: String, entry: MigrationFileEntry)]) async throws {
+            var unique: [String: MigrationFileEntry] = [:]
+            for candidate in candidates where verifiedObjectDigests[candidate.objectID] != candidate.entry.digest {
+                if let previous = unique[candidate.objectID], previous.digest != candidate.entry.digest || previous.size != candidate.entry.size {
+                    throw VersionControlError.invalidData("同一 Git blob 对应了不一致的来源摘要。")
+                }
+                unique[candidate.objectID] = candidate.entry
+            }
+            let entries = unique.keys.sorted().map { objectID in
+                GitMigrationTargetProvider.ExportTreeEntry(mode: "100644", objectID: objectID, path: objectID)
+            }
+            guard !entries.isEmpty else { return }
+            let sizes = try await provider.readBlobSizes(entries, in: repository)
+            var start = 0
+            while start < entries.count {
+                try Task.checkCancellation()
+                let firstSize = sizes[start]
+                guard firstSize <= GitMigrationTargetProvider.maxExportBlobBytes else {
+                    throw VersionControlError.unsupported("迁移提交含有超过本地安全读取上限的单个文件，无法完成对象内容核对。")
+                }
+                if firstSize > GitMigrationTargetProvider.catFileBatchOutputBytes {
+                    let entry = entries[start]
+                    let blob = try await provider.readSingleExportBlob(entry, in: repository)
+                    try verifyBlob(blob, objectID: entry.objectID, expected: try requiredManifest(for: entry.objectID, in: unique))
+                    start += 1
+                    continue
+                }
+                var end = start
+                var outputBytes = 0
+                var queryBytes = 0
+                while end < entries.count, end - start < GitMigrationTargetProvider.catFileBatchCount {
+                    let size = sizes[end]
+                    guard size <= GitMigrationTargetProvider.maxExportBlobBytes else {
+                        throw VersionControlError.unsupported("迁移提交含有超过本地安全读取上限的单个文件，无法完成对象内容核对。")
+                    }
+                    let querySize = entries[end].objectID.utf8.count + 1
+                    let responseSize = querySize + 26 + size + 1
+                    if end > start,
+                       (queryBytes + querySize > GitMigrationTargetProvider.catFileBatchQueryBytes || outputBytes + responseSize > GitMigrationTargetProvider.catFileBatchOutputBytes) {
+                        break
+                    }
+                    queryBytes += querySize
+                    outputBytes += responseSize
+                    end += 1
+                }
+                if end == start { end += 1 }
+                let batch = Array(entries[start..<end])
+                var input = Data()
+                for entry in batch { input.append(Data("\(entry.objectID)\n".utf8)) }
+                let result = try requireSuccess(try await provider.git(
+                    ["cat-file", "--batch"], in: repository, timeout: 180,
+                    standardInput: input,
+                    maximumStandardInputBytes: max(GitMigrationTargetProvider.catFileBatchQueryBytes, input.count)
+                ), tool: "git")
+                let blobs = try provider.parseBatchBlobs(result.data, expected: batch, sizes: Array(sizes[start..<end]))
+                for (entry, blob) in zip(batch, blobs) {
+                    try verifyBlob(blob, objectID: entry.objectID, expected: try requiredManifest(for: entry.objectID, in: unique))
+                }
+                start = end
+            }
+        }
+
+        private func requiredManifest(for objectID: String, in manifests: [String: MigrationFileEntry]) throws -> MigrationFileEntry {
+            guard let value = manifests[objectID] else { throw VersionControlError.invalidData("Git blob 缺少来源摘要。") }
+            return value
+        }
+
+        private func verifyBlob(_ blob: Data, objectID: String, expected: MigrationFileEntry) throws {
+            guard UInt64(blob.count) == expected.size,
+                  SHA256.hash(data: blob).map({ String(format: "%02x", $0) }).joined() == expected.digest else {
+                throw VersionControlError.invalidData("Git 写入的 blob 与来源字节摘要不一致。")
+            }
+            verifiedObjectDigests[objectID] = expected.digest
+        }
+
+        private func sha256(of url: URL) throws -> (digest: String, size: UInt64) {
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            var digest = SHA256()
+            var size: UInt64 = 0
+            while let data = try handle.read(upToCount: 1024 * 1024), !data.isEmpty {
+                try Task.checkCancellation()
+                digest.update(data: data)
+                size += UInt64(data.count)
+            }
+            return (digest.finalize().map { String(format: "%02x", $0) }.joined(), size)
+        }
+
+        private func verifyTree(
+            tip: String,
+            entries: [GitMigrationTargetProvider.SnapshotEntry],
+            blobs: [String: CachedBlob]
+        ) async throws {
+            let listing = try requireSuccess(try await provider.git(["ls-tree", "-r", "-z", "--full-tree", tip], in: repository), tool: "git")
+            let tree = try listing.data.split(separator: 0, omittingEmptySubsequences: true).map(provider.parseExportTreeEntry)
+            let expected = entries.filter { $0.kind != .directory }
+            guard tree.count == expected.count else { throw VersionControlError.invalidData("Git 提交树的路径数量与来源快照不一致。") }
+            let actualByPath = Dictionary(uniqueKeysWithValues: tree.map { ($0.path, $0) })
+            for source in expected {
+                guard let actual = actualByPath[source.path], actual.mode == source.mode,
+                      actual.objectID == blobs[source.path]?.objectID else {
+                    throw VersionControlError.invalidData("Git 提交树与来源快照不一致：\(source.path)")
+                }
+            }
+        }
+
+        private func materializeDelta(
+            _ current: [GitMigrationTargetProvider.SnapshotEntry],
+            previous: [String: MigrationFileEntry]?,
+            manifest: [String: MigrationFileEntry],
+            revisionID: String,
+            progress: @escaping RepositoryOperationProgressHandler
+        ) async throws {
+            guard let previous else {
+                try await provider.materialize(current, into: repository, revisionID: revisionID, progress: progress)
+                return
+            }
+            let removed = previous.values.filter { old in
+                guard let next = manifest[old.path] else { return true }
+                return next.kind != old.kind
+            }.sorted { $0.path.count > $1.path.count }
+            for entry in removed {
+                try Task.checkCancellation()
+                let path = try provider.validatedExportPath(entry.path, under: repository)
+                if provider.fileManager.fileExists(atPath: path.path) || (try? provider.fileManager.destinationOfSymbolicLink(atPath: path.path)) != nil {
+                    try provider.fileManager.removeItem(at: path)
+                }
+            }
+            for entry in current where entry.kind == .directory {
+                try Task.checkCancellation()
+                let output = try provider.validatedExportPath(entry.path, under: repository)
+                if provider.fileManager.fileExists(atPath: output.path),
+                   (try output.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])).isDirectory != true {
+                    try provider.fileManager.removeItem(at: output)
+                }
+                try provider.fileManager.createDirectory(at: output, withIntermediateDirectories: true)
+            }
+            let changed = current.filter { entry in
+                guard entry.kind != .directory, let old = previous[entry.path], let currentEntry = manifest[entry.path] else { return entry.kind != .directory }
+                return old != currentEntry
+            }
+            for (index, entry) in changed.enumerated() {
+                try Task.checkCancellation()
+                let output = try provider.validatedExportPath(entry.path, under: repository)
+                if provider.fileManager.fileExists(atPath: output.path) || (try? provider.fileManager.destinationOfSymbolicLink(atPath: output.path)) != nil {
+                    try provider.fileManager.removeItem(at: output)
+                }
+                try provider.fileManager.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
+                switch entry.kind {
+                case .regular:
+                    try provider.fileManager.copyItem(at: entry.url, to: output)
+                    if entry.mode == "100755" { try provider.fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: output.path) }
+                case .symbolicLink:
+                    try provider.fileManager.createSymbolicLink(atPath: output.path, withDestinationPath: try provider.fileManager.destinationOfSymbolicLink(atPath: entry.url.path))
+                case .directory:
+                    break
+                }
+                if index == 0 || (index + 1).isMultiple(of: 128) || index + 1 == changed.count {
+                    await progress(RepositoryOperationProgress("正在整理 \(revisionID) 的 Git 工作区…", detail: "更新 \(index + 1) / \(changed.count) 个变化路径。"))
+                }
+            }
         }
     }
 }
@@ -430,15 +831,16 @@ extension GitMigrationTargetProvider: RepositoryWorkingCopyMigrationTargetProvid
 }
 
 private extension GitMigrationTargetProvider {
-    struct SnapshotEntry {
-        enum Kind: Equatable { case directory, regular, symbolicLink }
+    struct SnapshotEntry: Sendable {
+        enum Kind: Equatable, Sendable { case directory, regular, symbolicLink }
         let url: URL
         let path: String
         let kind: Kind
         let mode: String
+        let size: UInt64
     }
 
-    struct ExportTreeEntry {
+    struct ExportTreeEntry: Sendable {
         let mode: String
         let objectID: String
         let path: String
@@ -503,6 +905,15 @@ private extension GitMigrationTargetProvider {
 
     func currentTip(in repository: URL) async throws -> String {
         let value = try requireSuccess(try await git(["rev-parse", "--verify", "HEAD"], in: repository), tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isObjectID(value) else { throw VersionControlError.invalidData("Git 未返回有效末端提交。") }
+        return value
+    }
+
+    /// 空仓库是迁移会话的合法起点；其余 rev-parse 错误必须原样暴露，不能误当成未出生 HEAD。
+    func migrationTipOrNil(in repository: URL) async throws -> String? {
+        let result = try await git(["rev-parse", "--verify", "--quiet", "HEAD"], in: repository)
+        if result.exitCode == 1 || result.exitCode == 128 { return nil }
+        let value = try requireSuccess(result, tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
         guard isObjectID(value) else { throw VersionControlError.invalidData("Git 未返回有效末端提交。") }
         return value
     }
@@ -838,16 +1249,18 @@ private extension GitMigrationTargetProvider {
             let item = root.appendingPathComponent(relative)
             let values = try item.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .isRegularFileKey])
             if values.isSymbolicLink == true {
-                entries.append(SnapshotEntry(url: item, path: relative, kind: .symbolicLink, mode: "120000")); continue
+                let target = try fileManager.destinationOfSymbolicLink(atPath: item.path)
+                entries.append(SnapshotEntry(url: item, path: relative, kind: .symbolicLink, mode: "120000", size: UInt64(target.utf8.count))); continue
             }
             if values.isDirectory == true {
-                entries.append(SnapshotEntry(url: item, path: relative, kind: .directory, mode: "040000")); continue
+                entries.append(SnapshotEntry(url: item, path: relative, kind: .directory, mode: "040000", size: 0)); continue
             }
             guard values.isRegularFile == true else { throw VersionControlError.unsupported("迁移快照包含不支持的文件类型：\(relative)") }
             let attributes = try fileManager.attributesOfItem(atPath: item.path)
             let permissions = (attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0
             let executable = (permissions & 0o111) != 0
-            entries.append(SnapshotEntry(url: item, path: relative, kind: .regular, mode: executable ? "100755" : "100644"))
+            let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+            entries.append(SnapshotEntry(url: item, path: relative, kind: .regular, mode: executable ? "100755" : "100644", size: size))
         }
         return entries.sorted { $0.path.utf8.lexicographicallyPrecedes($1.path.utf8) }
     }
@@ -945,6 +1358,15 @@ private extension GitMigrationTargetProvider {
             guard record.count >= 2 else { throw VersionControlError.invalidData("Git 状态记录格式错误。") }
             let status = String(decoding: record.prefix(2), as: UTF8.self)
             if status != "??" { throw VersionControlError.invalidRepository("当前 Git 有已跟踪文件修改，补迁前请先提交或处理。") }
+        }
+    }
+
+    /// 已核对迁移会话不能在带有任何残留文件的预览目录上继续。与原地补迁不同，
+    /// 这里的仓库完全由迁移任务拥有，未跟踪文件同样说明上一次物化没有完成。
+    func ensureCleanMigrationWorkingTree(in repository: URL) async throws {
+        let result = try requireSuccess(try await git(["status", "--porcelain=v1", "-z"], in: repository), tool: "git")
+        guard result.data.isEmpty else {
+            throw VersionControlError.invalidRepository("迁移预览工作区存在残留修改，不能继续复用已核对会话。")
         }
     }
 

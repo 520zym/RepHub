@@ -152,6 +152,7 @@ final class SVNMigrationTests: XCTestCase {
             from: RemoteRepositoryLocation(url: address), mode: .history, progress: { _ in }
         )
         XCTAssertEqual(plan.anchor, "r502")
+        XCTAssertTrue(plan.includeCopyHistory, "旧 API 必须保留跨复制祖先历史的原有语义")
         XCTAssertEqual(plan.revisions.count, 501)
         XCTAssertEqual(Set(plan.revisions.map(\.id)).count, 501)
         XCTAssertEqual(plan.revisions.first?.id, "r2")
@@ -162,6 +163,77 @@ final class SVNMigrationTests: XCTestCase {
         XCTAssertTrue(logs[0].contains("502:1"))
         XCTAssertTrue(logs[1].contains("2:1"), "第二页必须从首批最旧 r3 的前一条继续")
         XCTAssertTrue(logs.allSatisfy { $0.contains("\(address)@502") }, "续页不能重新解析移动的 HEAD")
+        XCTAssertTrue(logs.allSatisfy { !$0.contains("-v") }, "迁移计划不读取无用的变更路径列表")
+    }
+
+    func testHistoryScopeStopsAtCopyWhenPlanningNewMigration() async throws {
+        let capture = MigrationCommandCapture()
+        let address = "file:///migration-fixture/trunk/module"
+        let provider = SVNProvider(
+            runner: CommandRunner(),
+            tlsFallback: SVNAutomaticTLSFallback(),
+            commandExecutor: { arguments, _, _ in
+                await capture.append(arguments)
+                if arguments.contains("info") {
+                    return MigrationCommandCapture.result(xml: """
+                    <?xml version="1.0"?><info><entry kind="dir" path="" revision="10"><url>\(address)</url></entry></info>
+                    """)
+                }
+                guard let range = arguments.drop(while: { $0 != "-r" }).dropFirst().first,
+                      range == "10:1" else {
+                    return CommandResult(data: Data(), errorData: Data("unexpected range".utf8), exitCode: 1)
+                }
+                return MigrationCommandCapture.result(xml: MigrationCommandCapture.logXML(revisions: [10, 9]))
+            }
+        )
+
+        let plan = try await provider.planMigration(
+            from: RemoteRepositoryLocation(url: address), mode: .history,
+            includeCopyHistory: false, progress: { _ in }
+        )
+
+        XCTAssertFalse(plan.includeCopyHistory)
+        let logs = await capture.commands().filter { $0.contains("log") }
+        XCTAssertEqual(logs.count, 1)
+        XCTAssertTrue(logs[0].contains("--stop-on-copy"))
+        XCTAssertTrue(logs[0].contains("\(address)@10"), "停止祖先追溯也必须保留固定 peg")
+    }
+
+    func testWorkingCopySupplementForcesCopyHistoryAndKeepsStrictLowerBound() async throws {
+        let capture = MigrationCommandCapture()
+        let address = "file:///migration-fixture/trunk/module"
+        let provider = SVNProvider(
+            runner: CommandRunner(),
+            tlsFallback: SVNAutomaticTLSFallback(),
+            commandExecutor: { arguments, _, _ in
+                await capture.append(arguments)
+                if arguments.contains("info") {
+                    return MigrationCommandCapture.result(xml: """
+                    <?xml version="1.0"?><info><entry kind="dir" path="" revision="10"><url>\(address)</url></entry></info>
+                    """)
+                }
+                guard let range = arguments.drop(while: { $0 != "-r" }).dropFirst().first else {
+                    return CommandResult(data: Data(), errorData: Data("missing range".utf8), exitCode: 1)
+                }
+                guard range == "10:8" else {
+                    return CommandResult(data: Data(), errorData: Data("unexpected range \(range)".utf8), exitCode: 1)
+                }
+                return MigrationCommandCapture.result(xml: MigrationCommandCapture.logXML(revisions: [10, 9, 8]))
+            }
+        )
+
+        let plan = try await provider.planWorkingCopyHistory(
+            from: RemoteRepositoryLocation(url: address), mode: .history,
+            through: "r10", after: "r7", includeCopyHistory: false, progress: { _ in }
+        )
+
+        XCTAssertTrue(plan.includeCopyHistory, "补迁必须跨越新的 copy/rename，不能按初次范围截断")
+        XCTAssertEqual(plan.revisions.map(\.id), ["r8", "r9", "r10"], "补迁下界必须仍严格排除 r7")
+        let logs = await capture.commands().filter { $0.contains("log") }
+        XCTAssertEqual(logs.count, 1)
+        XCTAssertFalse(logs[0].contains("--stop-on-copy"), "补迁即使请求仅当前路径，也必须取得 copy 点后的完整增量")
+        XCTAssertTrue(logs[0].contains("10:8"))
+        XCTAssertTrue(logs[0].contains("\(address)@10"), "停止祖先追溯也必须保留固定 peg")
     }
 
     func testHistoryPlanReadsPastLegacy150LimitOldestFirstAndKeepsNumericAnchor() async throws {

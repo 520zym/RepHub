@@ -101,6 +101,7 @@ public actor WorkingCopyMigrationService {
 
     public func plan(at directory: URL, remoteURL: String, branch: String, mode: MigrationMode,
                      action: WorkingCopyMigrationAction,
+                     includeCopyHistory: Bool = true,
                      progress: @escaping RepositoryOperationProgressHandler) async throws -> WorkingCopyMigrationPlan {
         try begin(); defer { busy = false }
         await progress(RepositoryOperationProgress("正在读取当前工作副本迁移记录…"))
@@ -144,6 +145,7 @@ public actor WorkingCopyMigrationService {
         await progress(RepositoryOperationProgress("正在读取固定 SVN 历史范围…"))
         let sourcePlan = try await source.planWorkingCopyHistory(from: RemoteRepositoryLocation(url: info.sourceURL), mode: mode,
                                                                   through: through, after: previous?.lastRevision,
+                                                                  includeCopyHistory: includeCopyHistory,
                                                                   progress: progress)
         guard sourcePlan.providerID == source.id, sourcePlan.location.url == info.sourceURL,
               (action == .supplement || sourcePlan.anchor == info.baseRevision),
@@ -315,12 +317,18 @@ private extension WorkingCopyMigrationService {
             in: sourceCache,
             seedWorkingCopy: job.plan.workingCopy.directory
         )
+        let verifiedSession: (any RepositoryVerifiedMigrationSession)?
+        if let verifiedTarget = target as? any RepositoryVerifiedMigrationTargetProvider {
+            await progress(RepositoryOperationProgress("正在准备已核对 Git 对象会话…"))
+            verifiedSession = try await verifiedTarget.makeVerifiedMigrationSession(at: job.repository)
+        } else {
+            verifiedSession = nil
+        }
         for (offset, revision) in job.plan.source.revisions.enumerated() {
             try Task.checkCancellation()
             let index = offset + 1
             let total = job.plan.source.revisions.count
             let sourceTree = job.folder.appendingPathComponent("source-\(UUID().uuidString)")
-            let targetTree = job.folder.appendingPathComponent("verified-\(UUID().uuidString)")
             await progress(revisionProgress("正在准备来源修订", revision: revision, index: index, total: total))
             try await snapshotSession.exportSnapshot(revision: revision, to: sourceTree) { update in
                 await progress(self.revisionProgress("正在准备来源修订", revision: revision, index: index, total: total,
@@ -328,22 +336,41 @@ private extension WorkingCopyMigrationService {
             }
             try Task.checkCancellation()
             let imported = decorated(revision, plan: job.plan)
-            await progress(revisionProgress("正在写入 Git 快照", revision: revision, index: index, total: total))
-            let commit = try await target.appendMigrationSnapshot(from: sourceTree, revision: imported,
-                                                                   author: try author(for: revision, plan: job.plan), to: job.repository) { update in
-                await progress(self.revisionProgress("正在写入 Git 快照", revision: revision, index: index, total: total,
-                                                     update: update))
+            let sourceFiles = try scan(sourceTree)
+            let commit: String
+            let targetTree: URL?
+            let files: [MigrationFileComparison]
+            if let verifiedSession {
+                await progress(revisionProgress("正在增量写入并核对 Git 对象", revision: revision, index: index, total: total))
+                commit = try await verifiedSession.appendVerifiedSnapshot(
+                    from: sourceTree, files: sourceFiles, revision: imported,
+                    author: try author(for: revision, plan: job.plan)
+                ) { update in
+                    await progress(self.revisionProgress("正在增量写入并核对 Git 对象", revision: revision, index: index, total: total,
+                                                         update: update))
+                }
+                targetTree = nil
+                files = []
+            } else {
+                let legacyTargetTree = job.folder.appendingPathComponent("verified-\(UUID().uuidString)")
+                await progress(revisionProgress("正在写入 Git 快照", revision: revision, index: index, total: total))
+                commit = try await target.appendMigrationSnapshot(from: sourceTree, revision: imported,
+                                                                       author: try author(for: revision, plan: job.plan), to: job.repository) { update in
+                    await progress(self.revisionProgress("正在写入 Git 快照", revision: revision, index: index, total: total,
+                                                         update: update))
+                }
+                try Task.checkCancellation()
+                await progress(revisionProgress("正在读取 Git 对象树", revision: revision, index: index, total: total))
+                try await target.exportMigrationTree(at: job.repository, revision: commit, to: legacyTargetTree) { update in
+                    await progress(self.revisionProgress("正在读取 Git 对象树", revision: revision, index: index, total: total,
+                                                         update: update))
+                }
+                try Task.checkCancellation()
+                await progress(revisionProgress("正在扫描并核对文件", revision: revision, index: index, total: total))
+                files = compare(sourceFiles, try scan(legacyTargetTree))
+                guard !files.contains(where: { $0.state == .different }) else { throw VersionControlError.invalidData("修订 \(revision.id) 与 Git 实际对象树不一致。") }
+                targetTree = legacyTargetTree
             }
-            try Task.checkCancellation()
-            await progress(revisionProgress("正在读取 Git 对象树", revision: revision, index: index, total: total))
-            try await target.exportMigrationTree(at: job.repository, revision: commit, to: targetTree) { update in
-                await progress(self.revisionProgress("正在读取 Git 对象树", revision: revision, index: index, total: total,
-                                                     update: update))
-            }
-            try Task.checkCancellation()
-            await progress(revisionProgress("正在扫描并核对文件", revision: revision, index: index, total: total))
-            let files = compare(try scan(sourceTree), try scan(targetTree))
-            guard !files.contains(where: { $0.state == .different }) else { throw VersionControlError.invalidData("修订 \(revision.id) 与 Git 实际对象树不一致。") }
             let oldLeft = job.leftTree
             let oldRight = job.rightTree
             job.mappings.append(MigrationMapping(source: revision, author: try author(for: revision, plan: job.plan), targetCommit: commit))
@@ -353,6 +380,21 @@ private extension WorkingCopyMigrationService {
             if let oldLeft { try? FileManager.default.removeItem(at: oldLeft) }
             if let oldRight { try? FileManager.default.removeItem(at: oldRight) }
             await progress(revisionProgress("已转换 SVN 修订", revision: revision, index: index, total: total, completed: true))
+        }
+        if verifiedSession != nil {
+            guard let tip = job.mappings.last?.targetCommit, let sourceTree = job.leftTree else {
+                throw VersionControlError.invalidData("缺少最终 SVN 快照，不能完成 Git 端到端核对。")
+            }
+            let targetTree = job.folder.appendingPathComponent("verified-\(UUID().uuidString)")
+            await progress(RepositoryOperationProgress("正在导出最终 Git 对象树进行端到端核对…"))
+            try await target.exportMigrationTree(at: job.repository, revision: tip, to: targetTree, progress: progress)
+            let files = compare(try scan(sourceTree), try scan(targetTree))
+            guard !files.contains(where: { $0.state == .different }) else {
+                throw VersionControlError.invalidData("最终 Git 实际对象树与 SVN 快照不一致。")
+            }
+            if let oldRight = job.rightTree { try? FileManager.default.removeItem(at: oldRight) }
+            job.rightTree = targetTree
+            job.files = files
         }
         await progress(RepositoryOperationProgress("正在确认最终 SVN 快照仍与当前工作副本一致…"))
         try validateInitialWorkingTree(job)
@@ -542,7 +584,8 @@ private extension WorkingCopyMigrationService {
 
     func same(_ a: WorkingCopyMigrationPlan, _ b: WorkingCopyMigrationPlan) -> Bool {
         a.id == b.id && a.action == b.action && a.workingCopy == b.workingCopy && a.source.revisions == b.source.revisions &&
-        a.source.anchor == b.source.anchor && a.source.mode == b.source.mode && a.remoteURL == b.remoteURL && a.branch == b.branch &&
+        a.source.anchor == b.source.anchor && a.source.mode == b.source.mode &&
+        a.source.includeCopyHistory == b.source.includeCopyHistory && a.remoteURL == b.remoteURL && a.branch == b.branch &&
         a.expectedGitTip == b.expectedGitTip && a.authors == b.authors && a.previousRecord?.lastRevision == b.previousRecord?.lastRevision
     }
 

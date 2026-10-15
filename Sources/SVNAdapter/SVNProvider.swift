@@ -1175,6 +1175,15 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         mode: MigrationMode,
         progress: @escaping RepositoryOperationProgressHandler
     ) async throws -> MigrationSourcePlan {
+        try await planMigration(from: location, mode: mode, includeCopyHistory: true, progress: progress)
+    }
+
+    public func planMigration(
+        from location: RemoteRepositoryLocation,
+        mode: MigrationMode,
+        includeCopyHistory: Bool,
+        progress: @escaping RepositoryOperationProgressHandler
+    ) async throws -> MigrationSourcePlan {
         let address = try normalizedRemoteAddress(location.url)
         try await rememberCredentials(location.credentials, for: address)
         await progress(RepositoryOperationProgress("固定 SVN 来源版本…"))
@@ -1208,22 +1217,24 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
             await progress(RepositoryOperationProgress("已固定 SVN r\(anchor)，将仅导出当前快照。"))
             return MigrationSourcePlan(
                 providerID: id, location: RemoteRepositoryLocation(url: address, credentials: location.credentials), anchor: "r\(anchor)",
-                mode: mode, revisions: [revision], warnings: warnings
+                mode: mode, includeCopyHistory: includeCopyHistory, revisions: [revision], warnings: warnings
             )
 
         case .history:
-            await progress(RepositoryOperationProgress("读取 SVN 目录历史…", detail: "已固定到 r\(anchor)，正在分页读取。"))
-            let revisions = try await migrationHistory(target: target, address: address, anchor: anchor, progress: progress)
+            let scope = includeCopyHistory ? "包含复制前祖先历史" : "仅当前路径，复制点前停止"
+            await progress(RepositoryOperationProgress("读取 SVN 目录历史…", detail: "已固定到 r\(anchor)，\(scope)，正在分页读取。"))
+            let revisions = try await migrationHistory(target: target, address: address, anchor: anchor,
+                                                        includeCopyHistory: includeCopyHistory, progress: progress)
             guard !revisions.isEmpty else {
                 throw VersionControlError.invalidData("SVN 目录没有可迁移的提交历史。")
             }
-            var warnings = migrationWarnings(mode: mode)
+            var warnings = migrationWarnings(mode: mode, includeCopyHistory: includeCopyHistory)
             if revisions.contains(where: { $0.author.isEmpty }) {
                 warnings.append("部分 SVN 提交未包含作者；发布前需为这些提交指定 Git 作者。")
             }
             return MigrationSourcePlan(
                 providerID: id, location: RemoteRepositoryLocation(url: address, credentials: location.credentials), anchor: "r\(anchor)",
-                mode: mode, revisions: revisions, warnings: warnings
+                mode: mode, includeCopyHistory: includeCopyHistory, revisions: revisions, warnings: warnings
             )
         }
     }
@@ -1448,6 +1459,18 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         after previousRevision: String?,
         progress: @escaping RepositoryOperationProgressHandler
     ) async throws -> MigrationSourcePlan {
+        try await planWorkingCopyHistory(from: location, mode: mode, through: revision,
+                                         after: previousRevision, includeCopyHistory: true, progress: progress)
+    }
+
+    public func planWorkingCopyHistory(
+        from location: RemoteRepositoryLocation,
+        mode: MigrationMode,
+        through revision: String?,
+        after previousRevision: String?,
+        includeCopyHistory: Bool,
+        progress: @escaping RepositoryOperationProgressHandler
+    ) async throws -> MigrationSourcePlan {
         let address = try normalizedRemoteAddress(location.url)
         try await rememberCredentials(location.credentials, for: address)
         let anchor: String
@@ -1468,8 +1491,13 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
             }
             anchor = String(value)
         }
+        // 补迁以已迁入修订为严格下界。即使初次迁移选择了“只保留当前路径”，
+        // 之后发生 copy/rename 仍必须跨祖先把下界后的每条可读修订补入 Git，不能
+        // 让新的复制点截断尚未迁移的历史。
+        let effectiveIncludeCopyHistory: Bool
         let lowerBound: Int
         if let previousRevision, !previousRevision.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            effectiveIncludeCopyHistory = true
             guard mode == .history else {
                 throw VersionControlError.unsupported("SVN 补迁只能按提交历史执行，不能使用单快照模式。")
             }
@@ -1481,23 +1509,29 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
             // after == anchor 是合法的“无新增”状态，必须让业务层可正常展示。
             if previous == fixed {
                 return MigrationSourcePlan(providerID: id, location: RemoteRepositoryLocation(url: address, credentials: location.credentials),
-                                           anchor: "r\(anchor)", mode: mode, revisions: [], warnings: migrationWarnings(mode: mode))
+                                           anchor: "r\(anchor)", mode: mode, includeCopyHistory: effectiveIncludeCopyHistory,
+                                           revisions: [], warnings: migrationWarnings(mode: mode, includeCopyHistory: effectiveIncludeCopyHistory))
             }
             lowerBound = previous + 1
         } else {
+            effectiveIncludeCopyHistory = includeCopyHistory
             lowerBound = 1
         }
         let target = migrationTarget(address, pegRevision: anchor)
         switch mode {
         case .history:
-            await progress(RepositoryOperationProgress("读取 SVN 目录历史…", detail: "已固定到 r\(anchor)，正在分页读取。"))
-            let revisions = try await migrationHistory(target: target, address: address, anchor: anchor, lowerBound: lowerBound, progress: progress)
-            var warnings = migrationWarnings(mode: mode)
+            let scope = effectiveIncludeCopyHistory ? "包含复制前祖先历史" : "仅当前路径，复制点前停止"
+            await progress(RepositoryOperationProgress("读取 SVN 目录历史…", detail: "已固定到 r\(anchor)，\(scope)，正在分页读取。"))
+            let revisions = try await migrationHistory(target: target, address: address, anchor: anchor,
+                                                        lowerBound: lowerBound, includeCopyHistory: effectiveIncludeCopyHistory,
+                                                        progress: progress)
+            var warnings = migrationWarnings(mode: mode, includeCopyHistory: effectiveIncludeCopyHistory)
             if revisions.contains(where: { $0.author.isEmpty }) {
                 warnings.append("部分 SVN 提交未包含作者；发布前需为这些提交指定 Git 作者。")
             }
             return MigrationSourcePlan(providerID: id, location: RemoteRepositoryLocation(url: address, credentials: location.credentials),
-                                       anchor: "r\(anchor)", mode: mode, revisions: revisions, warnings: warnings)
+                                       anchor: "r\(anchor)", mode: mode, includeCopyHistory: effectiveIncludeCopyHistory,
+                                       revisions: revisions, warnings: warnings)
         case .snapshot:
             let metadata = try await runRemoteRead(["log", "--xml", "--limit", "1", "-r", "\(anchor):1", target], remoteURL: address)
             guard let context = try SVNXMLDocument(data: metadata.data).logEntries.first else {
@@ -1505,7 +1539,8 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
             }
             let revision = try migrationSnapshotRevision(anchor: anchor, context: context)
             return MigrationSourcePlan(providerID: id, location: RemoteRepositoryLocation(url: address, credentials: location.credentials),
-                                       anchor: "r\(anchor)", mode: mode, revisions: [revision], warnings: migrationWarnings(mode: mode))
+                                       anchor: "r\(anchor)", mode: mode, includeCopyHistory: effectiveIncludeCopyHistory,
+                                       revisions: [revision], warnings: migrationWarnings(mode: mode, includeCopyHistory: effectiveIncludeCopyHistory))
         }
     }
 
@@ -1514,6 +1549,7 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         address: String,
         anchor: String,
         lowerBound: Int = 1,
+        includeCopyHistory: Bool = true,
         progress: @escaping RepositoryOperationProgressHandler
     ) async throws -> [MigrationRevision] {
         // 与普通界面分页不同，迁移不允许为了响应速度静默停在 150 条。每轮由 SVN
@@ -1525,8 +1561,13 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         var seen = Set<String>()
         while upper > 0 {
             try Task.checkCancellation()
+            // 迁移计划只需要修订号、作者、时间和提交说明；变更路径列表只会增加
+            // 大型历史的传输与 XML 解析成本，实际文件内容由后续快照会话读取。
+            var command = ["log", "--xml"]
+            if !includeCopyHistory { command.append("--stop-on-copy") }
+            command += ["--limit", String(pageSize), "-r", "\(upper):\(lowerBound)", target]
             let response = try await runRemoteRead(
-                ["log", "--xml", "-v", "--limit", String(pageSize), "-r", "\(upper):\(lowerBound)", target],
+                command,
                 remoteURL: address
             )
             let entries = try SVNXMLDocument(data: response.data).logEntries
@@ -1592,11 +1633,13 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         "\(address)@\(normalizedRevision(pegRevision))"
     }
 
-    private func migrationWarnings(mode: MigrationMode) -> [String] {
+    private func migrationWarnings(mode: MigrationMode, includeCopyHistory: Bool = true) -> [String] {
         [
             mode == .snapshot
                 ? "本次仅迁移固定修订的代码快照，生成一个新的 Git 初始提交，不包含原 SVN 历史。"
-                : "仅迁移当前账号在所选 SVN 目录可读取的线性历史；服务端权限或保留策略导致不可读取的历史不会被伪称已迁移。跨目录复制、改名或删除导致任一历史修订无法导出时会停止，不会跳过。",
+                : includeCopyHistory
+                    ? "迁移当前账号在所选 SVN 目录可读取的历史，并包含复制或改名前祖先路径的历史；服务端权限或保留策略导致不可读取的历史不会被伪称已迁移。跨目录复制、改名或删除导致任一历史修订无法导出时会停止，不会跳过。"
+                    : "仅迁移当前 SVN 路径自最近复制点起可读取的历史；复制前祖先路径的提交不会迁入。服务端权限或保留策略导致不可读取的历史不会被伪称已迁移。",
             "SVN 的自定义属性、锁、权限与目录属性不能完整映射到 Git；可执行位和符号链接由 SVN 导出结果保留。",
             "SVN externals 不会随迁移导出；请在预览中单独处理外部依赖。",
             "迁移过程中本地未提交修改不属于远端 SVN 历史，不会被包含。"

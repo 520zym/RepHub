@@ -19,7 +19,7 @@ struct RepositoryMigrationResumeTests {
         #expect(await stats.exportedRevisions == ["r1", "r2"])
     }
 
-    @Test("新的服务实例可从已核对的检查点继续转换")
+    @Test("新的服务实例可恢复不含历史范围选项的旧版检查点")
     func resumesVerifiedCheckpointInNewService() async throws {
         let root = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: root) }
         let plan = try await makePlan(root: root, source: ResumeSource())
@@ -28,9 +28,18 @@ struct RepositoryMigrationResumeTests {
         let checkpoint = try #require(await interrupted.partialDirectory(for: plan.id))
             .appendingPathComponent("checkpoint.json")
 
+        var stored = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: checkpoint)) as? [String: Any])
+        var storedPlan = try #require(stored["plan"] as? [String: Any])
+        storedPlan.removeValue(forKey: "includeCopyHistory")
+        stored["plan"] = storedPlan
+        stored["version"] = 1
+        stored.removeValue(forKey: "verifiedObjectTree")
+        try JSONSerialization.data(withJSONObject: stored).write(to: checkpoint, options: .atomic)
+
         let resumed = RepositoryMigrationService(sources: [ResumeSource()], targets: [ResumeTarget()])
         let restored = try await resumed.resume(from: checkpoint)
         #expect(restored.id == plan.id)
+        #expect(restored.source.includeCopyHistory)
         let preview = try await resumed.prepare(restored, progress: { _ in })
         #expect(preview.mappings.map(\.source.id) == ["r1", "r2"])
         #expect(FileManager.default.fileExists(atPath: plan.destination.appendingPathComponent("second.txt").path))

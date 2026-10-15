@@ -16,6 +16,11 @@ public actor RepositoryMigrationService {
         var mappings: [MigrationMapping] = []
         var sourceTree: URL?
         var targetTree: URL?
+        /// 来源清单在读取快照时生成。快速会话检查点直接复用，避免为保存检查点再读一遍全树。
+        var sourceEntries: [MigrationFileEntry] = []
+        var targetEntries: [MigrationFileEntry] = []
+        /// true 表示中间修订由已核对对象会话完成，可能尚未落下物化 targetTree。
+        var usesVerifiedSession = false
         var comparisons: [MigrationFileComparison] = []
         var omittedDirectories = Set<String>()
         var complete = false
@@ -29,6 +34,7 @@ public actor RepositoryMigrationService {
         let sourceURL: String
         let sourceRevision: String
         let mode: MigrationMode
+        let includeCopyHistory: Bool?
         let targetURL: String
         let branch: String
         let expectedRevisionCount: Int
@@ -46,6 +52,8 @@ public actor RepositoryMigrationService {
         let sourceEntries: [MigrationFileEntry]
         let targetEntries: [MigrationFileEntry]
         let omittedDirectories: [String]
+        /// v2：已核对对象会话可在中间修订不保存完整 targetTree；恢复时必须重新导出核对。
+        let verifiedObjectTree: Bool?
     }
 
     private struct StoredPlan: Codable {
@@ -54,6 +62,8 @@ public actor RepositoryMigrationService {
         let sourceURL: String
         let anchor: String
         let mode: MigrationMode
+        /// 缺失代表 v1 检查点，保持原来的跨 copy 历史范围。
+        let includeCopyHistory: Bool?
         let revisions: [MigrationRevision]
         let warnings: [String]
         let targetProviderID: ProviderID
@@ -64,7 +74,8 @@ public actor RepositoryMigrationService {
 
         init(_ plan: MigrationPlan) {
             id = plan.id; sourceProviderID = plan.source.providerID; sourceURL = plan.source.location.url
-            anchor = plan.source.anchor; mode = plan.source.mode; revisions = plan.source.revisions; warnings = plan.source.warnings
+            anchor = plan.source.anchor; mode = plan.source.mode; includeCopyHistory = plan.source.includeCopyHistory
+            revisions = plan.source.revisions; warnings = plan.source.warnings
             targetProviderID = plan.targetProviderID; remoteURL = plan.remoteURL; branch = plan.branch
             destinationPath = plan.destination.standardizedFileURL.path; authors = plan.authors
         }
@@ -73,7 +84,9 @@ public actor RepositoryMigrationService {
             MigrationPlan(id: id,
                           source: MigrationSourcePlan(providerID: sourceProviderID,
                                                        location: RemoteRepositoryLocation(url: sourceURL, credentials: credentials),
-                                                       anchor: anchor, mode: mode, revisions: revisions, warnings: warnings),
+                                                       anchor: anchor, mode: mode,
+                                                       includeCopyHistory: includeCopyHistory ?? true,
+                                                       revisions: revisions, warnings: warnings),
                           targetProviderID: targetProviderID, remoteURL: remoteURL, branch: branch,
                           destination: URL(fileURLWithPath: destinationPath), authors: authors)
         }
@@ -93,6 +106,7 @@ public actor RepositoryMigrationService {
     public func plan(sourceProviderID: ProviderID, location: RemoteRepositoryLocation, mode: MigrationMode,
                      targetProviderID: ProviderID, remoteURL: String, branch: String, destination: URL,
                      authors: [String: MigrationAuthor] = [:],
+                     includeCopyHistory: Bool = true,
                      progress: @escaping RepositoryOperationProgressHandler) async throws -> MigrationPlan {
         try begin(); defer { busy = false }
         let destination = try validateDestination(destination)
@@ -105,7 +119,8 @@ public actor RepositoryMigrationService {
         try await target.checkMigrationTarget(remoteURL: remote, branch: branch)
         try Task.checkCancellation()
         await progress(RepositoryOperationProgress("正在读取固定来源历史…"))
-        let sourcePlan = try await source.planMigration(from: location, mode: mode, progress: progress)
+        let sourcePlan = try await source.planMigration(from: location, mode: mode,
+                                                         includeCopyHistory: includeCopyHistory, progress: progress)
         guard !sourcePlan.revisions.isEmpty, Set(sourcePlan.revisions.map(\.id)).count == sourcePlan.revisions.count else {
             throw VersionControlError.invalidData("来源没有可迁移的修订，或历史包含重复修订。")
         }
@@ -140,7 +155,10 @@ public actor RepositoryMigrationService {
             if job.complete { try await verify(job, target: target); return preview(job) }
             // 第一次提交后、核对前中断也不能再次追加该修订，留下没有映射的隐藏根提交。
             try await target.verifyMigrationCheckpoint(at: job.repository, expectedTip: job.mappings.last?.targetCommit, branch: plan.branch)
-            if !job.mappings.isEmpty { try await verify(job, target: target) }
+            if !job.mappings.isEmpty {
+                try await restoreVerifiedTargetTreeIfNeeded(&job, target: target)
+                try await verify(job, target: target)
+            }
         } else {
             let destination = try validateDestination(plan.destination)
             let folder = destination.deletingLastPathComponent().appendingPathComponent(".RepHub-migration-\(plan.id.uuidString)")
@@ -162,6 +180,13 @@ public actor RepositoryMigrationService {
         defer { try? FileManager.default.removeItem(at: sourceCache) }
         await progress(RepositoryOperationProgress("正在准备来源修订会话…"))
         let snapshotSession = try await source.makeMigrationSnapshotSession(plan: plan.source, in: sourceCache)
+        let verifiedSession: (any RepositoryVerifiedMigrationSession)?
+        if let verifiedTarget = target as? any RepositoryVerifiedMigrationTargetProvider {
+            await progress(RepositoryOperationProgress("正在准备已核对 Git 对象会话…"))
+            verifiedSession = try await verifiedTarget.makeVerifiedMigrationSession(at: job.repository)
+        } else {
+            verifiedSession = nil
+        }
         do {
             for revision in plan.source.revisions.dropFirst(job.mappings.count) {
                 try Task.checkCancellation()
@@ -169,7 +194,6 @@ public actor RepositoryMigrationService {
                 let count = plan.source.revisions.count
                 await progress(revisionProgress("正在准备来源修订", revision: revision, index: index, total: count))
                 let sourceTree = job.folder.appendingPathComponent("source-\(UUID().uuidString)")
-                let targetTree = job.folder.appendingPathComponent("verified-\(UUID().uuidString)")
                 try await snapshotSession.exportSnapshot(revision: revision, to: sourceTree) { update in
                     await progress(self.revisionProgress("正在准备来源修订", revision: revision, index: index, total: count,
                                                          update: update, usesSourcePhase: true))
@@ -178,34 +202,68 @@ public actor RepositoryMigrationService {
                 await progress(revisionProgress("正在扫描来源快照", revision: revision, index: index, total: count))
                 let sourceFiles = try scan(sourceTree)
                 try Task.checkCancellation()
-                await progress(revisionProgress("正在写入 Git 快照", revision: revision, index: index, total: count))
-                let commit = try await target.appendMigrationSnapshot(from: sourceTree, revision: revision,
-                                                                      author: plan.authors[revision.author]!, to: job.repository) { update in
-                    await progress(self.revisionProgress("正在写入 Git 快照", revision: revision, index: index, total: count,
-                                                         update: update))
-                }
-                try Task.checkCancellation()
-                await progress(revisionProgress("正在读取 Git 对象树", revision: revision, index: index, total: count))
-                try await target.exportMigrationTree(at: job.repository, revision: commit, to: targetTree) { update in
-                    await progress(self.revisionProgress("正在读取 Git 对象树", revision: revision, index: index, total: count,
-                                                         update: update))
-                }
-                try Task.checkCancellation()
-                await progress(revisionProgress("正在扫描并核对文件", revision: revision, index: index, total: count))
-                let comparisons = compare(sourceFiles, try scan(targetTree))
-                guard !comparisons.contains(where: { $0.state == .different }) else {
-                    throw VersionControlError.invalidData("修订 \(revision.id) 的转换文件与源快照不一致，已停止；暂存内容保留在 \(job.folder.path)。")
+                let commit: String
+                let comparisons: [MigrationFileComparison]
+                let targetTree: URL?
+                let targetEntries: [MigrationFileEntry]
+                if let verifiedSession {
+                    await progress(revisionProgress("正在增量写入并核对 Git 对象", revision: revision, index: index, total: count))
+                    commit = try await verifiedSession.appendVerifiedSnapshot(
+                        from: sourceTree, files: sourceFiles, revision: revision,
+                        author: plan.authors[revision.author]!
+                    ) { update in
+                        await progress(self.revisionProgress("正在增量写入并核对 Git 对象", revision: revision, index: index, total: count,
+                                                             update: update))
+                    }
+                    // 会话已完整核对 Git 树的路径、类型、权限和对象；最终修订仍会进行
+                    // 一次实际导出、逐文件 SHA-256 比对，供预览和端到端校验使用。
+                    comparisons = []
+                    targetTree = nil
+                    targetEntries = []
+                } else {
+                    let legacyTargetTree = job.folder.appendingPathComponent("verified-\(UUID().uuidString)")
+                    await progress(revisionProgress("正在写入 Git 快照", revision: revision, index: index, total: count))
+                    commit = try await target.appendMigrationSnapshot(from: sourceTree, revision: revision,
+                                                                        author: plan.authors[revision.author]!, to: job.repository) { update in
+                        await progress(self.revisionProgress("正在写入 Git 快照", revision: revision, index: index, total: count,
+                                                             update: update))
+                    }
+                    try Task.checkCancellation()
+                    await progress(revisionProgress("正在读取 Git 对象树", revision: revision, index: index, total: count))
+                    try await target.exportMigrationTree(at: job.repository, revision: commit, to: legacyTargetTree) { update in
+                        await progress(self.revisionProgress("正在读取 Git 对象树", revision: revision, index: index, total: count,
+                                                             update: update))
+                    }
+                    try Task.checkCancellation()
+                    await progress(revisionProgress("正在扫描并核对文件", revision: revision, index: index, total: count))
+                    let targetFiles = try scan(legacyTargetTree)
+                    comparisons = compare(sourceFiles, targetFiles)
+                    guard !comparisons.contains(where: { $0.state == .different }) else {
+                        throw VersionControlError.invalidData("修订 \(revision.id) 的转换文件与源快照不一致，已停止；暂存内容保留在 \(job.folder.path)。")
+                    }
+                    targetTree = legacyTargetTree
+                    targetEntries = targetFiles
                 }
                 let oldSource = job.sourceTree, oldTarget = job.targetTree
                 job.sourceTree = sourceTree; job.targetTree = targetTree; job.comparisons = comparisons
+                job.sourceEntries = sourceFiles
+                job.targetEntries = targetEntries
+                job.usesVerifiedSession = verifiedSession != nil
                 job.mappings.append(MigrationMapping(source: revision, author: plan.authors[revision.author]!, targetCommit: commit))
-                job.omittedDirectories.formUnion(comparisons.filter { $0.state == .omittedDirectory }.map(\.path))
+                // Git 不保存空目录。快速会话中没有中间 targetTree，因此直接从本次
+                // 完整来源清单推导所有没有文件/链接后代的目录，保留原有历史警告。
+                job.omittedDirectories.formUnion(omittedDirectoryPaths(in: sourceFiles))
                 // 检查点只在该修订实际对象树核对通过后推进。失败不把未核对提交算作完成。
                 jobs[plan.id] = job
                 try saveCheckpoint(job)
                 if let oldSource { try? FileManager.default.removeItem(at: oldSource) }
                 if let oldTarget { try? FileManager.default.removeItem(at: oldTarget) }
                 await progress(revisionProgress("已转换来源修订", revision: revision, index: index, total: count, completed: true))
+            }
+            if verifiedSession != nil {
+                try await materializeFinalVerifiedTree(&job, target: target, progress: progress)
+                jobs[plan.id] = job
+                try saveCheckpoint(job)
             }
             try Task.checkCancellation()
             await progress(RepositoryOperationProgress("正在核对最终隔离 Git 预览…", fractionCompleted: 1))
@@ -281,24 +339,53 @@ public actor RepositoryMigrationService {
             _ = try await target.migrationPatch(at: repository, revision: mapping.targetCommit)
         }
         let sourceTree = try restoredTree(named: report.sourceTreeName, in: folder)
-        let targetTree = try restoredTree(named: report.targetTreeName, in: folder)
+        var targetTree = try restoredTree(named: report.targetTreeName, in: folder)
+        let restoredSourceEntries: [MigrationFileEntry]
         if let sourceTree {
-            guard try scan(sourceTree) == report.sourceEntries else { throw VersionControlError.invalidData("来源快照缓存已变化，不能恢复迁移。") }
-        } else if !report.sourceEntries.isEmpty { throw VersionControlError.invalidData("来源快照检查点不完整。") }
+            restoredSourceEntries = try scan(sourceTree)
+            guard restoredSourceEntries == report.sourceEntries else { throw VersionControlError.invalidData("来源快照缓存已变化，不能恢复迁移。") }
+        } else {
+            guard report.sourceEntries.isEmpty else { throw VersionControlError.invalidData("来源快照检查点不完整。") }
+            restoredSourceEntries = []
+        }
+        var restoredTargetEntries: [MigrationFileEntry]
         if let targetTree {
-            guard try scan(targetTree) == report.targetEntries else { throw VersionControlError.invalidData("目标快照缓存已变化，不能恢复迁移。") }
-        } else if !report.targetEntries.isEmpty { throw VersionControlError.invalidData("目标快照检查点不完整。") }
+            restoredTargetEntries = try scan(targetTree)
+            guard restoredTargetEntries == report.targetEntries else { throw VersionControlError.invalidData("目标快照缓存已变化，不能恢复迁移。") }
+        } else {
+            guard report.targetEntries.isEmpty else { throw VersionControlError.invalidData("目标快照检查点不完整。") }
+            restoredTargetEntries = []
+        }
         if !report.mappings.isEmpty {
-            guard let targetTree else { throw VersionControlError.invalidData("缺少已核对目标快照，不能恢复迁移。") }
+            if targetTree == nil, report.verifiedObjectTree == true {
+                guard sourceTree != nil,
+                      let tip = report.mappings.last?.targetCommit else {
+                    throw VersionControlError.invalidData("已核对对象检查点缺少可验证的来源状态。")
+                }
+                let restored = folder.appendingPathComponent("verified-\(UUID().uuidString)")
+                try await target.exportMigrationTree(at: repository, revision: tip, to: restored)
+                let actual = try scan(restored)
+                let comparison = compare(restoredSourceEntries, actual)
+                guard !comparison.contains(where: { $0.state == .different }) else {
+                    throw VersionControlError.invalidData("恢复时 Git 实际对象树与来源清单不一致。")
+                }
+                targetTree = restored
+                restoredTargetEntries = actual
+            }
+            guard targetTree != nil else { throw VersionControlError.invalidData("缺少已核对目标快照，不能恢复迁移。") }
             let current = try scan(repository, excludingRootGit: true).filter { $0.kind != .directory }
-            let expected = try scan(targetTree).filter { $0.kind != .directory }
+            let expected = restoredTargetEntries.filter { $0.kind != .directory }
             guard current == expected else { throw VersionControlError.invalidData("迁移仓库内容与检查点不一致，不能恢复。") }
         }
         let comparisons: [MigrationFileComparison]
-        if let sourceTree, let targetTree { comparisons = compare(try scan(sourceTree), try scan(targetTree)) }
+        if sourceTree != nil, targetTree != nil { comparisons = compare(restoredSourceEntries, restoredTargetEntries) }
         else { comparisons = [] }
         jobs[plan.id] = Job(plan: plan, folder: folder, repository: repository, mappings: report.mappings,
-                            sourceTree: sourceTree, targetTree: targetTree, comparisons: comparisons,
+                            sourceTree: sourceTree, targetTree: targetTree,
+                            sourceEntries: report.sourceEntries,
+                            targetEntries: restoredTargetEntries,
+                            usesVerifiedSession: report.verifiedObjectTree == true,
+                            comparisons: comparisons,
                             omittedDirectories: Set(report.omittedDirectories))
         return plan
     }
@@ -380,8 +467,75 @@ public actor RepositoryMigrationService {
 
     private func samePlan(_ a: MigrationPlan, _ b: MigrationPlan) -> Bool {
         a.source.providerID == b.source.providerID && a.source.location.url == b.source.location.url && a.source.anchor == b.source.anchor
-        && a.source.mode == b.source.mode && a.source.revisions == b.source.revisions && a.authors == b.authors
+        && a.source.mode == b.source.mode && a.source.includeCopyHistory == b.source.includeCopyHistory
+        && a.source.revisions == b.source.revisions && a.authors == b.authors
         && a.targetProviderID == b.targetProviderID && a.remoteURL == b.remoteURL && a.branch == b.branch && a.destination == b.destination
+    }
+
+    private func omittedDirectoryPaths(in entries: [MigrationFileEntry]) -> Set<String> {
+        let directories = Set(entries.lazy.filter { $0.kind == .directory }.map(\.path))
+        guard !directories.isEmpty else { return [] }
+        var materializedAncestors = Set<String>()
+        for entry in entries where entry.kind != .directory {
+            var components = entry.path.split(separator: "/", omittingEmptySubsequences: true)
+            _ = components.popLast()
+            var path = ""
+            for component in components {
+                path = path.isEmpty ? String(component) : path + "/" + component
+                materializedAncestors.insert(path)
+            }
+        }
+        return directories.subtracting(materializedAncestors)
+    }
+
+    /// 已核对对象会话的中间检查点不持久化完整 targetTree。恢复或同一服务重试时，
+    /// 必须从实际 Git 提交重新导出并与已保存的来源清单逐项比对，不能只相信映射 JSON。
+    private func restoreVerifiedTargetTreeIfNeeded(_ job: inout Job,
+                                                   target: any RepositoryMigrationTargetProvider) async throws {
+        guard job.usesVerifiedSession, job.targetTree == nil, let tip = job.mappings.last?.targetCommit else { return }
+        guard let sourceTree = job.sourceTree else {
+            throw VersionControlError.invalidData("已核对对象检查点缺少来源清单或快照，不能恢复。")
+        }
+        guard try scan(sourceTree) == job.sourceEntries else {
+            throw VersionControlError.invalidData("来源快照缓存已变化，不能恢复已核对对象迁移。")
+        }
+        let targetTree = job.folder.appendingPathComponent("verified-\(UUID().uuidString)")
+        try await target.exportMigrationTree(at: job.repository, revision: tip, to: targetTree)
+        let targetEntries = try scan(targetTree)
+        let comparisons = compare(job.sourceEntries, targetEntries)
+        guard !comparisons.contains(where: { $0.state == .different }) else {
+            throw VersionControlError.invalidData("恢复时 Git 实际对象树与已核对来源清单不一致。")
+        }
+        job.targetTree = targetTree
+        job.targetEntries = targetEntries
+        job.comparisons = comparisons
+    }
+
+    /// 完成每修订的对象级校验后，仍以实际导出的最终 Git 树做一次字节级全树核对。
+    private func materializeFinalVerifiedTree(_ job: inout Job,
+                                              target: any RepositoryMigrationTargetProvider,
+                                              progress: @escaping RepositoryOperationProgressHandler) async throws {
+        guard let tip = job.mappings.last?.targetCommit, let sourceTree = job.sourceTree else {
+            throw VersionControlError.invalidData("已核对对象迁移缺少最终来源快照。")
+        }
+        guard try scan(sourceTree) == job.sourceEntries else {
+            throw VersionControlError.invalidData("最终来源快照在核对前已变化。")
+        }
+        let targetTree = job.folder.appendingPathComponent("verified-\(UUID().uuidString)")
+        await progress(RepositoryOperationProgress("正在导出最终 Git 对象树进行端到端核对…"))
+        try await target.exportMigrationTree(at: job.repository, revision: tip, to: targetTree) { update in
+            await progress(update)
+        }
+        try Task.checkCancellation()
+        let targetEntries = try scan(targetTree)
+        let comparisons = compare(job.sourceEntries, targetEntries)
+        guard !comparisons.contains(where: { $0.state == .different }) else {
+            throw VersionControlError.invalidData("最终 Git 实际对象树与来源快照不一致，已停止；暂存内容保留在 \(job.folder.path)。")
+        }
+        if let oldTarget = job.targetTree { try? FileManager.default.removeItem(at: oldTarget) }
+        job.targetTree = targetTree
+        job.targetEntries = targetEntries
+        job.comparisons = comparisons
     }
 
     private func verify(_ job: Job, target: any RepositoryMigrationTargetProvider) async throws {
@@ -413,6 +567,7 @@ public actor RepositoryMigrationService {
     private func saveReport(_ job: Job, to url: URL, verified: Bool) throws {
         let report = Report(version: 1, planID: job.plan.id, sourceURL: RepositoryDisplaySanitizer.redact(job.plan.source.location.url),
                             sourceRevision: job.plan.source.anchor, mode: job.plan.source.mode,
+                            includeCopyHistory: job.plan.source.includeCopyHistory,
                             targetURL: RepositoryDisplaySanitizer.redact(job.plan.remoteURL), branch: job.plan.branch,
                             expectedRevisionCount: job.plan.source.revisions.count, mappings: job.mappings,
                             verified: verified, warnings: warnings(job))
@@ -423,13 +578,14 @@ public actor RepositoryMigrationService {
     private func saveCheckpoint(_ job: Job) throws {
         try rejectPasswordInURL(job.plan.source.location.url)
         try rejectPasswordInURL(job.plan.remoteURL)
-        let sourceEntries = try job.sourceTree.map { try scan($0) } ?? []
-        let targetEntries = try job.targetTree.map { try scan($0) } ?? []
-        let checkpoint = Checkpoint(version: 1, plan: StoredPlan(job.plan), mappings: job.mappings,
+        let sourceEntries = job.sourceEntries.isEmpty ? (try job.sourceTree.map { try scan($0) } ?? []) : job.sourceEntries
+        let targetEntries = job.targetEntries.isEmpty ? (try job.targetTree.map { try scan($0) } ?? []) : job.targetEntries
+        let checkpoint = Checkpoint(version: 2, plan: StoredPlan(job.plan), mappings: job.mappings,
                                     sourceTreeName: job.sourceTree?.lastPathComponent,
                                     targetTreeName: job.targetTree?.lastPathComponent,
                                     sourceEntries: sourceEntries, targetEntries: targetEntries,
-                                    omittedDirectories: job.omittedDirectories.sorted())
+                                    omittedDirectories: job.omittedDirectories.sorted(),
+                                    verifiedObjectTree: job.usesVerifiedSession)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]; encoder.dateEncodingStrategy = .iso8601
         try encoder.encode(checkpoint).write(to: job.folder.appendingPathComponent("checkpoint.json"), options: .atomic)
     }
@@ -438,7 +594,7 @@ public actor RepositoryMigrationService {
         guard !isSymbolicLink(url) else { throw VersionControlError.invalidRepository("迁移检查点不能是符号链接。") }
         let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
         let checkpoint = try decoder.decode(Checkpoint.self, from: Data(contentsOf: url))
-        guard checkpoint.version == 1 else { throw VersionControlError.unsupported("此迁移检查点版本不受支持。") }
+        guard checkpoint.version == 1 || checkpoint.version == 2 else { throw VersionControlError.unsupported("此迁移检查点版本不受支持。") }
         try rejectPasswordInURL(checkpoint.plan.sourceURL); try rejectPasswordInURL(checkpoint.plan.remoteURL)
         return checkpoint
     }

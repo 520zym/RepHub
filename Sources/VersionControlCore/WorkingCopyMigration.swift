@@ -25,6 +25,22 @@ public protocol RepositoryWorkingCopyMigrationSourceProvider: RepositoryMigratio
     func planWorkingCopyHistory(from location: RemoteRepositoryLocation, mode: MigrationMode,
                                 through revision: String?, after previousRevision: String?,
                                 progress: @escaping RepositoryOperationProgressHandler) async throws -> MigrationSourcePlan
+    /// `false` 时只读取当前路径自最近复制点起的历史；补迁仍以 `after` 作为严格下界。
+    func planWorkingCopyHistory(from location: RemoteRepositoryLocation, mode: MigrationMode,
+                                through revision: String?, after previousRevision: String?,
+                                includeCopyHistory: Bool,
+                                progress: @escaping RepositoryOperationProgressHandler) async throws -> MigrationSourcePlan
+}
+
+public extension RepositoryWorkingCopyMigrationSourceProvider {
+    func planWorkingCopyHistory(from location: RemoteRepositoryLocation, mode: MigrationMode,
+                                through revision: String?, after previousRevision: String?,
+                                includeCopyHistory: Bool,
+                                progress: @escaping RepositoryOperationProgressHandler) async throws -> MigrationSourcePlan {
+        // 既有来源适配器维持旧的跨复制历史语义，避免强迫所有 conformer 同步改造。
+        try await planWorkingCopyHistory(from: location, mode: mode, through: revision,
+                                         after: previousRevision, progress: progress)
+    }
 }
 
 /// 保存到本地 Git 元数据，修订来源同时写入每个迁移提交，不能靠说明相似度去重。

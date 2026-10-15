@@ -27,12 +27,16 @@ public struct MigrationSourcePlan: Sendable {
     public let location: RemoteRepositoryLocation
     public let anchor: String
     public let mode: MigrationMode
+    /// 是否沿 SVN 的 copy/rename 祖先继续读取历史。关闭时，历史在最近复制点停止。
+    public let includeCopyHistory: Bool
     public let revisions: [MigrationRevision]
     public let warnings: [String]
     public init(providerID: ProviderID, location: RemoteRepositoryLocation, anchor: String,
-                mode: MigrationMode, revisions: [MigrationRevision], warnings: [String] = []) {
+                mode: MigrationMode, includeCopyHistory: Bool = true,
+                revisions: [MigrationRevision], warnings: [String] = []) {
         self.providerID = providerID; self.location = location; self.anchor = anchor
-        self.mode = mode; self.revisions = revisions; self.warnings = warnings
+        self.mode = mode; self.includeCopyHistory = includeCopyHistory
+        self.revisions = revisions; self.warnings = warnings
     }
 }
 
@@ -40,6 +44,10 @@ public struct MigrationSourcePlan: Sendable {
 public protocol RepositoryMigrationSourceProvider: Sendable {
     var id: ProviderID { get }
     func planMigration(from location: RemoteRepositoryLocation, mode: MigrationMode,
+                       progress: @escaping RepositoryOperationProgressHandler) async throws -> MigrationSourcePlan
+    /// `false` 表示在 SVN 最近一次 copy 点停止，不把复制来源目录的更早历史迁入。
+    func planMigration(from location: RemoteRepositoryLocation, mode: MigrationMode,
+                       includeCopyHistory: Bool,
                        progress: @escaping RepositoryOperationProgressHandler) async throws -> MigrationSourcePlan
     func exportMigrationSnapshot(plan: MigrationSourcePlan, revision: MigrationRevision, to directory: URL,
                                  progress: @escaping RepositoryOperationProgressHandler) async throws
@@ -60,6 +68,13 @@ public protocol RepositoryMigrationSnapshotSession: Sendable {
 }
 
 public extension RepositoryMigrationSourceProvider {
+    func planMigration(from location: RemoteRepositoryLocation, mode: MigrationMode,
+                       includeCopyHistory: Bool,
+                       progress: @escaping RepositoryOperationProgressHandler) async throws -> MigrationSourcePlan {
+        // 旧适配器不识别范围选项，维持原来的完整历史语义；新适配器自行覆写。
+        try await planMigration(from: location, mode: mode, progress: progress)
+    }
+
     func makeMigrationSnapshotSession(plan: MigrationSourcePlan, in workspace: URL) async throws -> any RepositoryMigrationSnapshotSession {
         ExportingMigrationSnapshotSession(source: self, plan: plan)
     }

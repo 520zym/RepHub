@@ -156,6 +156,19 @@ struct RepositoryMigrationView: View {
                     }
                     .labelsHidden().frame(width: 190)
                 }
+                if model.mode == .history {
+                    Toggle(isOn: copyHistoryBinding) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("包含复制前历史").font(.system(size: 12, weight: .medium))
+                            Text("关闭后只迁移当前目录创建或复制后的提交，通常更快。")
+                                .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
+                        }
+                    }
+                    .toggleStyle(.checkbox)
+                    .accessibilityLabel("包含复制前历史")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .tint(palette.accent)
+                }
                 HStack(spacing: 9) {
                     Text(model.destinationParent?.path ?? "请选择本地结果父目录")
                         .font(.system(size: 12)).foregroundStyle(model.destinationParent == nil ? palette.secondaryText : palette.text)
@@ -181,6 +194,10 @@ struct RepositoryMigrationView: View {
                     planMetric("历史提交", value: "\(plan.source.revisions.count) 条")
                     planMetric("来源锚点", value: plan.source.anchor)
                     planMetric("方式", value: plan.source.mode.title)
+                }
+                if plan.source.mode == .history {
+                    Label(historyScopeDescription(includeCopyHistory: plan.source.includeCopyHistory), systemImage: "arrow.triangle.branch")
+                        .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
                 }
                 if !plan.authors.isEmpty {
                     MigrationAuthorMappingEditor(sourceURL: plan.source.location.url, authors: plan.authors,
@@ -240,6 +257,9 @@ struct RepositoryMigrationView: View {
                         overviewRow("Git 目标", preview.plan.remoteURL)
                         overviewRow("目标分支", preview.plan.branch)
                         overviewRow("转换方式", preview.plan.source.mode.title)
+                        if preview.plan.source.mode == .history {
+                            overviewRow("历史范围", historyScopeDescription(includeCopyHistory: preview.plan.source.includeCopyHistory))
+                        }
                     }
                 }
                 Text("本地结果：\(preview.repository.path)").font(.system(size: 11, design: .monospaced)).foregroundStyle(palette.secondaryText).textSelection(.enabled)
@@ -368,6 +388,15 @@ struct RepositoryMigrationView: View {
         Binding(get: { model.mode.rawValue }, set: { raw in
             if let value = MigrationMode(rawValue: raw) { model.mode = value; model.invalidatePlan() }
         })
+    }
+    private var copyHistoryBinding: Binding<Bool> {
+        Binding(get: { model.includeCopyHistory }, set: { value in
+            model.includeCopyHistory = value
+            model.invalidatePlan()
+        })
+    }
+    private func historyScopeDescription(includeCopyHistory: Bool) -> String {
+        includeCopyHistory ? "包含复制前历史" : "仅当前目录创建或复制后"
     }
     private func card<Content: View>(title: String, icon: String, @ViewBuilder content: () -> Content) -> some View { VStack(alignment: .leading, spacing: 13) { Label(title, systemImage: icon).font(.system(size: 13, weight: .semibold)); content() }.padding(16).background(palette.surface, in: RoundedRectangle(cornerRadius: 11, style: .continuous)) }
     private func field<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View { HStack(spacing: 10) { Text(title).font(.system(size: 12)).foregroundStyle(palette.secondaryText).frame(width: 64, alignment: .leading); content() }.padding(.horizontal, 10).frame(height: 31).background(palette.secondaryText.opacity(0.055), in: RoundedRectangle(cornerRadius: 7, style: .continuous)) }
