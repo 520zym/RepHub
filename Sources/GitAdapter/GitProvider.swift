@@ -1539,7 +1539,7 @@ public final class GitProvider: RepositoryOperationProvider, RepositoryHistoryPa
         return cursor
     }
 
-    private func isGitObjectID(_ value: String) -> Bool {
+    func isGitObjectID(_ value: String) -> Bool {
         guard value.count == 40 || value.count == 64 else { return false }
         return value.utf8.allSatisfy { (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0) }
     }

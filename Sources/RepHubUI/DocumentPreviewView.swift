@@ -3,7 +3,7 @@ import QuickLookUI
 import SwiftUI
 import RepositoryApplication
 
-/// 将已由 `WorkspaceFileService` 验证的工作副本文档交给 macOS Quick Look。
+/// 将应用层验证的工作副本文档或指定节点的临时快照交给 macOS Quick Look。
 ///
 /// RepHub 不自行解析 PDF 或 Office 二进制，也不会对历史版本伪造本地文件预览；
 /// Quick Look 是否支持具体格式取决于当前 macOS 的预览组件。
@@ -12,18 +12,19 @@ struct DocumentPreviewView: NSViewRepresentable {
     let url: URL
     let kind: WorkspaceDocumentPreviewKind
     let identity: WorkspaceSystemPreviewIdentity
+    var snapshot: RepositoryDocumentSnapshot? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> NSView {
         let container = NSView()
         context.coordinator.install(in: container)
-        context.coordinator.update(url: url, identity: identity)
+        context.coordinator.update(url: url, identity: identity, snapshot: snapshot)
         return container
     }
 
     func updateNSView(_ container: NSView, context: Context) {
-        context.coordinator.update(url: url, identity: identity)
+        context.coordinator.update(url: url, identity: identity, snapshot: snapshot)
     }
 
     static func dismantleNSView(_ container: NSView, coordinator: Coordinator) {
@@ -62,14 +63,14 @@ struct DocumentPreviewView: NSViewRepresentable {
             previewView = preview
         }
 
-        func update(url: URL, identity: WorkspaceSystemPreviewIdentity) {
+        func update(url: URL, identity: WorkspaceSystemPreviewIdentity, snapshot: RepositoryDocumentSnapshot?) {
             guard let view = previewView else { return }
             let next = PreviewItemIdentity(url: url, content: identity)
             guard displayed != next else { return }
             let refreshesCurrentURL = displayed?.url == url
             displayed = next
-            // NSURL 已遵循 QLPreviewItem；URL 来自应用层的普通文件边界校验。
-            view.previewItem = url as NSURL
+            // Quick Look 持有快照的生命周期，直到系统完成预览资源释放。
+            view.previewItem = DocumentPreviewItem(url: url, snapshot: snapshot)
             if refreshesCurrentURL { view.refreshPreviewItem() }
         }
 
@@ -83,6 +84,17 @@ struct DocumentPreviewView: NSViewRepresentable {
             let url: URL
             let content: WorkspaceSystemPreviewIdentity
         }
+    }
+}
+
+private final class DocumentPreviewItem: NSObject, QLPreviewItem {
+    let previewItemURL: URL!
+    private let snapshot: RepositoryDocumentSnapshot?
+
+    init(url: URL, snapshot: RepositoryDocumentSnapshot?) {
+        self.previewItemURL = url
+        self.snapshot = snapshot
+        super.init()
     }
 }
 

@@ -840,15 +840,9 @@ public final class WorkspaceModel {
               let path = change?.path else { return }
         start { [weak self] token in
             guard let self else { return }
-            let patch: RepositoryPatch
-            if let entry = self.historyFileEntries.first(where: { $0.revision.id == revisionID && $0.path == path }) {
-                patch = try await self.service.fileHistoryDiff(in: binding, entry: entry)
-            } else {
-                patch = try await self.service.diff(in: binding, path: path, revision: revisionID)
-            }
-            guard self.accepts(token), self.selectedBindingID == binding.id,
-                  self.selectedRevisionID == revisionID, self.selectedPath == path else { return }
-            self.patch = patch
+            let entry = self.historyFileEntries.first { $0.revision.id == revisionID && $0.path == path }
+            try await self.loadRevisionContent(path: path, revisionID: revisionID, binding: binding,
+                                               token: token, fileHistoryEntry: entry)
         }
     }
 
@@ -1160,9 +1154,8 @@ public final class WorkspaceModel {
         revisionFiles = files
         let file = preferredFile(in: files)
         selectedPath = file?.path
-        let patch = try await service.diff(in: binding, path: file?.path, revision: revision.id)
-        guard operationToken == token, selectedBindingID == binding.id, selectedRevisionID == revision.id, selectedPath == file?.path else { return }
-        self.patch = patch
+        try await loadRevisionContent(path: file?.path, revisionID: revision.id, binding: binding,
+                                      token: token, restoresOperation: true)
     }
 
     private func load(binding: RepositoryBinding, reference: String?, token: Int, readsWorkingPatch: Bool = true) async throws {
@@ -1197,9 +1190,41 @@ public final class WorkspaceModel {
         revisionFiles = files
         let file = preferredFile(in: files)
         selectedPath = file?.path
-        let patch = try await service.diff(in: binding, path: file?.path, revision: revision.id)
-        guard accepts(token), selectedBindingID == binding.id, selectedRevisionID == revision.id, selectedPath == file?.path else { return }
-        self.patch = patch
+        try await loadRevisionContent(path: file?.path, revisionID: revision.id, binding: binding, token: token)
+    }
+
+    /// 文档按指定节点读取原始文件；文本仍使用原有差异和文件历史的追溯信息。
+    private func loadRevisionContent(path: String?, revisionID: String, binding: RepositoryBinding,
+                                     token: Int, restoresOperation: Bool = false,
+                                     fileHistoryEntry: FileHistoryEntry? = nil) async throws {
+        filePreview = nil
+        patch = nil
+        if let path, let kind = WorkspaceDocumentPreviewKind(path: path) {
+            let preview: WorkspaceFilePreview
+            do {
+                preview = try await service.documentPreview(in: binding, path: path, revision: revisionID,
+                                                            pegRevision: fileHistoryEntry?.pegRevision)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                preview = WorkspaceFilePreview(text: nil,
+                    message: "无法读取该节点的文档：\(RepositoryDisplaySanitizer.redact(error.localizedDescription))",
+                    isTruncated: false, documentKind: kind, revisionID: revisionID)
+            }
+            guard acceptsHistoryLoad(token, restoresOperation: restoresOperation), selectedBindingID == binding.id,
+                  selectedRevisionID == revisionID, selectedPath == path else { return }
+            filePreview = preview
+        } else {
+            let value: RepositoryPatch
+            if let entry = fileHistoryEntry {
+                value = try await service.fileHistoryDiff(in: binding, entry: entry)
+            } else {
+                value = try await service.diff(in: binding, path: path, revision: revisionID)
+            }
+            guard acceptsHistoryLoad(token, restoresOperation: restoresOperation), selectedBindingID == binding.id,
+                  selectedRevisionID == revisionID, selectedPath == path else { return }
+            patch = value
+        }
     }
 
     private func loadWorkingFile(path: String, binding: RepositoryBinding, token: Int, restoresOperation: Bool = false) async throws {
@@ -1317,11 +1342,8 @@ public final class WorkspaceModel {
         selectedPath = entry.path
         // 文件历史的右侧列表只能包含该文件，不能误把整次提交的改动带入。
         revisionFiles = [FileChange(path: entry.path, kind: .modified)]
-        let patch = try await service.fileHistoryDiff(in: binding, entry: entry)
-        guard acceptsHistoryLoad(token, restoresOperation: restoresOperation), selectedBindingID == binding.id,
-              historyFilePath != nil, selectedRevisionID == revisionID,
-              selectedPath == entry.path else { return }
-        self.patch = patch
+        try await loadRevisionContent(path: entry.path, revisionID: revisionID, binding: binding, token: token,
+                                      restoresOperation: restoresOperation, fileHistoryEntry: entry)
     }
 
     private func clearFileHistoryState() {

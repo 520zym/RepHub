@@ -65,7 +65,8 @@ public struct DiffView: View {
                 ProgressView("正在读取差异…").frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         } else if model.isLoading {
-            ProgressView("正在读取差异…").frame(maxWidth: .infinity, maxHeight: .infinity)
+            ProgressView(isDocumentSelection ? "正在读取文档…" : "正在读取差异…")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if model.isHistoryVisible {
             ContentUnavailableView("选择一个提交", systemImage: "clock", description: Text("选择历史提交及文件后显示差异。"))
         } else if model.snapshot?.changes.isEmpty == true {
@@ -97,11 +98,13 @@ public struct DiffView: View {
                 .disabled(model.isInteractionLocked || model.isUntrackedFilePreview)
                 .help("切换到提交历史，查看此文件的版本")
             }
-            Menu {
-                Toggle("忽略空白", isOn: $ignoresWhitespace)
-            } label: { Image(systemName: "ellipsis") }
-                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                .help("差异显示选项")
+            if !isDocumentSelection {
+                Menu {
+                    Toggle("忽略空白", isOn: $ignoresWhitespace)
+                } label: { Image(systemName: "ellipsis") }
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                    .help("差异显示选项")
+            }
         }
         HStack(spacing: 8) {
             Text(comparisonLabel).font(.system(size: 11)).foregroundStyle(appPalette.secondaryText)
@@ -116,10 +119,10 @@ public struct DiffView: View {
                     .fixedSize()
                     .help("尚未加入版本控制；当前显示本地文件内容，不会自动添加或提交。")
             }
-            if model.filePreview?.isTruncated == true || model.patch?.isTruncated == true {
+            if (!isDocumentSelection && model.filePreview?.isTruncated == true) || model.patch?.isTruncated == true {
                 Label("内容已截断", systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
             }
-            if model.filePreview == nil {
+            if model.filePreview == nil && !isDocumentSelection {
                 WorkbenchSegmentedPicker(title: "差异布局", selection: $presentation,
                     options: [.init(.sideBySide, "并排"), .init(.unified, "统一")], palette: appPalette, compact: true)
                     .frame(width: 112)
@@ -131,12 +134,19 @@ public struct DiffView: View {
 
     private var comparisonLabel: String {
         if model.isUntrackedFilePreview { return "尚未加入版本控制 · 本地内容 · 只读" }
+        if let revision = model.filePreview?.revisionID {
+            return "\(model.selectedBinding?.providerName ?? "版本控制") · 节点 \(String(revision.prefix(8))) · 只读"
+        }
         if model.filePreview != nil { return "工作区文件 · 只读" }
         let provider = model.selectedBinding?.providerName ?? "版本控制"
         if let revision = model.selectedRevisionID { return "\(provider) · \(String(revision.prefix(8))) 与父版本比较" }
         if model.isHistoryVisible { return "\(provider) · 提交历史" }
         let base = provider.localizedCaseInsensitiveContains("svn") || provider.localizedCaseInsensitiveContains("subversion") ? "BASE" : "HEAD"
         return "\(provider) · \(base) → 工作区"
+    }
+
+    private var isDocumentSelection: Bool {
+        model.selectedPath.flatMap(WorkspaceDocumentPreviewKind.init(path:)) != nil
     }
 
     @MainActor
@@ -174,8 +184,14 @@ public struct DiffView: View {
     @ViewBuilder
     private func filePreviewContent(_ preview: WorkspaceFilePreview, palette: CodePalette) -> some View {
         if let kind = preview.documentKind {
-            if let url = preview.systemPreviewURL, let identity = preview.systemPreviewIdentity {
-                VStack(spacing: 0) {
+            VStack(spacing: 0) {
+                Label("此类文档暂不支持内容差异比较。\(preview.revisionID.map { "当前查看节点 \(String($0.prefix(8))) 的文件内容。" } ?? "当前查看工作区文件内容。")", systemImage: "info.circle")
+                    .font(.system(size: 12))
+                    .foregroundStyle(palette.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14).padding(.vertical, 10)
+                    .background(palette.secondary.opacity(0.06))
+                if let url = preview.systemPreviewURL, let identity = preview.systemPreviewIdentity {
                     HStack(spacing: 7) {
                         Image(systemName: "eye")
                         Text(kind.localizedPreviewTitle)
@@ -189,19 +205,18 @@ public struct DiffView: View {
                     .padding(.vertical, 8)
                     .background(palette.secondary.opacity(0.06))
 
-                    DocumentPreviewView(url: url, kind: kind, identity: identity)
+                    DocumentPreviewView(url: url, kind: kind, identity: identity, snapshot: preview.documentSnapshot)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ContentUnavailableView(
+                        "暂时无法显示\(kind.localizedPreviewTitle)",
+                        systemImage: "doc.badge.gearshape",
+                        description: Text(preview.message ?? "当前 macOS 的快速查看无法打开此文件。")
+                    )
+                    .foregroundStyle(palette.secondary)
                 }
-                .background(palette.background)
-            } else {
-                ContentUnavailableView(
-                    "暂时无法显示\(kind.localizedPreviewTitle)",
-                    systemImage: "doc.badge.gearshape",
-                    description: Text(preview.message ?? "当前 macOS 的快速查看无法打开此文件。")
-                )
-                .foregroundStyle(palette.secondary)
-                .background(palette.background)
             }
+            .background(palette.background)
         } else if let text = preview.text {
             VStack(spacing: 0) {
                 if let message = preview.message, !message.isEmpty {

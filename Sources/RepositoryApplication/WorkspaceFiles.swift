@@ -21,22 +21,31 @@ public struct WorkspaceFilePreview: Sendable {
     public let text: String?
     public let message: String?
     public let isTruncated: Bool
-    /// 仅当文件已经过工作副本边界、普通文件和符号链接检查后才提供。
-    /// 界面可将它交给系统 Quick Look；不能据此访问工作区外的路径。
+    /// 仅提供已通过边界校验的工作副本文件，或应用私有的历史快照文件。
+    /// 界面可将它交给系统 Quick Look；不能据此推断或访问其他本地路径。
     public let systemPreviewURL: URL?
     public let documentKind: WorkspaceDocumentPreviewKind?
     /// 同一路径的文件更新后会变化；Quick Look 据此重新读取预览内容。
     public let systemPreviewIdentity: WorkspaceSystemPreviewIdentity?
+    /// 历史节点的私有只读快照。最后一个预览或 Quick Look 引用释放后会清理临时目录。
+    /// 工作副本预览始终为 `nil`，不会因此持有或改写工作副本文件。
+    public let documentSnapshot: RepositoryDocumentSnapshot?
+    /// 提供系统预览的历史节点；工作副本预览为 `nil`。
+    public let revisionID: String?
 
     public init(text: String?, message: String?, isTruncated: Bool,
                 systemPreviewURL: URL? = nil, documentKind: WorkspaceDocumentPreviewKind? = nil,
-                systemPreviewIdentity: WorkspaceSystemPreviewIdentity? = nil) {
+                systemPreviewIdentity: WorkspaceSystemPreviewIdentity? = nil,
+                documentSnapshot: RepositoryDocumentSnapshot? = nil,
+                revisionID: String? = nil) {
         self.text = text
         self.message = message
         self.isTruncated = isTruncated
         self.systemPreviewURL = systemPreviewURL
         self.documentKind = documentKind
         self.systemPreviewIdentity = systemPreviewIdentity
+        self.documentSnapshot = documentSnapshot
+        self.revisionID = revisionID
     }
 }
 
