@@ -61,7 +61,7 @@ struct LocalFilePreviewView: NSViewRepresentable {
     }
 
     private func update(textView: NSTextView, scrollView: NSScrollView, coordinator: Coordinator) {
-        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let font = CodeTextLayout.font
         coordinator.latestPalette = palette
         let foreground = NSColor(palette.foreground)
         let background = NSColor(palette.background)
@@ -74,7 +74,7 @@ struct LocalFilePreviewView: NSViewRepresentable {
             coordinator.cancelHighlighting()
             textView.textStorage?.setAttributedString(NSAttributedString(
                 string: text,
-                attributes: [.font: font, .foregroundColor: foreground]
+                attributes: CodeTextLayout.attributes(font: font, foreground: foreground)
             ))
             coordinator.lastText = text
             coordinator.lastLanguage = language
@@ -118,10 +118,8 @@ struct LocalFilePreviewView: NSViewRepresentable {
     }
 
     private func applyBaseAttributes(to textView: NSTextView, font: NSFont, foreground: NSColor) {
-        guard let storage = textView.textStorage, storage.length > 0 else { return }
-        storage.beginEditing()
-        storage.setAttributes([.font: font, .foregroundColor: foreground], range: NSRange(location: 0, length: storage.length))
-        storage.endEditing()
+        guard let storage = textView.textStorage else { return }
+        CodeTextLayout.applyBaseAttributes(to: storage, font: font, foreground: foreground)
     }
 
     /// 建立着色属性供 AppKit 预览和测试共同使用；token 与原文不一致时安全地退回未着色文本。
@@ -131,7 +129,7 @@ struct LocalFilePreviewView: NSViewRepresentable {
                                             font: NSFont) -> NSAttributedString {
         let output = NSMutableAttributedString(
             string: text,
-            attributes: [.font: font, .foregroundColor: NSColor(palette.foreground)]
+            attributes: CodeTextLayout.attributes(font: font, foreground: NSColor(palette.foreground))
         )
         let rebuilt = tokens.map { $0.map(\.value).joined() }.joined(separator: "\n")
         guard rebuilt == text else { return output }
@@ -143,7 +141,8 @@ struct LocalFilePreviewView: NSViewRepresentable {
                 guard length > 0 else { continue }
                 guard cursor + length <= source.length else { return output }
                 output.addAttributes(
-                    [.font: font, .foregroundColor: NSColor(SyntaxHighlighting.color(for: token.kind, palette: palette))],
+                    [.font: font,
+                     .foregroundColor: NSColor(SyntaxHighlighting.color(for: token.kind, palette: palette))],
                     range: NSRange(location: cursor, length: length)
                 )
                 cursor += length

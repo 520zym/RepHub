@@ -39,7 +39,7 @@ struct CodeLineIndex {
 @MainActor
 final class CodeLineNumberRuler: NSRulerView {
     private(set) var lineIndex = CodeLineIndex("")
-    private var numberFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+    private var numberFont = CodeTextLayout.font
     private var numberColor = NSColor.secondaryLabelColor
     private var fillColor = NSColor.textBackgroundColor
 
@@ -98,16 +98,12 @@ final class CodeLineNumberRuler: NSRulerView {
 
         for index in firstLine...lastLine {
             let start = lineIndex.starts[index]
-            let textY: CGFloat
-            if start < length {
-                let glyph = layout.glyphIndexForCharacter(at: start)
-                let fragment = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
-                textY = fragment.minY + layout.location(forGlyphAt: glyph).y - numberFont.ascender + origin.y
-            } else if layout.extraLineFragmentTextContainer != nil {
-                textY = layout.extraLineFragmentRect.minY + origin.y
-            } else {
-                textY = origin.y
-            }
+            guard let textY = Self.labelTop(forLineStart: start,
+                                            textLength: length,
+                                            layoutManager: layout,
+                                            textContainer: container,
+                                            textOrigin: origin,
+                                            font: numberFont) else { continue }
             let point = convert(NSPoint(x: 0, y: textY), from: textView)
             let label = String(index + 1) as NSString
             let attributes: [NSAttributedString.Key: Any] = [.font: numberFont, .foregroundColor: numberColor]
@@ -115,5 +111,31 @@ final class CodeLineNumberRuler: NSRulerView {
             guard point.y + size.height >= rect.minY, point.y <= rect.maxY else { continue }
             label.draw(at: NSPoint(x: ruleThickness - size.width - 10, y: point.y), withAttributes: attributes)
         }
+    }
+
+    /// 使用文本系统给出的基线，而不是按行号或字符数估算位置。
+    /// 这能同时覆盖中文、Emoji、空行和末尾换行生成的 extra line fragment。
+    static func labelTop(forLineStart start: Int,
+                         textLength: Int,
+                         layoutManager: NSLayoutManager,
+                         textContainer: NSTextContainer,
+                         textOrigin: NSPoint,
+                         font: NSFont) -> CGFloat? {
+        let fragment: NSRect
+        if start < textLength {
+            let glyph = layoutManager.glyphIndexForCharacter(at: start)
+            guard glyph < layoutManager.numberOfGlyphs else { return nil }
+            fragment = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+        } else {
+            guard layoutManager.extraLineFragmentTextContainer === textContainer else { return nil }
+            fragment = layoutManager.extraLineFragmentRect
+        }
+
+        // 换行符 glyph 的位置会与普通代码字形不同，空行和末尾 extra fragment 甚至没有
+        // 可用 glyph。用固定行框、默认行高和默认基线偏移来构造同一个代码基线。
+        let baselineOffset = fragment.height
+            - layoutManager.defaultLineHeight(for: font)
+            + layoutManager.defaultBaselineOffset(for: font)
+        return fragment.minY + baselineOffset - font.ascender + textOrigin.y
     }
 }

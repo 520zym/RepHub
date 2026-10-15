@@ -451,11 +451,20 @@ private struct HistoryRevisionTable: View {
     @State private var isNearHistoryEnd = false
     @State private var isFilterPopoverPresented = false
     @State private var isBranchNavigatorExpanded = false
+    @State private var graphRows: [GitGraphLayout.Row] = []
+    @State private var graphSource: [Revision] = []
+    @State private var graphFirstLane = 0
 
     var body: some View {
         GeometryReader { proxy in
-            let graphRows = supportsGraph ? GitGraphLayout.rows(for: revisions) : []
-            let graphWidth = supportsGraph ? max(26, CGFloat(graphRows.map(\.laneCount).max() ?? 1) * 11 + 3) : 0
+            // 翻页追加时保留已有行的布局，后台准备新页不会令摘要列先缩回再展开。
+            let currentGraph = revisions.starts(with: graphSource) ? graphRows : []
+            let viewport = HistoryGraphViewport(
+                totalLanes: drawsGraphConnections ? (currentGraph.map(\.laneCount).max() ?? 1) : 1,
+                availableWidth: proxy.size.width, requestedFirstLane: graphFirstLane
+            )
+            let compactMetadata = proxy.size.width < 360
+            let rowHeight: CGFloat = compactMetadata ? 94 : 78
             VStack(spacing: 0) {
                 VStack(spacing: 7) {
                     HStack(spacing: 8) {
@@ -522,6 +531,9 @@ private struct HistoryRevisionTable: View {
                 if let syncStatus {
                     syncSummary(syncStatus)
                 }
+                if supportsGraph, viewport.hasOverflow {
+                    graphNavigation(viewport)
+                }
                 if revisions.isEmpty {
                     VStack(spacing: 6) {
                         Image(systemName: issues.isEmpty ? "clock.arrow.circlepath" : "exclamationmark.triangle")
@@ -539,38 +551,36 @@ private struct HistoryRevisionTable: View {
                     List(selection: $selectedRevisionID) {
                         ForEach(Array(revisions.enumerated()), id: \.element.id) { index, revision in
                             HStack(spacing: 8) {
-                                if supportsGraph {
+                                if supportsGraph, currentGraph.indices.contains(index) {
                                     HistoryGraphCell(
-                                        row: graphRows[index],
+                                        row: currentGraph[index],
                                         accent: palette.accent,
-                                        width: graphWidth,
-                                        height: 72,
+                                        viewport: viewport,
+                                        height: rowHeight,
                                         drawsConnections: drawsGraphConnections
                                     )
+                                } else if supportsGraph {
+                                    Circle().fill(drawsGraphConnections ? .clear : palette.accent)
+                                        .frame(width: 7, height: 7)
+                                        .frame(width: viewport.width, alignment: .leading)
                                 }
-                                VStack(alignment: .leading, spacing: 7) {
+                                VStack(alignment: .leading, spacing: 8) {
                                     HStack(spacing: 6) {
                                         Text(revision.subject)
-                                            .font(.system(size: 14.5, weight: .semibold))
-                                            .lineLimit(1)
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .lineSpacing(3)
+                                            .lineLimit(2)
+                                            .help(revision.subject)
                                             .layoutPriority(2)
                                         if let state = syncStatus?.states[revision.id], state != .synchronized {
                                             RevisionSyncBadge(state: state, palette: palette)
                                         }
                                     }
-                                    HStack(spacing: 5) {
-                                        Text(revision.author).lineLimit(1)
-                                        Text("·")
-                                        Text(revision.date.formatted(date: .numeric, time: .shortened)).lineLimit(1)
-                                        Text("·")
-                                        Text(revision.shortID).font(.system(size: 11, design: .monospaced))
-                                    }
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(palette.secondaryText)
+                                    revisionMetadata(revision, compact: compactMetadata)
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
                             }
-                            .frame(minHeight: 72, alignment: .center)
+                            .frame(height: rowHeight, alignment: .center)
                             .tag(Optional(revision.id))
                             .contentShape(Rectangle())
                             .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 12))
@@ -604,6 +614,68 @@ private struct HistoryRevisionTable: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(palette.sidebar)
+        .task(id: supportsGraph && drawsGraphConnections ? revisions : []) {
+            guard supportsGraph, drawsGraphConnections else { graphRows = []; graphSource = []; return }
+            let source = revisions
+            let computation = Task.detached(priority: .userInitiated) {
+                GitGraphLayout.rows(for: source, isCancelled: { Task.isCancelled })
+            }
+            let rows = await withTaskCancellationHandler {
+                await computation.value
+            } onCancel: {
+                computation.cancel()
+            }
+            guard !Task.isCancelled else { return }
+            graphRows = rows
+            graphSource = source
+        }
+        .onChange(of: selectedReference) { _, _ in graphFirstLane = 0 }
+        .onChange(of: selectedBindingID) { _, _ in graphFirstLane = 0 }
+        .onChange(of: drawsGraphConnections) { _, _ in graphFirstLane = 0 }
+    }
+
+    private func graphNavigation(_ viewport: HistoryGraphViewport) -> some View {
+        HStack(spacing: 7) {
+            Text("分支图").font(.system(size: 11, weight: .medium))
+            Button { graphFirstLane = max(0, viewport.firstLane - viewport.visibleLanes) } label: {
+                Image(systemName: "chevron.left").frame(width: 20, height: 22)
+            }
+            .disabled(viewport.firstLane == 0)
+            .accessibilityLabel("向左查看分支图")
+            Text("\(viewport.firstLane + 1)–\(viewport.firstLane + viewport.visibleLanes) / \(viewport.totalLanes)")
+                .font(.system(size: 10, design: .monospaced)).monospacedDigit()
+                .help("当前可见轨道；左右切换不会改变提交记录或分支筛选。")
+            Button { graphFirstLane = min(viewport.maximumFirstLane, viewport.firstLane + viewport.visibleLanes) } label: {
+                Image(systemName: "chevron.right").frame(width: 20, height: 22)
+            }
+            .disabled(viewport.firstLane == viewport.maximumFirstLane)
+            .accessibilityLabel("向右查看分支图")
+            Spacer(minLength: 0)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(palette.secondaryText)
+        .padding(.horizontal, 14)
+        .background(palette.sidebar.opacity(0.55))
+    }
+
+    private func revisionMetadata(_ revision: Revision, compact: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 5) {
+                Text(revision.author).lineLimit(1).truncationMode(.tail)
+                Text("·")
+                if !compact {
+                    Text(revision.date.formatted(date: .numeric, time: .shortened)).lineLimit(1).fixedSize()
+                    Text("·")
+                }
+                Text(revision.shortID).font(.system(size: 10.5, design: .monospaced)).lineLimit(1).fixedSize()
+            }
+            if compact {
+                Text(revision.date.formatted(date: .numeric, time: .shortened)).lineLimit(1)
+            }
+        }
+        .font(.system(size: 11))
+        .foregroundStyle(palette.secondaryText)
+        .help("\(revision.author) · \(revision.date.formatted()) · \(revision.id)")
     }
 
     private func loadMoreIfNearEnd() {
@@ -1236,17 +1308,16 @@ private struct RevisionSyncBadge: View {
 private struct HistoryGraphCell: View {
     let row: GitGraphLayout.Row
     let accent: Color
-    let width: CGFloat
+    let viewport: HistoryGraphViewport
     let height: CGFloat
     let drawsConnections: Bool
     var body: some View {
         Canvas { context, size in
-            let laneWidth: CGFloat = 11
-            let centerX = CGFloat(row.currentLane) * laneWidth + 6
+            let centerX = drawsConnections ? viewport.x(for: row.currentLane) : HistoryGraphViewport.inset
             if drawsConnections { for lane in row.passThrough {
                 var path = Path()
-                path.move(to: CGPoint(x: CGFloat(lane.source) * laneWidth + 6, y: 0))
-                path.addLine(to: CGPoint(x: CGFloat(lane.target) * laneWidth + 6, y: size.height))
+                path.move(to: CGPoint(x: viewport.x(for: lane.source), y: 0))
+                path.addLine(to: CGPoint(x: viewport.x(for: lane.target), y: size.height))
                 context.stroke(path, with: .color(color(for: lane.source).opacity(0.52)), lineWidth: 1.3)
             } }
             if drawsConnections && row.hasIncomingCurrent {
@@ -1254,12 +1325,27 @@ private struct HistoryGraphCell: View {
                 context.stroke(path, with: .color(accent.opacity(0.6)), lineWidth: 1.3)
             }
             if drawsConnections { for lane in row.parentLanes {
-                var path = Path(); path.move(to: CGPoint(x: centerX, y: size.height / 2)); path.addLine(to: CGPoint(x: CGFloat(lane) * laneWidth + 6, y: size.height))
+                var path = Path(); path.move(to: CGPoint(x: centerX, y: size.height / 2)); path.addLine(to: CGPoint(x: viewport.x(for: lane), y: size.height))
                 context.stroke(path, with: .color(color(for: lane).opacity(0.7)), lineWidth: 1.3)
             } }
             context.fill(Path(ellipseIn: CGRect(x: centerX - 3.5, y: size.height / 2 - 3.5, width: 7, height: 7)), with: .color(color(for: row.currentLane)))
+            if drawsConnections, !viewport.contains(row.currentLane) {
+                // 当前节点在视口之外时，明确标出方向；不把不同轨道压成一条假连接。
+                let isLeft = row.currentLane < viewport.firstLane
+                let x: CGFloat = isLeft ? 4 : size.width - 4
+                let y = size.height / 2
+                var arrow = Path()
+                arrow.move(to: CGPoint(x: x + (isLeft ? 3 : -3), y: y - 4))
+                arrow.addLine(to: CGPoint(x: x, y: y))
+                arrow.addLine(to: CGPoint(x: x + (isLeft ? 3 : -3), y: y + 4))
+                context.stroke(arrow, with: .color(color(for: row.currentLane)), lineWidth: 1.6)
+            }
         }
-        .frame(width: width, height: height)
+        .frame(width: viewport.width, height: height)
+        .clipped()
+        .help(drawsConnections && !viewport.contains(row.currentLane)
+              ? "提交节点位于第 \(row.currentLane + 1) 条轨道，可用列表上方的左右按钮查看。"
+              : "提交分支图")
     }
 
     private func color(for lane: Int) -> Color {

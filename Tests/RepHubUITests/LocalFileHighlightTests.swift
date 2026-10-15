@@ -48,6 +48,39 @@ struct LocalFileHighlightTests {
     }
 
     @Test
+    func previewKeepsAStableCodeLineHeightAcrossCRLFEmptyAndEmojiLines() {
+        let source = "首行\r\n\n😀 emoji\n末行\n"
+        let font = CodeTextLayout.font
+        let rendered = LocalFilePreviewView.highlightedAttributedString(
+            text: source,
+            tokens: SyntaxHighlighting.tokenize(source, language: .swift),
+            palette: palette(keyword: .red),
+            font: font
+        )
+        let storage = NSTextStorage(attributedString: rendered)
+        let layout = NSLayoutManager()
+        let container = NSTextContainer(size: NSSize(width: 2_000, height: CGFloat.greatestFiniteMagnitude))
+        storage.addLayoutManager(layout)
+        layout.addTextContainer(container)
+        layout.ensureLayout(for: container)
+
+        let index = CodeLineIndex(source)
+        let lineOrigins = index.starts.dropLast().map { start -> CGFloat in
+            let glyph = layout.glyphIndexForCharacter(at: start)
+            return layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil).minY
+        }
+        let paragraph = rendered.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+
+        #expect(rendered.string == source)
+        #expect(paragraph?.minimumLineHeight == CodeTextLayout.lineHeight)
+        #expect(paragraph?.maximumLineHeight == CodeTextLayout.lineHeight)
+        #expect(lineOrigins.count == 4)
+        #expect(abs(lineOrigins[1] - lineOrigins[0] - CodeTextLayout.lineHeight) < 0.01)
+        #expect(abs(lineOrigins[2] - lineOrigins[1] - CodeTextLayout.lineHeight) < 0.01)
+        #expect(abs(lineOrigins[3] - lineOrigins[2] - CodeTextLayout.lineHeight) < 0.01)
+    }
+
+    @Test
     func tokenizationCanFinishAwayFromTheMainActor() async {
         let source = "func load() async throws { return 42 }"
         let tokens = await Task.detached {

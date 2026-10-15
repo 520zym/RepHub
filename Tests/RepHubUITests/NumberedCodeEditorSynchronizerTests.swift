@@ -43,6 +43,9 @@ struct NumberedCodeEditorSynchronizerTests {
         textView.insertText("第一行\n第二行", replacementRange: NSRange(location: 0, length: 0))
 
         #expect(textView.string == "第一行\n第二行")
+        let insertedStyle = textView.textStorage?.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+        #expect(insertedStyle?.minimumLineHeight == CodeTextLayout.lineHeight)
+        #expect(insertedStyle?.maximumLineHeight == CodeTextLayout.lineHeight)
         #expect(textView.undoManager?.canUndo == true)
         textView.undoManager?.undo()
         #expect(textView.string.isEmpty)

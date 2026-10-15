@@ -29,6 +29,39 @@ struct CodeLineIndexTests {
 
 @MainActor
 struct CodeLineNumberRulerTests {
+    @Test func labelBaselinesFollowStableLayoutForEmptyAndTrailingLines() {
+        let source = "首\r\n\n😀\n尾\n"
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 1_200, height: 600))
+        textView.textContainer?.widthTracksTextView = false
+        textView.textContainer?.containerSize = NSSize(width: 1_200, height: CGFloat.greatestFiniteMagnitude)
+        textView.textStorage?.setAttributedString(NSAttributedString(
+            string: source,
+            attributes: CodeTextLayout.attributes(foreground: .labelColor)
+        ))
+        guard let layout = textView.layoutManager, let container = textView.textContainer else {
+            Issue.record("缺少 AppKit 文本布局对象")
+            return
+        }
+        layout.ensureLayout(for: container)
+        let index = CodeLineIndex(source)
+        let positions = index.starts.compactMap {
+            CodeLineNumberRuler.labelTop(
+                forLineStart: $0,
+                textLength: (source as NSString).length,
+                layoutManager: layout,
+                textContainer: container,
+                textOrigin: textView.textContainerOrigin,
+                font: CodeTextLayout.font
+            )
+        }
+
+        #expect(positions.count == 5)
+        #expect(abs(positions[1] - positions[0] - CodeTextLayout.lineHeight) < 0.01)
+        #expect(abs(positions[2] - positions[1] - CodeTextLayout.lineHeight) < 0.01)
+        #expect(abs(positions[3] - positions[2] - CodeTextLayout.lineHeight) < 0.01)
+        #expect(abs(positions[4] - positions[3] - CodeTextLayout.lineHeight) < 0.01)
+    }
+
     @Test func wideningAndRecoloringPreserveTextSelectionAndScroll() {
         let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
         let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 1200, height: 2000))

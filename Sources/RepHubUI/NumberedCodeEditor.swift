@@ -32,6 +32,7 @@ struct NumberedCodeEditor: NSViewRepresentable {
     /// 否则文本系统录入的撤销动作不会进入 Edit 菜单。
     static func makeTextView(delegate: NSTextViewDelegate?) -> NSTextView {
         let textView = NSTextView()
+        let font = CodeTextLayout.font
         textView.delegate = delegate
         textView.isRichText = false
         textView.importsGraphics = false
@@ -51,6 +52,8 @@ struct NumberedCodeEditor: NSViewRepresentable {
         textView.textContainerInset = NSSize(width: 8, height: 14)
         textView.textContainer?.widthTracksTextView = false
         textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.font = font
+        textView.typingAttributes = CodeTextLayout.attributes(font: font, foreground: .labelColor)
         return textView
     }
 
@@ -60,7 +63,7 @@ struct NumberedCodeEditor: NSViewRepresentable {
     }
 
     private func update(textView: NSTextView, scrollView: NSScrollView, coordinator: Coordinator) {
-        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let font = CodeTextLayout.font
         let foreground = NSColor(palette.foreground)
         let background = NSColor(palette.background)
         let hasMarkedText = textView.hasMarkedText()
@@ -76,7 +79,7 @@ struct NumberedCodeEditor: NSViewRepresentable {
             textView.undoManager?.removeAllActions(withTarget: textView)
             textView.textStorage?.setAttributedString(NSAttributedString(
                 string: text,
-                attributes: [.font: font, .foregroundColor: foreground]
+                attributes: CodeTextLayout.attributes(font: font, foreground: foreground)
             ))
             textView.undoManager?.removeAllActions(withTarget: textView)
             coordinator.isApplyingModelText = false
@@ -84,14 +87,17 @@ struct NumberedCodeEditor: NSViewRepresentable {
         } else if coordinator.themeChanged(palette: palette) {
             let storage = textView.textStorage
             if let storage, storage.length > 0 {
-                storage.addAttributes([.font: font, .foregroundColor: foreground], range: NSRange(location: 0, length: storage.length))
+                storage.addAttributes(
+                    CodeTextLayout.attributes(font: font, foreground: foreground),
+                    range: NSRange(location: 0, length: storage.length)
+                )
             }
         }
 
         textView.isEditable = isEditable
         textView.isSelectable = true
         textView.font = font
-        textView.typingAttributes = [.font: font, .foregroundColor: foreground]
+        textView.typingAttributes = CodeTextLayout.attributes(font: font, foreground: foreground)
         textView.backgroundColor = background
         textView.insertionPointColor = foreground
         textView.selectedTextAttributes = [.backgroundColor: NSColor(palette.selection), .foregroundColor: foreground]
@@ -139,7 +145,7 @@ struct NumberedCodeEditor: NSViewRepresentable {
             guard text != edited else { return }
             text = edited
             if let scrollView = textView.enclosingScrollView, let palette = latestPalette {
-                let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+                let font = CodeTextLayout.font
                 (scrollView.verticalRulerView as? CodeLineNumberRuler)?.update(
                     text: edited,
                     palette: palette,
@@ -151,12 +157,12 @@ struct NumberedCodeEditor: NSViewRepresentable {
 
         private func applyModelText(_ modelText: String, to textView: NSTextView) {
             guard let scrollView = textView.enclosingScrollView, let palette = latestPalette else { return }
-            let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+            let font = CodeTextLayout.font
             isApplyingModelText = true
             textView.undoManager?.removeAllActions(withTarget: textView)
             textView.textStorage?.setAttributedString(NSAttributedString(
                 string: modelText,
-                attributes: [.font: font, .foregroundColor: NSColor(palette.foreground)]
+                attributes: CodeTextLayout.attributes(font: font, foreground: NSColor(palette.foreground))
             ))
             textView.undoManager?.removeAllActions(withTarget: textView)
             textView.setSelectedRange(NSRange(location: min(textView.selectedRange().location, (modelText as NSString).length), length: 0))
