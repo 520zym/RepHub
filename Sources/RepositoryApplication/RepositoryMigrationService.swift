@@ -6,6 +6,7 @@ import VersionControlCore
 public actor RepositoryMigrationService {
     private let sources: [any RepositoryMigrationSourceProvider]
     private let targets: [any RepositoryMigrationTargetProvider]
+    private let prefetchEnabled: Bool
     private var busy = false
     private var jobs: [UUID: Job] = [:]
 
@@ -93,7 +94,12 @@ public actor RepositoryMigrationService {
     }
 
     public init(sources: [any RepositoryMigrationSourceProvider], targets: [any RepositoryMigrationTargetProvider]) {
-        self.sources = sources; self.targets = targets
+        self.init(sources: sources, targets: targets, prefetchEnabled: true)
+    }
+
+    init(sources: [any RepositoryMigrationSourceProvider], targets: [any RepositoryMigrationTargetProvider],
+         prefetchEnabled: Bool) {
+        self.sources = sources; self.targets = targets; self.prefetchEnabled = prefetchEnabled
     }
 
     public func browseSource(providerID: ProviderID, location: RemoteRepositoryLocation) async throws -> RemoteDirectoryListing {
@@ -187,19 +193,48 @@ public actor RepositoryMigrationService {
         } else {
             verifiedSession = nil
         }
+        let prefetchMux = verifiedSession != nil && prefetchEnabled ? MigrationPrefetchProgressMux(output: progress) : nil
+        let prefetcher = prefetchMux.map { OnePageMigrationSnapshotPrefetcher(session: snapshotSession, workspace: job.folder, progress: $0) }
         do {
-            for revision in plan.source.revisions.dropFirst(job.mappings.count) {
+            let remaining = Array(plan.source.revisions.dropFirst(job.mappings.count))
+            for (remainingIndex, revision) in remaining.enumerated() {
                 try Task.checkCancellation()
                 let index = job.mappings.count + 1
                 let count = plan.source.revisions.count
-                await progress(revisionProgress("正在准备来源修订", revision: revision, index: index, total: count))
-                let sourceTree = job.folder.appendingPathComponent("source-\(UUID().uuidString)")
-                try await snapshotSession.exportSnapshot(revision: revision, to: sourceTree) { update in
-                    await progress(self.revisionProgress("正在准备来源修订", revision: revision, index: index, total: count,
-                                                         update: update, usesSourcePhase: true))
+                let sourceTree: URL
+                if let prefetcher {
+                    if remainingIndex > 0 {
+                        await prefetchMux?.foreground(revisionProgress("正在等待预取来源修订", revision: revision, index: index, total: count))
+                    }
+                    if let prefetched = try await prefetcher.consume(revision) {
+                        sourceTree = prefetched
+                        await prefetchMux?.foreground(revisionProgress("正在使用后台预取来源修订", revision: revision, index: index, total: count))
+                    } else {
+                        sourceTree = job.folder.appendingPathComponent("source-\(UUID().uuidString)")
+                        let update = revisionProgress("正在准备来源修订", revision: revision, index: index, total: count)
+                        if let prefetchMux { await prefetchMux.foreground(update) } else { await progress(update) }
+                        try await snapshotSession.exportSnapshot(revision: revision, to: sourceTree) { update in
+                            let mapped = self.revisionProgress("正在准备来源修订", revision: revision, index: index, total: count,
+                                                               update: update, usesSourcePhase: true)
+                            if let prefetchMux { await prefetchMux.foreground(mapped) } else { await progress(mapped) }
+                        }
+                    }
+                } else {
+                    sourceTree = job.folder.appendingPathComponent("source-\(UUID().uuidString)")
+                    let update = revisionProgress("正在准备来源修订", revision: revision, index: index, total: count)
+                    if let prefetchMux { await prefetchMux.foreground(update) } else { await progress(update) }
+                    try await snapshotSession.exportSnapshot(revision: revision, to: sourceTree) { update in
+                        let mapped = self.revisionProgress("正在准备来源修订", revision: revision, index: index, total: count,
+                                                           update: update, usesSourcePhase: true)
+                        if let prefetchMux { await prefetchMux.foreground(mapped) } else { await progress(mapped) }
+                    }
+                }
+                if let prefetcher, remaining.indices.contains(remainingIndex + 1) {
+                    try await prefetcher.schedule(remaining[remainingIndex + 1])
                 }
                 try Task.checkCancellation()
-                await progress(revisionProgress("正在扫描来源快照", revision: revision, index: index, total: count))
+                let scanning = revisionProgress("正在扫描来源快照", revision: revision, index: index, total: count)
+                if let prefetchMux { await prefetchMux.foreground(scanning) } else { await progress(scanning) }
                 let sourceFiles = try scan(sourceTree)
                 try Task.checkCancellation()
                 let commit: String
@@ -207,13 +242,15 @@ public actor RepositoryMigrationService {
                 let targetTree: URL?
                 let targetEntries: [MigrationFileEntry]
                 if let verifiedSession {
-                    await progress(revisionProgress("正在增量写入并核对 Git 对象", revision: revision, index: index, total: count))
+                    let writing = revisionProgress("正在增量写入并核对 Git 对象", revision: revision, index: index, total: count)
+                    if let prefetchMux { await prefetchMux.foreground(writing) } else { await progress(writing) }
                     commit = try await verifiedSession.appendVerifiedSnapshot(
                         from: sourceTree, files: sourceFiles, revision: revision,
                         author: plan.authors[revision.author]!
                     ) { update in
-                        await progress(self.revisionProgress("正在增量写入并核对 Git 对象", revision: revision, index: index, total: count,
-                                                             update: update))
+                        let mapped = self.revisionProgress("正在增量写入并核对 Git 对象", revision: revision, index: index, total: count,
+                                                           update: update)
+                        if let prefetchMux { await prefetchMux.foreground(mapped) } else { await progress(mapped) }
                     }
                     // 会话已完整核对 Git 树的路径、类型、权限和对象；最终修订仍会进行
                     // 一次实际导出、逐文件 SHA-256 比对，供预览和端到端校验使用。
@@ -258,8 +295,10 @@ public actor RepositoryMigrationService {
                 try saveCheckpoint(job)
                 if let oldSource { try? FileManager.default.removeItem(at: oldSource) }
                 if let oldTarget { try? FileManager.default.removeItem(at: oldTarget) }
-                await progress(revisionProgress("已转换来源修订", revision: revision, index: index, total: count, completed: true))
+                let complete = revisionProgress("已转换来源修订", revision: revision, index: index, total: count, completed: true)
+                if let prefetchMux { await prefetchMux.foreground(complete) } else { await progress(complete) }
             }
+            if let prefetcher { await prefetcher.finish() }
             if verifiedSession != nil {
                 try await materializeFinalVerifiedTree(&job, target: target, progress: progress)
                 jobs[plan.id] = job
@@ -278,6 +317,7 @@ public actor RepositoryMigrationService {
             await progress(RepositoryOperationProgress("转换及逐修订核对完成，可以预览。", fractionCompleted: 1))
             return preview(job)
         } catch {
+            if let prefetcher { await prefetcher.cancelAndDrain() }
             // 保留先前检查点。若最后一个提交未核对完成，继续前的 verify 会拒绝指针不一致。
             throw error
         }
@@ -414,7 +454,7 @@ public actor RepositoryMigrationService {
         }
     }
 
-    private func revisionProgress(_ phase: String, revision: MigrationRevision, index: Int, total: Int,
+    private nonisolated func revisionProgress(_ phase: String, revision: MigrationRevision, index: Int, total: Int,
                                   update: RepositoryOperationProgress? = nil, completed: Bool = false,
                                   usesSourcePhase: Bool = false) -> RepositoryOperationProgress {
         let safeTotal = max(1, total)

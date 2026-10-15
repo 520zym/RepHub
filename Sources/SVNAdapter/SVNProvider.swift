@@ -2420,9 +2420,14 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
                                 "增量获取 SVN 快照…",
                                 detail: "本地基线已核对，正在切换至 r\(requested)。"
                             ))
-                            let expectedURL = try await historicalURL(at: requested)
-                            try await switchWorkingCopy(to: requested, progress: progress)
-                            try await validateWorkingCopy(at: requested, expectedURL: expectedURL)
+                            // 固定 peg 的历史 URL 查询只读远端，和对隔离工作副本的
+                            // switch 没有共享状态。并发仅限一个只读查询与一次隔离缓存更新，
+                            // 可隐藏每修订一次 info 的 RTT；随后仍必须同时成功
+                            // 并以查询到的 URL 核对 switch 结果。
+                            async let expectedURL = historicalURL(at: requested)
+                            async let switched: Void = switchWorkingCopy(to: requested, progress: progress)
+                            let (resolvedURL, _) = try await (expectedURL, switched)
+                            try await validateWorkingCopy(at: requested, expectedURL: resolvedURL)
                         }
                     } else {
                         try await ensureTLSMode(progress: progress)
@@ -2430,9 +2435,12 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
                             "首次检出 SVN 快照…",
                             detail: "正在检出固定来源的 r\(requested)。"
                         ))
-                        let expectedURL = try await historicalURL(at: requested)
-                        try await checkoutWorkingCopy(at: requested, progress: progress)
-                        try await validateWorkingCopy(at: requested, expectedURL: expectedURL)
+                        // checkout 与固定 peg 的 info 分别只写隔离缓存和只读远端；
+                        // 同样可并行，但完成后保留 URL/UUID/精确 revision 的完整核对。
+                        async let expectedURL = historicalURL(at: requested)
+                        async let checkedOut: Void = checkoutWorkingCopy(at: requested, progress: progress)
+                        let (resolvedURL, _) = try await (expectedURL, checkedOut)
+                        try await validateWorkingCopy(at: requested, expectedURL: resolvedURL)
                     }
                 } else {
                     try await ensureTLSMode(progress: progress)
@@ -2440,9 +2448,10 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
                         "增量获取 SVN 快照…",
                         detail: "正在从 r\(lastRevision!) 切换至 r\(requested)。"
                     ))
-                    let expectedURL = try await historicalURL(at: requested)
-                    try await switchWorkingCopy(to: requested, progress: progress)
-                    try await validateWorkingCopy(at: requested, expectedURL: expectedURL)
+                    async let expectedURL = historicalURL(at: requested)
+                    async let switched: Void = switchWorkingCopy(to: requested, progress: progress)
+                    let (resolvedURL, _) = try await (expectedURL, switched)
+                    try await validateWorkingCopy(at: requested, expectedURL: resolvedURL)
                 }
 
                 try Task.checkCancellation()

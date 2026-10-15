@@ -355,8 +355,7 @@ public final class GitMigrationTargetProvider: RepositoryMigrationTargetProvider
                     "commit", "--no-verify", "--no-gpg-sign", "--allow-empty", "--allow-empty-message", "--cleanup=verbatim",
                     "--author=\(author.name) <\(author.email)>", "--date=\(date)", "-m", revision.message
                 ], in: repository, timeout: 180), tool: "git")
-                let tip = try await provider.currentTip(in: repository)
-                try await verifyCommitParent(tip)
+                let tip = try await readCommittedTipAndVerifyParent()
                 try await verifyTree(tip: tip, entries: snapshotEntries, blobs: nextBlobs)
                 try await materializeDelta(
                     snapshotEntries,
@@ -403,9 +402,22 @@ public final class GitMigrationTargetProvider: RepositoryMigrationTargetProvider
             return result
         }
 
-        private func verifyCommitParent(_ tip: String) async throws {
-            let parents = try requireSuccess(try await provider.git(["show", "-s", "--format=%P", tip], in: repository), tool: "git")
-                .output.trimmingCharacters(in: .whitespacesAndNewlines)
+        /// 提交完成后以一次 NUL 分隔的 show 同时读取 HEAD 与父级。不能以 currentTip
+        /// 加第二次 show 代替，否则长历史每条修订会多启动一个 Git 进程。
+        private func readCommittedTipAndVerifyParent() async throws -> String {
+            let result = try requireSuccess(try await provider.git(
+                ["show", "-s", "--format=%H%x00%P", "HEAD"], in: repository
+            ), tool: "git")
+            let fields = result.data.split(separator: 0, maxSplits: 1, omittingEmptySubsequences: false)
+            guard fields.count == 2 else {
+                throw VersionControlError.invalidData("Git 提交元数据格式无效。")
+            }
+            let tip = String(decoding: fields[0], as: UTF8.self)
+            guard provider.isObjectID(tip) else {
+                throw VersionControlError.invalidData("Git 未返回有效末端提交。")
+            }
+            let parents = String(decoding: fields[1], as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             let values = parents.split(whereSeparator: \.isWhitespace).map(String.init)
             if let expectedTip {
                 guard values == [expectedTip] else {
@@ -416,6 +428,7 @@ public final class GitMigrationTargetProvider: RepositoryMigrationTargetProvider
                     throw VersionControlError.invalidRepository("首个 Git 迁移提交意外包含父提交，不能继续迁移。")
                 }
             }
+            return tip
         }
 
         private func validateSnapshot(

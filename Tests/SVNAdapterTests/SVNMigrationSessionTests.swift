@@ -6,6 +6,72 @@ import ToolExecution
 import VersionControlCore
 
 final class SVNMigrationSessionTests: XCTestCase {
+    func testHistoricalURLQueryOverlapsIsolatedCheckoutBeforeSnapshotExport() async throws {
+        try requireSVN()
+        let fixture = try await LocalRepositoryFixture.create()
+        defer { try? fixture.remove() }
+        let planningProvider = SVNProvider(runner: fixture.runner)
+        let plan = try await planningProvider.planMigration(
+            from: RemoteRepositoryLocation(url: fixture.svnURL.absoluteString), mode: .history, progress: { _ in }
+        )
+        let cache = fixture.root.appendingPathComponent("overlap-session-cache", isDirectory: true)
+        let gate = SnapshotHistoryGate(cache: cache, address: fixture.svnURL.absoluteString, shouldFailHistoricalInfo: false)
+        let provider = SVNProvider(
+            runner: fixture.runner,
+            tlsFallback: SVNAutomaticTLSFallback(),
+            commandExecutor: { arguments, directory, configuration in
+                // 测试桩只模拟固定 peg 的远端 info；缓存工作副本内的 info/status
+                // 必须走真实 svn，才能继续验证 UUID、working-copy-root 与状态。
+                if directory.standardizedFileURL == cache.appendingPathComponent("working-copy", isDirectory: true).standardizedFileURL {
+                    return try await fixture.runner.run(executable: "svn", arguments: arguments, directory: directory,
+                                                        opensslConfiguration: configuration)
+                }
+                return await gate.respond(to: arguments)
+            }
+        )
+        let session = try await provider.makeMigrationSnapshotSession(plan: plan, in: cache)
+        let destination = fixture.root.appendingPathComponent("overlap-session-snapshot", isDirectory: true)
+        try await session.exportSnapshot(revision: try XCTUnwrap(plan.revisions.first), to: destination, progress: { _ in })
+
+        let observedCheckout = await gate.observedCheckoutDuringHistoricalInfo()
+        XCTAssertTrue(observedCheckout, "固定 peg 的历史 URL 查询等待期间，隔离 checkout 应已启动")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: destination.path))
+    }
+
+    func testHistoricalURLFailureLeavesNoSnapshotAndInvalidatesSession() async throws {
+        try requireSVN()
+        let fixture = try await LocalRepositoryFixture.create()
+        defer { try? fixture.remove() }
+        let planningProvider = SVNProvider(runner: fixture.runner)
+        let plan = try await planningProvider.planMigration(
+            from: RemoteRepositoryLocation(url: fixture.svnURL.absoluteString), mode: .history, progress: { _ in }
+        )
+        let cache = fixture.root.appendingPathComponent("failed-history-session-cache", isDirectory: true)
+        let gate = SnapshotHistoryGate(cache: cache, address: fixture.svnURL.absoluteString, shouldFailHistoricalInfo: true)
+        let provider = SVNProvider(
+            runner: fixture.runner,
+            tlsFallback: SVNAutomaticTLSFallback(),
+            commandExecutor: { arguments, directory, configuration in
+                if directory.standardizedFileURL == cache.appendingPathComponent("working-copy", isDirectory: true).standardizedFileURL {
+                    return try await fixture.runner.run(executable: "svn", arguments: arguments, directory: directory,
+                                                        opensslConfiguration: configuration)
+                }
+                return await gate.respond(to: arguments)
+            }
+        )
+        let session = try await provider.makeMigrationSnapshotSession(plan: plan, in: cache)
+        let destination = fixture.root.appendingPathComponent("failed-history-snapshot", isDirectory: true)
+        await XCTAssertThrowsErrorAsync {
+            try await session.exportSnapshot(revision: try XCTUnwrap(plan.revisions.first), to: destination, progress: { _ in })
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path), "历史 URL 校验失败前不得导出本地快照")
+        let retry = fixture.root.appendingPathComponent("failed-history-retry", isDirectory: true)
+        await XCTAssertThrowsErrorAsync {
+            try await session.exportSnapshot(revision: try XCTUnwrap(plan.revisions.first), to: retry, progress: { _ in })
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: retry.path), "失败会话不得继续导出")
+    }
+
     func testSessionChecksOutOnceThenSwitchesAndExportsSnapshotsFromItsLocalCache() async throws {
         try requireSVN()
         let fixture = try await LocalRepositoryFixture.create()
@@ -151,4 +217,51 @@ private actor MigrationPhaseCapture {
 
     func append(_ message: String) { messages.append(message) }
     func values() -> [String] { messages }
+}
+
+private actor SnapshotHistoryGate {
+    private let cache: URL
+    private let address: String
+    private let shouldFailHistoricalInfo: Bool
+    private var observedCheckout = false
+
+    init(cache: URL, address: String, shouldFailHistoricalInfo: Bool) {
+        self.cache = cache
+        self.address = address
+        self.shouldFailHistoricalInfo = shouldFailHistoricalInfo
+    }
+
+    func respond(to arguments: [String]) async -> CommandResult {
+        guard arguments.contains("info") else {
+            return CommandResult(data: Data(), errorData: Data("unexpected command".utf8), exitCode: 1)
+        }
+        if arguments.contains("-r") {
+            for _ in 0..<40 {
+                if FileManager.default.fileExists(atPath: cache.appendingPathComponent("working-copy/.svn").path) {
+                    observedCheckout = true
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 25_000_000)
+            }
+            if shouldFailHistoricalInfo {
+                return CommandResult(data: Data(), errorData: Data("simulated historical info failure".utf8), exitCode: 1)
+            }
+        }
+        let revision = arguments.drop(while: { $0 != "-r" }).dropFirst().first ?? "2"
+        let xml = "<?xml version=\"1.0\"?><info><entry kind=\"dir\" path=\"\" revision=\"\(revision)\"><url>\(address)</url></entry></info>"
+        return CommandResult(data: Data(xml.utf8), exitCode: 0)
+    }
+
+    func observedCheckoutDuringHistoricalInfo() -> Bool { observedCheckout }
+}
+
+private func XCTAssertThrowsErrorAsync(
+    _ expression: @escaping () async throws -> Void,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) async {
+    do {
+        try await expression()
+        XCTFail("预期抛出错误", file: file, line: line)
+    } catch {}
 }

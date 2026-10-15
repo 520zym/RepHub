@@ -44,6 +44,11 @@ struct GitVerifiedMigrationSessionTests {
             tips.append(try await session.appendVerifiedSnapshot(from: source, files: manifest,
                 revision: revision(index), author: author, progress: { _ in }))
             try await provider.verifyMigration(at: repository, expectedTip: tips[index - 1], branch: "main")
+            let parents = try requireSuccess(try await fixture.run(
+                executable: "git", arguments: ["show", "-s", "--format=%P", tips[index - 1]], directory: repository
+            ), tool: "git").output.split(whereSeparator: \.isWhitespace).map(String.init)
+            let expectedParents: [String] = index == 1 ? [] : [tips[index - 2]]
+            #expect(parents == expectedParents)
         }
         for (index, tip) in tips.enumerated() {
             let exported = fixture.root.appendingPathComponent("verified-export-\(index)")
