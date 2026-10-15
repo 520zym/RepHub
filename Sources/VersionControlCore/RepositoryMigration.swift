@@ -43,6 +43,42 @@ public protocol RepositoryMigrationSourceProvider: Sendable {
                        progress: @escaping RepositoryOperationProgressHandler) async throws -> MigrationSourcePlan
     func exportMigrationSnapshot(plan: MigrationSourcePlan, revision: MigrationRevision, to directory: URL,
                                  progress: @escaping RepositoryOperationProgressHandler) async throws
+    /// 一次转换内复用来源缓存。workspace 是业务层分配的全新隔离路径，不能是用户工作副本。
+    /// 适配器负责以固定 anchor 读取内容；调用方在会话结束后清理 workspace。
+    func makeMigrationSnapshotSession(plan: MigrationSourcePlan, in workspace: URL) async throws -> any RepositoryMigrationSnapshotSession
+    /// 可选的干净本地基线。来源适配器可以只读复制到隔离缓存；不得直接更新 seedWorkingCopy。
+    /// 不支持复用的适配器仍可使用普通会话，不能据此改变迁移范围或跳过修订。
+    func makeMigrationSnapshotSession(plan: MigrationSourcePlan, in workspace: URL,
+                                      seedWorkingCopy: URL?) async throws -> any RepositoryMigrationSnapshotSession
+}
+
+/// 依次准备固定计划中的修订；每次导出必须是独立、无版本控制元数据的目录。
+/// 会话允许适配器增量取得文件内容，而业务层仍逐修订生成提交并核对结果。
+public protocol RepositoryMigrationSnapshotSession: Sendable {
+    func exportSnapshot(revision: MigrationRevision, to directory: URL,
+                        progress: @escaping RepositoryOperationProgressHandler) async throws
+}
+
+public extension RepositoryMigrationSourceProvider {
+    func makeMigrationSnapshotSession(plan: MigrationSourcePlan, in workspace: URL) async throws -> any RepositoryMigrationSnapshotSession {
+        ExportingMigrationSnapshotSession(source: self, plan: plan)
+    }
+
+    func makeMigrationSnapshotSession(plan: MigrationSourcePlan, in workspace: URL,
+                                      seedWorkingCopy: URL?) async throws -> any RepositoryMigrationSnapshotSession {
+        try await makeMigrationSnapshotSession(plan: plan, in: workspace)
+    }
+}
+
+/// 保留其他来源适配器的快照能力；支持增量读取的适配器自行实现会话工厂。
+private struct ExportingMigrationSnapshotSession: RepositoryMigrationSnapshotSession {
+    let source: any RepositoryMigrationSourceProvider
+    let plan: MigrationSourcePlan
+
+    func exportSnapshot(revision: MigrationRevision, to directory: URL,
+                        progress: @escaping RepositoryOperationProgressHandler) async throws {
+        try await source.exportMigrationSnapshot(plan: plan, revision: revision, to: directory, progress: progress)
+    }
 }
 
 public enum MigrationPublicationState: String, Sendable, Codable { case published, notPublished, unknown }

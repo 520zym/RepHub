@@ -306,16 +306,25 @@ public actor WorkingCopyMigrationService {
 
 private extension WorkingCopyMigrationService {
     private func prepareInitial(_ job: inout Job, progress: @escaping RepositoryOperationProgressHandler) async throws {
+        let sourceCache = job.folder.appendingPathComponent("source-cache-\(UUID().uuidString)", isDirectory: true)
+        // 缓存目录由来源适配器创建并拒绝复用；业务层只分配唯一隔离路径。
+        defer { try? FileManager.default.removeItem(at: sourceCache) }
+        await progress(RepositoryOperationProgress("正在准备来源修订会话…"))
+        let snapshotSession = try await source.makeMigrationSnapshotSession(
+            plan: job.plan.source,
+            in: sourceCache,
+            seedWorkingCopy: job.plan.workingCopy.directory
+        )
         for (offset, revision) in job.plan.source.revisions.enumerated() {
             try Task.checkCancellation()
             let index = offset + 1
             let total = job.plan.source.revisions.count
             let sourceTree = job.folder.appendingPathComponent("source-\(UUID().uuidString)")
             let targetTree = job.folder.appendingPathComponent("verified-\(UUID().uuidString)")
-            await progress(revisionProgress("正在导出 SVN 快照", revision: revision, index: index, total: total))
-            try await source.exportMigrationSnapshot(plan: job.plan.source, revision: revision, to: sourceTree) { update in
-                await progress(self.revisionProgress("正在导出 SVN 快照", revision: revision, index: index, total: total,
-                                                     update: update))
+            await progress(revisionProgress("正在准备来源修订", revision: revision, index: index, total: total))
+            try await snapshotSession.exportSnapshot(revision: revision, to: sourceTree) { update in
+                await progress(self.revisionProgress("正在准备来源修订", revision: revision, index: index, total: total,
+                                                     update: update, usesSourcePhase: true))
             }
             try Task.checkCancellation()
             let imported = decorated(revision, plan: job.plan)
@@ -355,23 +364,37 @@ private extension WorkingCopyMigrationService {
         await progress(RepositoryOperationProgress("正在导出当前 Git 基线用于补迁核对…"))
         try await target.exportMigrationTree(at: job.repository, revision: beforeTip, to: baseline, progress: progress)
         let before = job.folder.appendingPathComponent("source-\(UUID().uuidString)")
-        let old = MigrationRevision(id: previous.lastRevision, author: "", date: .distantPast, message: "")
-        // `exportMigrationSnapshot` 只接受固定计划内的修订。补迁的前置版本不属于
-        // “新增修订”列表，因此以同一来源、同一锚点建立仅含该固定旧修订的导出计划。
-        let priorPlan = MigrationSourcePlan(providerID: job.plan.source.providerID, location: job.plan.source.location,
-                                            anchor: job.plan.source.anchor, mode: job.plan.source.mode, revisions: [old])
-        await progress(RepositoryOperationProgress("正在导出 SVN 上次迁移锚点…"))
-        try await source.exportMigrationSnapshot(plan: priorPlan, revision: old, to: before, progress: progress)
+        // 上次迁移记录保留了旧修订的真实作者、时间与说明。把它和新增修订放进同一
+        // 来源会话，适配器即可从旧锚点一次检出后逐次切换，而不是重复远端导出整棵树。
+        let old = previous.mappings.last?.source
+            ?? MigrationRevision(id: previous.lastRevision, author: "", date: .distantPast, message: "")
+        let sessionPlan = MigrationSourcePlan(providerID: job.plan.source.providerID,
+                                              location: job.plan.source.location,
+                                              anchor: job.plan.source.anchor,
+                                              mode: job.plan.source.mode,
+                                              revisions: [old] + job.plan.source.revisions,
+                                              warnings: job.plan.source.warnings)
+        let sourceCache = job.folder.appendingPathComponent("source-cache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: sourceCache) }
+        await progress(RepositoryOperationProgress("正在准备来源修订会话…"))
+        let snapshotSession = try await source.makeMigrationSnapshotSession(plan: sessionPlan, in: sourceCache)
+        let supplementRevisionCount = max(1, job.plan.source.revisions.count)
+        await progress(RepositoryOperationProgress("正在准备来源修订 · \(old.id)"))
+        try await snapshotSession.exportSnapshot(revision: old, to: before) { update in
+            await progress(self.revisionProgress("正在准备来源修订", revision: old, index: 1,
+                                                 total: supplementRevisionCount,
+                                                 update: update, usesSourcePhase: true))
+        }
         var prior = before
         for (offset, revision) in job.plan.source.revisions.enumerated() {
             try Task.checkCancellation()
             let index = offset + 1
             let total = job.plan.source.revisions.count
             let after = job.folder.appendingPathComponent("source-\(UUID().uuidString)")
-            await progress(revisionProgress("正在导出 SVN 快照", revision: revision, index: index, total: total))
-            try await source.exportMigrationSnapshot(plan: job.plan.source, revision: revision, to: after) { update in
-                await progress(self.revisionProgress("正在导出 SVN 快照", revision: revision, index: index, total: total,
-                                                     update: update))
+            await progress(revisionProgress("正在准备来源修订", revision: revision, index: index, total: total))
+            try await snapshotSession.exportSnapshot(revision: revision, to: after) { update in
+                await progress(self.revisionProgress("正在准备来源修订", revision: revision, index: index, total: total,
+                                                     update: update, usesSourcePhase: true))
             }
             try Task.checkCancellation()
             await progress(revisionProgress("正在写入 Git 差异", revision: revision, index: index, total: total))
@@ -463,10 +486,13 @@ private extension WorkingCopyMigrationService {
     }
 
     func revisionProgress(_ phase: String, revision: MigrationRevision, index: Int, total: Int,
-                          update: RepositoryOperationProgress? = nil, completed: Bool = false) -> RepositoryOperationProgress {
+                          update: RepositoryOperationProgress? = nil, completed: Bool = false,
+                          usesSourcePhase: Bool = false) -> RepositoryOperationProgress {
         let safeTotal = max(1, total)
         let completedCount = completed ? index : max(0, index - 1)
-        return RepositoryOperationProgress("\(phase) · \(revision.id)",
+        // 仅来源会话透传自身阶段；Git 写入/读取沿用业务层阶段，避免改变既有语义。
+        let displayedPhase = usesSourcePhase ? (update?.message ?? phase) : phase
+        return RepositoryOperationProgress("\(displayedPhase) · \(revision.id)",
                                            fractionCompleted: update?.fractionCompleted ?? (completed ? 1 : nil),
                                            detail: update?.detail ?? update?.message ?? "整体修订 \(index)/\(safeTotal)",
                                            records: update?.records ?? [],

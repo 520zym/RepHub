@@ -1,6 +1,6 @@
 # 仓库迁移设计
 
-更新日期：2026-10-12。状态：**SVN 指定目录 → 空 Git 仓库**与**当前 SVN 工作副本接管为 Git + SVN 共管目录**均已接入原生客户端；两种模式已通过本地隔离测试及原生流程验收，实际结果以[原生验证记录](native-verification.md)为准。Git → Git、Git → SVN、SVN → SVN 及已有目标仓库的合并仍未实现。
+更新日期：2026-10-15。状态：**SVN 指定目录 → 空 Git 仓库**与**当前 SVN 工作副本接管为 Git + SVN 共管目录**均已接入原生客户端；两种模式已通过本地隔离测试及原生流程验收，实际结果以[原生验证记录](native-verification.md)为准。Git → Git、Git → SVN、SVN → SVN 及已有目标仓库的合并仍未实现。
 
 ## 1. 已确认的主场景
 
@@ -76,11 +76,17 @@ SVN → Git 首版以所选目录的一条可读取线性历史为基础。`trun
 
 Git 目标适配器批量计算文件对象、分批读取真实对象内容，避免每个文件单独启动 Git。批次受参数长度、对象数量和内容大小限制，仍保留二进制、可执行位、符号链接以及每个修订的独立内容核对。每个修订通过核对后清理不再需要的旧临时文件树；失败时保留当前隔离结果供排查。
 
-完整历史仍需从 SVN 读取每个选定修订并核对全树，大型仓库所需时间取决于历史数量、文件规模、磁盘和服务器响应。优化不会自动把“保留历史”降级为单快照，也不省略任何修订的内容校验。
+SVN 来源使用一次转换独享的修订会话，禁止在逐修订循环中重复从远端 `export` 整棵目录。新目录迁移首次检出需要的起始修订；当前工作副本首次迁移可只读复制已核对的本地干净基线到隔离缓存。后续以固定的 `URL@anchor` 和目标修订增量切换该缓存，再从本地整理快照，不重新下载未变更文件。使用固定 peg 的 `switch` 而非只对旧 URL 执行 `update`，使复制、目录改名之前的祖先历史仍指向正确路径。
+
+`.svn` 保存工作副本的元数据和当前 BASE 原文，不等同于完整历史对象库；`svn log -v` 提供作者、时间、说明和变更路径，不包含全部历史文件字节。缺失的历史内容仍需联网增量取得。补迁时 SVN 工作区可能包含 Git 演进产生的本地差异，因此不复制该目录作为干净基线，而是在隔离缓存中从上次锚点开始。来源会话结束或失败后清理缓存，恢复使用新的缓存，不信任上次被中断的工作副本。
+
+每个修订仍在本地生成 Git 提交并核对全树，大型仓库的总耗时取决于实际变更量、历史数量、文件规模、磁盘和服务器响应。增量读取不会把“保留历史”降级为单快照，也不省略任何修订的内容校验。进度分别标明首次下载、增量获取和本地整理；本地整理不沿用上一阶段的下载速度。
+
+增量读取的隔离测试和网络字节对照见[增量迁移验收](verification/migration-incremental/README.md)。下载量减少不能直接当作完整转换耗时同比下降。
 
 空目录不会作为 Git 目录对象保留，会在预览中列为省略；SVN 自定义属性、目录属性与 `svn:externals` 只提示限制，不会自动转换。可执行位和符号链接按导出结果重建并核对。快照模式只产生一个新的初始提交，不伪装成原有完整历史。
 
-首版不依赖 `git svn`：它通过现有 SVN 适配器读取固定修订和导出隔离快照，再交给 Git 目标适配器生成对象。SVN 读取沿用既有 TLS 自动兼容路径，但本轮没有把真实旧 TLS 服务作为迁移验收环境。不得降低全局 TLS 或绕过证书检查。
+首版不依赖 `git svn`：它通过现有 SVN 适配器读取固定修订、增量维护隔离工作副本并生成本地快照，再交给 Git 目标适配器生成对象。SVN 读取沿用既有 TLS 自动兼容路径，TLS 模式在会话首次联网时探测一次，写命令不自动重放；本轮没有把真实旧 TLS 服务作为迁移验收环境。不得降低全局 TLS 或绕过证书检查。
 
 ## 4. 独立契约与执行边界
 
@@ -88,6 +94,7 @@ Git 目标适配器批量计算文件对象、分批读取真实对象内容，�
 
 - `MigrationMode / MigrationSourcePlan / MigrationPlan`：源路径、固定修订、目标、本地新目录、历史模式和作者映射；计划固定本次来源范围。
 - `RepositoryMigrationSourceProvider / TargetProvider`：分别承担只读导出、目标格式生成与发布；工具命令、解析及认证仍在适配器内。组合专属的转换器可补充处理历史拓扑，不强迫所有工具都模拟 Git。
+- `RepositoryMigrationSnapshotSession`：每次转换独享的来源缓存与按修订快照接口。业务层分配、清理隔离路径；SVN 适配器处理检出、增量切换和本地整理，其他来源保留单快照接口的兼容实现。
 - `RepositoryMigrationService`：编排预检、独立暂存、转换、核对、发布和中断恢复；界面只接收结构化进度与结果。
 - `MigrationPreview / Manifest`：记录固定来源、策略、源修订到目标提交的映射、代码核对结果、警告及远端发布结果。
 - `WorkingCopyMigration`：独立描述当前 SVN 工作副本的接管、来源身份与范围标记、累计映射、隔离三方应用和确认后的原地 Git 安装／快进；不复用初始化或普通提交语义。
@@ -116,4 +123,6 @@ Git 目标适配器批量计算文件对象、分批读取真实对象内容，�
 - [Git 官方 git-svn 文档](https://git-scm.com/docs/git-svn)：导入、作者映射、分支布局、空目录与跨工具历史限制。
 - [Pro Git：Migrating to Git](https://git-scm.com/book/en/v2/Git-and-Other-Systems-Migrating-to-Git)：SVN 导入及分支／标签整理。
 - [Subversion Book：Repository Maintenance](https://svnbook.red-bean.com/en/1.8/svn.reposadmin.maint.html)：dump/load、svnrdump、svnsync 与目标修订属性权限。
+- [Subversion Book：Basic Work Cycle](https://svnbook.red-bean.com/en/1.7/svn.tour.cycle.html)：工作副本 BASE 缓存、增量更新与历史内容的区别。
+- [Subversion Book：svn switch](https://svnbook.red-bean.com/en/1.7/svn.ref.svn.c.switch.html)：固定 peg 的目录切换及祖先关系检查。
 - [Git 官方 clone 文档](https://git-scm.com/docs/git-clone)：Git 克隆及引用范围。

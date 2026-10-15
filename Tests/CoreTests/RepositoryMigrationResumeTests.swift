@@ -5,6 +5,20 @@ import VersionControlCore
 
 @Suite("迁移检查点恢复")
 struct RepositoryMigrationResumeTests {
+    @Test("一次预览只建立一个来源快照会话，并按修订顺序复用")
+    func reusesOneSnapshotSessionInRevisionOrder() async throws {
+        let root = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: root) }
+        let stats = SnapshotSessionStats()
+        let source = ResumeSource(stats: stats)
+        let plan = try await makePlan(root: root, source: source)
+        let service = RepositoryMigrationService(sources: [source], targets: [ResumeTarget()])
+
+        _ = try await service.prepare(plan, progress: { _ in })
+
+        #expect(await stats.createdCount == 1)
+        #expect(await stats.exportedRevisions == ["r1", "r2"])
+    }
+
     @Test("新的服务实例可从已核对的检查点继续转换")
     func resumesVerifiedCheckpointInNewService() async throws {
         let root = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: root) }
@@ -85,6 +99,8 @@ struct RepositoryMigrationResumeTests {
 
 private struct ResumeSource: RepositoryMigrationSourceProvider {
     let id = ProviderID(rawValue: "resume-source")
+    let stats: SnapshotSessionStats?
+    init(stats: SnapshotSessionStats? = nil) { self.stats = stats }
     func planMigration(from location: RemoteRepositoryLocation, mode: MigrationMode,
                        progress: @escaping RepositoryOperationProgressHandler) async throws -> MigrationSourcePlan {
         MigrationSourcePlan(providerID: id, location: location, anchor: "r2", mode: mode,
@@ -95,10 +111,32 @@ private struct ResumeSource: RepositoryMigrationSourceProvider {
     }
     func exportMigrationSnapshot(plan: MigrationSourcePlan, revision: MigrationRevision, to directory: URL,
                                  progress: @escaping RepositoryOperationProgressHandler) async throws {
+        try await ResumeSnapshotSession(stats: stats).exportSnapshot(revision: revision, to: directory, progress: progress)
+    }
+
+    func makeMigrationSnapshotSession(plan: MigrationSourcePlan, in workspace: URL) async throws -> any RepositoryMigrationSnapshotSession {
+        await stats?.created()
+        return ResumeSnapshotSession(stats: stats)
+    }
+}
+
+private struct ResumeSnapshotSession: RepositoryMigrationSnapshotSession {
+    let stats: SnapshotSessionStats?
+
+    func exportSnapshot(revision: MigrationRevision, to directory: URL,
+                        progress: @escaping RepositoryOperationProgressHandler) async throws {
+        await stats?.exported(revision.id)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let content = revision.id == "r1" ? "one\n" : "two\n"
         try content.write(to: directory.appendingPathComponent(revision.id == "r1" ? "first.txt" : "second.txt"), atomically: true, encoding: .utf8)
     }
+}
+
+private actor SnapshotSessionStats {
+    private(set) var createdCount = 0
+    private(set) var exportedRevisions: [String] = []
+    func created() { createdCount += 1 }
+    func exported(_ revision: String) { exportedRevisions.append(revision) }
 }
 
 private actor ResumeTarget: RepositoryMigrationTargetProvider {

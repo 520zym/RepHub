@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(CryptoKit)
+import CryptoKit
+#endif
 #if canImport(FoundationXML)
 import FoundationXML
 #endif
@@ -1288,6 +1291,58 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         await progress(RepositoryOperationProgress("SVN r\(exportRevision) 快照导出完成。"))
     }
 
+    /// 历史迁移会话只维护一份隔离 SVN 工作副本。首次检出（或从经过核对的本地基线
+    /// 构造缓存）后，后续修订通过 `svn switch -r` 递进，快照则从本地缓存导出。
+    /// 这样不会为每一条 SVN 修订重新进行远端 export。
+    public func makeMigrationSnapshotSession(
+        plan: MigrationSourcePlan,
+        in workspace: URL
+    ) async throws -> any RepositoryMigrationSnapshotSession {
+        try await makeMigrationSnapshotSession(plan: plan, in: workspace, seedWorkingCopy: nil)
+    }
+
+    /// `seedWorkingCopy` 只用于首次工作副本迁移中、已经由业务层确认干净的 BASE。
+    /// 仍会在本地再次核对，且第一条历史修订仍通过固定 URL/anchor switch 到指定版本；
+    /// 因此不会把用户工作副本中的未跟踪或本地改动混入迁移缓存。
+    public func makeMigrationSnapshotSession(
+        plan: MigrationSourcePlan,
+        in workspace: URL,
+        seedWorkingCopy: URL?
+    ) async throws -> any RepositoryMigrationSnapshotSession {
+        guard plan.providerID == id else {
+            throw VersionControlError.invalidData("迁移计划不属于 SVN 来源适配器。")
+        }
+        let address = try normalizedRemoteAddress(plan.location.url)
+        let anchor = try migrationAnchor(plan.anchor)
+        guard !plan.revisions.isEmpty else {
+            throw VersionControlError.invalidData("SVN 迁移计划没有可导出的修订。")
+        }
+        try await rememberCredentials(plan.location.credentials, for: address)
+
+        let cache = workspace.standardizedFileURL
+        let manager = FileManager.default
+        let isLink = (try? manager.destinationOfSymbolicLink(atPath: cache.path)) != nil
+        guard !manager.fileExists(atPath: cache.path), !isLink else {
+            throw VersionControlError.invalidRepository("SVN 迁移缓存目录已存在，拒绝复用：\(cache.path)")
+        }
+        let parent = cache.deletingLastPathComponent().standardizedFileURL
+        var parentIsDirectory = ObjCBool(false)
+        guard manager.fileExists(atPath: parent.path, isDirectory: &parentIsDirectory), parentIsDirectory.boolValue,
+              (try? manager.destinationOfSymbolicLink(atPath: parent.path)) == nil else {
+            throw VersionControlError.invalidRepository("SVN 迁移缓存的父目录不可用：\(parent.path)")
+        }
+        try manager.createDirectory(at: cache, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+
+        return SVNMigrationSnapshotSession(
+            provider: self,
+            plan: plan,
+            address: address,
+            anchor: anchor,
+            cache: cache,
+            seedWorkingCopy: seedWorkingCopy?.standardizedFileURL
+        )
+    }
+
     /// 只读取已有工作副本。首次迁移要求一个完整、单一 BASE、没有已管改动的 SVN
     /// 工作副本；补迁阶段由 Git 侧负责冲突处理，因此不触碰 SVN 本地状态。
     public func inspectMigrationWorkingCopy(
@@ -2252,6 +2307,351 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         return document.statusEntries
             .filter { $0.item == "unversioned" }
             .map { relativePath($0.path, root: binding.root) }
+    }
+
+    /// 单个迁移任务专用的 SVN 缓存。actor 既保护 `svn switch` 的顺序，也避免调用方在
+    /// `await` 间隙并发导出同一工作副本。任何失败都会让会话失效，不能继续使用半更新缓存。
+    private actor SVNMigrationSnapshotSession: RepositoryMigrationSnapshotSession {
+        private let provider: SVNProvider
+        private let plan: MigrationSourcePlan
+        private let address: String
+        private let anchor: Int
+        private let cache: URL
+        private let workingCopy: URL
+        private let seedWorkingCopy: URL?
+        private var tlsMode: SVNAutomaticTLSFallback.Mode?
+        private var repositoryUUID: String?
+        private var lastRevision: Int?
+        private var busy = false
+        private var invalidated = false
+
+        init(
+            provider: SVNProvider,
+            plan: MigrationSourcePlan,
+            address: String,
+            anchor: Int,
+            cache: URL,
+            seedWorkingCopy: URL?
+        ) {
+            self.provider = provider
+            self.plan = plan
+            self.address = address
+            self.anchor = anchor
+            self.cache = cache
+            self.workingCopy = cache.appendingPathComponent("working-copy", isDirectory: true)
+            self.seedWorkingCopy = seedWorkingCopy
+        }
+
+        func exportSnapshot(
+            revision: MigrationRevision,
+            to directory: URL,
+            progress: @escaping RepositoryOperationProgressHandler
+        ) async throws {
+            guard !busy else {
+                throw VersionControlError.invalidRepository("SVN 迁移缓存正在导出另一条修订，请等待当前操作完成。")
+            }
+            guard !invalidated else {
+                throw VersionControlError.invalidRepository("SVN 迁移缓存上一操作未完成，不能继续复用。请重新生成迁移预览。")
+            }
+            busy = true
+            defer { busy = false }
+
+            do {
+                try Task.checkCancellation()
+                let requested = try validatedRevision(revision)
+                if let lastRevision {
+                    guard requested > lastRevision else {
+                        throw VersionControlError.invalidData("SVN 迁移快照必须按计划从旧到新递增导出；r\(requested) 不能接在 r\(lastRevision) 后。")
+                    }
+                }
+                try validateDestination(directory)
+
+                if lastRevision == nil {
+                    if let seedWorkingCopy {
+                        try await prepareSeed(seedWorkingCopy, progress: progress)
+                        // 快照模式常见的首条修订就是本地 BASE。此时已从干净 seed 构造出
+                        // 独立缓存，完全没有必要再访问远端或做一次无意义的 switch。
+                        if requested != anchor {
+                            try await ensureTLSMode(progress: progress)
+                            await progress(RepositoryOperationProgress(
+                                "增量获取 SVN 快照…",
+                                detail: "本地基线已核对，正在切换至 r\(requested)。"
+                            ))
+                            let expectedURL = try await historicalURL(at: requested)
+                            try await switchWorkingCopy(to: requested, progress: progress)
+                            try await validateWorkingCopy(at: requested, expectedURL: expectedURL)
+                        }
+                    } else {
+                        try await ensureTLSMode(progress: progress)
+                        await progress(RepositoryOperationProgress(
+                            "首次检出 SVN 快照…",
+                            detail: "正在检出固定来源的 r\(requested)。"
+                        ))
+                        let expectedURL = try await historicalURL(at: requested)
+                        try await checkoutWorkingCopy(at: requested, progress: progress)
+                        try await validateWorkingCopy(at: requested, expectedURL: expectedURL)
+                    }
+                } else {
+                    try await ensureTLSMode(progress: progress)
+                    await progress(RepositoryOperationProgress(
+                        "增量获取 SVN 快照…",
+                        detail: "正在从 r\(lastRevision!) 切换至 r\(requested)。"
+                    ))
+                    let expectedURL = try await historicalURL(at: requested)
+                    try await switchWorkingCopy(to: requested, progress: progress)
+                    try await validateWorkingCopy(at: requested, expectedURL: expectedURL)
+                }
+
+                try Task.checkCancellation()
+                if requested == anchor, lastRevision == nil, seedWorkingCopy != nil {
+                    try await validateWorkingCopy(at: requested, expectedURL: address)
+                }
+                await progress(RepositoryOperationProgress(
+                    "本地整理 SVN 快照…",
+                    detail: "r\(requested) 已在隔离缓存就绪，正在本地导出，不访问 SVN 服务端。"
+                ))
+                let exportResult = try await localExport(from: workingCopy, to: directory.standardizedFileURL)
+                _ = try requireSuccess(exportResult, tool: "svn")
+                try Task.checkCancellation()
+                lastRevision = requested
+                await progress(RepositoryOperationProgress(
+                    "SVN r\(requested) 本地快照已就绪。",
+                    detail: "已从隔离缓存导出，不重新拉取该修订。"
+                ))
+            } catch {
+                invalidated = true
+                throw error
+            }
+        }
+
+        private func validatedRevision(_ revision: MigrationRevision) throws -> Int {
+            guard plan.revisions.contains(revision) else {
+                throw VersionControlError.invalidData("请求导出的修订不在当前固定 SVN 迁移计划中。")
+            }
+            let value = try provider.numericSVNRevision(revision.id)
+            guard value > 0, value <= anchor else {
+                throw VersionControlError.invalidData("SVN 导出修订超出固定迁移范围。")
+            }
+            return value
+        }
+
+        private func validateDestination(_ raw: URL) throws {
+            let destination = raw.standardizedFileURL
+            let manager = FileManager.default
+            let cachePath = cache.resolvingSymlinksInPath().path
+            let destinationPath = destination.resolvingSymlinksInPath().path
+            guard destinationPath != cachePath, !destinationPath.hasPrefix(cachePath + "/") else {
+                throw VersionControlError.invalidRepository("迁移快照目标不能位于 SVN 缓存目录内。")
+            }
+            let isLink = (try? manager.destinationOfSymbolicLink(atPath: destination.path)) != nil
+            guard !manager.fileExists(atPath: destination.path), !isLink else {
+                throw VersionControlError.invalidRepository("迁移快照目标已存在：\(destination.path)")
+            }
+            let parent = destination.deletingLastPathComponent().standardizedFileURL
+            var parentIsDirectory = ObjCBool(false)
+            guard manager.fileExists(atPath: parent.path, isDirectory: &parentIsDirectory), parentIsDirectory.boolValue,
+                  (try? manager.destinationOfSymbolicLink(atPath: parent.path)) == nil else {
+                throw VersionControlError.invalidRepository("迁移快照目标的父目录不可用：\(parent.path)")
+            }
+        }
+
+        private func checkoutWorkingCopy(
+            at revision: Int,
+            progress: @escaping RepositoryOperationProgressHandler
+        ) async throws {
+            let reporter = SVNTransferProgressReporter(root: workingCopy, operationName: "正在首次检出 SVN…", progress: progress)
+            let output: CommandOutputHandler = { lines in
+                await reporter.receive(lines: lines.compactMap { $0.stream == .stdout ? $0.text : nil })
+            }
+            do {
+                let result = try await provider.runRemoteWrite(
+                    ["--non-interactive", "--no-auth-cache", "checkout", "--ignore-externals", "-r", String(revision), provider.migrationTarget(address, pegRevision: String(anchor)), workingCopy.path],
+                    remoteURL: address,
+                    tlsMode: try requiredTLSMode(),
+                    timeout: 600,
+                    onOutput: output
+                )
+                _ = try requireSuccess(result, tool: "svn")
+                await reporter.finish()
+            } catch {
+                await reporter.finish()
+                throw normalizedSnapshotError(error, revision: revision)
+            }
+        }
+
+        private func switchWorkingCopy(
+            to revision: Int,
+            progress: @escaping RepositoryOperationProgressHandler
+        ) async throws {
+            let reporter = SVNTransferProgressReporter(root: workingCopy, operationName: "正在增量获取 SVN…", progress: progress)
+            let output: CommandOutputHandler = { lines in
+                await reporter.receive(lines: lines.compactMap { $0.stream == .stdout ? $0.text : nil })
+            }
+            do {
+                let result = try await provider.runRemoteWrite(
+                    ["--non-interactive", "--no-auth-cache", "switch", "--ignore-externals", "--accept", "postpone", "-r", String(revision), provider.migrationTarget(address, pegRevision: String(anchor)), workingCopy.path],
+                    remoteURL: address,
+                    tlsMode: try requiredTLSMode(),
+                    timeout: 600,
+                    onOutput: output
+                )
+                _ = try requireSuccess(result, tool: "svn")
+                await reporter.finish()
+            } catch {
+                await reporter.finish()
+                throw normalizedSnapshotError(error, revision: revision)
+            }
+        }
+
+        private func prepareSeed(
+            _ seed: URL,
+            progress: @escaping RepositoryOperationProgressHandler
+        ) async throws {
+            let seed = seed.standardizedFileURL
+            let cachePath = cache.resolvingSymlinksInPath().path
+            let seedPath = seed.resolvingSymlinksInPath().path
+            guard seedPath != cachePath, !seedPath.hasPrefix(cachePath + "/") else {
+                throw VersionControlError.invalidRepository("SVN 本地基线不能位于迁移缓存目录内。")
+            }
+            await progress(RepositoryOperationProgress(
+                "核对本地 SVN 基线…",
+                detail: "仅复制已管版本到隔离缓存，不修改当前工作副本。"
+            ))
+            let info = try await provider.inspectMigrationWorkingCopy(at: seed, requireClean: true)
+            let expectedAddress = try provider.normalizedRemoteAddress(plan.location.url)
+            guard info.sourceURL == expectedAddress, info.baseRevision == "r\(anchor)" else {
+                throw VersionControlError.invalidRepository("本地 SVN 基线与固定迁移来源或 BASE 修订不一致，不能复用。")
+            }
+            let seedMetadata = seed.appendingPathComponent(".svn", isDirectory: true)
+            let manager = FileManager.default
+            let seedMetadataLink = (try? manager.destinationOfSymbolicLink(atPath: seedMetadata.path)) != nil
+            guard manager.fileExists(atPath: seedMetadata.path), !seedMetadataLink else {
+                throw VersionControlError.invalidRepository("本地 SVN 基线元数据不可用，不能复用。")
+            }
+
+            await progress(RepositoryOperationProgress(
+                "本地整理 SVN 基线…",
+                detail: "正在将已管文件和 SVN 元数据复制到隔离缓存，不访问 SVN 服务端。"
+            ))
+            let beforeDatabase = try seedDatabaseFingerprint(at: seedMetadata)
+            let exportResult = try await localExport(from: seed, to: workingCopy)
+            _ = try requireSuccess(exportResult, tool: "svn")
+            try Task.checkCancellation()
+            try manager.copyItem(at: seedMetadata, to: workingCopy.appendingPathComponent(".svn", isDirectory: true))
+            guard beforeDatabase == (try seedDatabaseFingerprint(at: seedMetadata)) else {
+                throw VersionControlError.invalidRepository("复制 SVN 本地基线期间检测到工作副本元数据变化，拒绝复用该缓存。")
+            }
+            repositoryUUID = info.repositoryUUID
+            try await validateWorkingCopy(at: anchor, expectedURL: address)
+        }
+
+        /// 导出只读取本地缓存；它可能遍历大型代码树，因此使用与远端迁移一致的 600 秒
+        /// 上限，但不传 remoteURL/TLS 配置，也不报告网络传输统计。
+        private func localExport(from source: URL, to destination: URL) async throws -> CommandResult {
+            try await provider.runner.run(
+                executable: "svn",
+                arguments: ["--non-interactive", "--no-auth-cache", "export", "--ignore-externals", provider.svnPathArgument(source.path), destination.path],
+                directory: cache,
+                timeout: 600
+            )
+        }
+
+        private func seedDatabaseFingerprint(at metadata: URL) throws -> String {
+            let database = metadata.appendingPathComponent("wc.db")
+            let manager = FileManager.default
+            let isLink = (try? manager.destinationOfSymbolicLink(atPath: database.path)) != nil
+            guard manager.fileExists(atPath: database.path), !isLink else {
+                throw VersionControlError.invalidRepository("本地 SVN 基线缺少可安全复制的 wc.db。")
+            }
+            let data = try Data(contentsOf: database, options: .mappedIfSafe)
+            #if canImport(CryptoKit)
+            return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+            #else
+            // 支持旧系统工具链：同时包含字节数与稳定 hash，仍可发现复制期间的常见变更。
+            return "\(data.count):\(data.reduce(UInt64(1469598103934665603)) { ($0 ^ UInt64($1)) &* 1099511628211 })"
+            #endif
+        }
+
+        private func ensureTLSMode(progress: @escaping RepositoryOperationProgressHandler) async throws {
+            guard tlsMode == nil else { return }
+            await progress(RepositoryOperationProgress(
+                "探测 SVN 迁移连接…",
+                detail: "固定来源 r\(anchor)，仅执行一次 TLS 兼容探测。"
+            ))
+            tlsMode = try await provider.probeRemoteTLSMode(address)
+            try Task.checkCancellation()
+        }
+
+        /// 对复制/改名节点，固定 URL 在较早修订可能解析为其历史祖先 URL。先以同一 peg
+        /// 查询实际节点 URL，再核对本地 switch 结果，不能把“当前 URL”硬套给旧修订。
+        private func historicalURL(at revision: Int) async throws -> String {
+            do {
+                let result = try await provider.runRemoteWrite(
+                    ["--non-interactive", "--no-auth-cache", "info", "--xml", "-r", String(revision), provider.migrationTarget(address, pegRevision: String(anchor))],
+                    remoteURL: address,
+                    tlsMode: try requiredTLSMode(),
+                    timeout: 20
+                )
+                _ = try requireSuccess(result, tool: "svn")
+                guard let raw = try SVNXMLDocument(data: result.data).infoEntry?.url else {
+                    throw VersionControlError.invalidData("无法核对 SVN r\(revision) 的历史节点 URL。")
+                }
+                return try provider.normalizedRemoteAddress(raw)
+            } catch {
+                throw normalizedSnapshotError(error, revision: revision)
+            }
+        }
+
+        private func validateWorkingCopy(at expectedRevision: Int, expectedURL: String) async throws {
+            try Task.checkCancellation()
+            let info = try await provider.svn(["info", "--xml", "--depth", "empty"], directory: workingCopy)
+            guard let entry = try SVNXMLDocument(data: info.data).infoEntry,
+                  entry.kind == "dir",
+                  let url = entry.url,
+                  let uuid = entry.repositoryUUID, !uuid.isEmpty,
+                  entry.workingCopyRoot.map({ URL(fileURLWithPath: $0).standardizedFileURL.resolvingSymlinksInPath().path }) == workingCopy.standardizedFileURL.resolvingSymlinksInPath().path else {
+                throw VersionControlError.invalidRepository("SVN 迁移缓存不是独立完整的工作副本。")
+            }
+            guard try provider.normalizedRemoteAddress(url) == expectedURL else {
+                throw VersionControlError.invalidRepository("SVN 迁移缓存 URL 与 r\(expectedRevision) 的固定历史节点不一致，拒绝继续导出。")
+            }
+            if let repositoryUUID {
+                guard repositoryUUID == uuid else {
+                    throw VersionControlError.invalidRepository("SVN 迁移缓存的仓库 UUID 发生变化，拒绝继续导出。")
+                }
+            } else {
+                repositoryUUID = uuid
+            }
+            let versionResult = try await provider.runner.run(executable: "svnversion", arguments: [], directory: workingCopy)
+            _ = try requireSuccess(versionResult, tool: "svnversion")
+            let version = try provider.parseWorkingCopyVersion(versionResult.output, path: nil)
+            guard version.minimum == expectedRevision, version.maximum == expectedRevision,
+                  !version.flags.contains("M"), !version.flags.contains("S"), !version.flags.contains("P") else {
+                throw VersionControlError.invalidRepository("SVN 迁移缓存未处于精确 r\(expectedRevision) 的干净完整状态（\(version.description)）。")
+            }
+            let status = try await provider.svn(["status", "--xml", "--no-ignore", "--ignore-externals"], directory: workingCopy)
+            let entries = try SVNXMLDocument(data: status.data).statusEntries
+            let dirty = entries.filter { entry in
+                entry.item != "normal" || !["normal", "none", ""].contains(entry.properties) || entry.treeConflicted
+            }
+            guard dirty.isEmpty else {
+                throw VersionControlError.invalidRepository("SVN 迁移缓存存在本地修改、切换残留或冲突，拒绝继续导出。")
+            }
+        }
+
+        private func requiredTLSMode() throws -> SVNAutomaticTLSFallback.Mode {
+            guard let tlsMode else {
+                throw VersionControlError.invalidData("SVN 迁移连接尚未完成 TLS 探测。")
+            }
+            return tlsMode
+        }
+
+        private func normalizedSnapshotError(_ error: Error, revision: Int) -> Error {
+            if provider.isMissingSVNPath(error) {
+                return VersionControlError.invalidData("SVN r\(revision) 无法从固定来源路径导出；该目录可能在此修订尚不存在、已删除，或需要无法解析的复制/改名祖先。请改用快照模式或调整迁移范围。")
+            }
+            return error
+        }
     }
 }
 

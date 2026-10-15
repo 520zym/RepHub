@@ -155,17 +155,24 @@ public actor RepositoryMigrationService {
             // 已写入但尚未核对的窗口。
             try saveCheckpoint(job)
         }
+        // 来源会话的缓存只服务于本次 prepare。恢复时重新从首个未完成修订建立会话，
+        // 不相信上一次中断留下的 SVN 缓存；已经核对的 Git 检查点仍由上面的逻辑保护。
+        let sourceCache = job.folder.appendingPathComponent("source-cache-\(UUID().uuidString)", isDirectory: true)
+        // 缓存目录由来源适配器创建并拒绝复用；这里仅分配唯一、尚不存在的隔离路径。
+        defer { try? FileManager.default.removeItem(at: sourceCache) }
+        await progress(RepositoryOperationProgress("正在准备来源修订会话…"))
+        let snapshotSession = try await source.makeMigrationSnapshotSession(plan: plan.source, in: sourceCache)
         do {
             for revision in plan.source.revisions.dropFirst(job.mappings.count) {
                 try Task.checkCancellation()
                 let index = job.mappings.count + 1
                 let count = plan.source.revisions.count
-                await progress(revisionProgress("正在导出来源快照", revision: revision, index: index, total: count))
+                await progress(revisionProgress("正在准备来源修订", revision: revision, index: index, total: count))
                 let sourceTree = job.folder.appendingPathComponent("source-\(UUID().uuidString)")
                 let targetTree = job.folder.appendingPathComponent("verified-\(UUID().uuidString)")
-                try await source.exportMigrationSnapshot(plan: plan.source, revision: revision, to: sourceTree) { update in
-                    await progress(self.revisionProgress("正在导出来源快照", revision: revision, index: index, total: count,
-                                                         update: update))
+                try await snapshotSession.exportSnapshot(revision: revision, to: sourceTree) { update in
+                    await progress(self.revisionProgress("正在准备来源修订", revision: revision, index: index, total: count,
+                                                         update: update, usesSourcePhase: true))
                 }
                 try Task.checkCancellation()
                 await progress(revisionProgress("正在扫描来源快照", revision: revision, index: index, total: count))
@@ -321,10 +328,14 @@ public actor RepositoryMigrationService {
     }
 
     private func revisionProgress(_ phase: String, revision: MigrationRevision, index: Int, total: Int,
-                                  update: RepositoryOperationProgress? = nil, completed: Bool = false) -> RepositoryOperationProgress {
+                                  update: RepositoryOperationProgress? = nil, completed: Bool = false,
+                                  usesSourcePhase: Bool = false) -> RepositoryOperationProgress {
         let safeTotal = max(1, total)
         let completedCount = completed ? index : max(0, index - 1)
-        return RepositoryOperationProgress("\(phase) · \(revision.id)",
+        // SVN 会话会在首次检出、增量切换、本地导出之间切换。保留其阶段作为 UI
+        // 主消息，令无传输统计的本地步骤能清掉上一个网络步骤的估算速度。
+        let displayedPhase = usesSourcePhase ? (update?.message ?? phase) : phase
+        return RepositoryOperationProgress("\(displayedPhase) · \(revision.id)",
                                            fractionCompleted: update?.fractionCompleted ?? (completed ? 1 : nil),
                                            detail: update?.detail ?? update?.message ?? "整体修订 \(index)/\(safeTotal)",
                                            records: update?.records ?? [],

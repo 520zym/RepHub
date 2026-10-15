@@ -36,6 +36,24 @@ struct WorkingCopyMigrationServiceTests {
         #expect(messages.contains(where: { $0.hasPrefix("只读预检完成，已读取 1 条 SVN 修订") }))
     }
 
+    @Test("首次预览把已核对工作副本作为只读会话基线，并保留来源子阶段")
+    func initialPreviewSeedsSessionAndKeepsSourcePhase() async throws {
+        let root = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let stats = WorkingCopySessionStats()
+        let source = WorkingCopySourceFixture(root: root, sessionStats: stats)
+        let service = WorkingCopyMigrationService(source: source, target: WorkingCopyTargetFixture())
+        let plan = try await service.plan(at: root, remoteURL: "https://example.test/project.git", branch: "main",
+                                          mode: .history, action: .initial, progress: { _ in })
+        let collector = ProgressCollector()
+
+        _ = try await service.prepare(plan) { update in await collector.append(update) }
+
+        #expect(await stats.seedPath == root.standardizedFileURL.path)
+        let messages = await collector.messages
+        #expect(messages.contains("首次检出 SVN 快照… · r9"))
+        #expect(messages.contains("本地整理 SVN 快照… · r9"))
+    }
+
     @Test("迁移记录中的地址凭据和重复映射被拒绝")
     func rejectsUnsafeRecord() async throws {
         let root = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: root) }
@@ -137,6 +155,7 @@ private struct WorkingCopySourceFixture: RepositoryWorkingCopyMigrationSourcePro
     let id = ProviderID(rawValue: "working-copy-source-fixture")
     let root: URL
     var latestRevision: String? = nil
+    var sessionStats: WorkingCopySessionStats? = nil
     var displayName: String { "SVN fixture" }
     func planMigration(from location: RemoteRepositoryLocation, mode: MigrationMode, progress: @escaping RepositoryOperationProgressHandler) async throws -> MigrationSourcePlan { try await planWorkingCopyHistory(from: location, mode: mode, through: "r9", after: nil, progress: progress) }
     func inspectMigrationWorkingCopy(at directory: URL, requireClean: Bool) async throws -> MigrationWorkingCopyInfo { MigrationWorkingCopyInfo(directory: root, sourceURL: "https://example.test/svn/project", repositoryUUID: "uuid", baseRevision: "r9") }
@@ -145,6 +164,11 @@ private struct WorkingCopySourceFixture: RepositoryWorkingCopyMigrationSourcePro
     }
     func verifyWorkingCopyMigrationSource(_ location: RemoteRepositoryLocation, repositoryUUID: String, revision: String) async throws {}
     func exportMigrationSnapshot(plan: MigrationSourcePlan, revision: MigrationRevision, to directory: URL, progress: @escaping RepositoryOperationProgressHandler) async throws {}
+    func makeMigrationSnapshotSession(plan: MigrationSourcePlan, in workspace: URL,
+                                      seedWorkingCopy: URL?) async throws -> any RepositoryMigrationSnapshotSession {
+        await sessionStats?.recordSeed(seedWorkingCopy)
+        return WorkingCopySnapshotSession(stats: sessionStats)
+    }
     func detect(at directory: URL) async throws -> RepositoryBinding? { nil }
     func status(in binding: RepositoryBinding) async throws -> [FileChange] { [] }
     func history(in binding: RepositoryBinding, limit: Int, reference: String?) async throws -> [Revision] {
@@ -155,6 +179,21 @@ private struct WorkingCopySourceFixture: RepositoryWorkingCopyMigrationSourcePro
     func diff(in binding: RepositoryBinding, path: String?, revision: String?) async throws -> RepositoryPatch { .init(text: "") }
 }
 
+private struct WorkingCopySnapshotSession: RepositoryMigrationSnapshotSession {
+    let stats: WorkingCopySessionStats?
+    func exportSnapshot(revision: MigrationRevision, to directory: URL,
+                        progress: @escaping RepositoryOperationProgressHandler) async throws {
+        await progress(RepositoryOperationProgress("首次检出 SVN 快照…"))
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        await progress(RepositoryOperationProgress("本地整理 SVN 快照…"))
+    }
+}
+
+private actor WorkingCopySessionStats {
+    private(set) var seedPath: String?
+    func recordSeed(_ seed: URL?) { seedPath = seed?.standardizedFileURL.path }
+}
+
 private actor WorkingCopyTargetFixture: RepositoryWorkingCopyMigrationTargetProvider {
     nonisolated let id: ProviderID = .git
     func checkMigrationTarget(remoteURL: String, branch: String) async throws {}
@@ -162,13 +201,17 @@ private actor WorkingCopyTargetFixture: RepositoryWorkingCopyMigrationTargetProv
     func appendMigrationSnapshot(from snapshot: URL, revision: MigrationRevision, author: MigrationAuthor, to directory: URL, progress: @escaping RepositoryOperationProgressHandler) async throws -> String { String(repeating: "a", count: 40) }
     func verifyMigration(at directory: URL, expectedTip: String, branch: String) async throws {}
     func verifyMigrationCheckpoint(at directory: URL, expectedTip: String?, branch: String) async throws {}
-    func exportMigrationTree(at directory: URL, revision: String, to destination: URL) async throws {}
+    func exportMigrationTree(at directory: URL, revision: String, to destination: URL) async throws {
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+    }
     func migrationPatch(at directory: URL, revision: String) async throws -> RepositoryPatch { RepositoryPatch(text: "") }
     func publishMigration(at directory: URL, remoteURL: String, branch: String, expectedTip: String, progress: @escaping RepositoryOperationProgressHandler) async throws -> MigrationPublicationResult { MigrationPublicationResult(state: .notPublished, message: "") }
     func inspectWorkingCopyMigrationTarget(at directory: URL, branch: String, previousMigrationTip: String?) async throws -> String? { nil }
     func verifyWorkingCopyMigrationRecord(at directory: URL, record: WorkingCopyMigrationRecord) async throws {}
     func checkWorkingCopyMigrationRemote(remoteURL: String, branch: String, expectedTip: String?) async throws {}
-    func prepareWorkingCopyMigrationTarget(from directory: URL, expectedTip: String?, to preview: URL, branch: String) async throws {}
+    func prepareWorkingCopyMigrationTarget(from directory: URL, expectedTip: String?, to preview: URL, branch: String) async throws {
+        try FileManager.default.createDirectory(at: preview, withIntermediateDirectories: true)
+    }
     func appendWorkingCopyMigrationDelta(before: URL, after: URL, revision: MigrationRevision, author: MigrationAuthor, to preview: URL, progress: @escaping RepositoryOperationProgressHandler) async throws -> String { String(repeating: "a", count: 40) }
     func applyWorkingCopyMigration(from preview: URL, to directory: URL, expectedBeforeTip: String?, expectedTip: String, branch: String, record: Data) async throws {}
     func publishWorkingCopyMigration(at directory: URL, remoteURL: String, branch: String, expectedBeforeTip: String?, expectedTip: String, progress: @escaping RepositoryOperationProgressHandler) async throws -> MigrationPublicationResult { MigrationPublicationResult(state: .notPublished, message: "") }

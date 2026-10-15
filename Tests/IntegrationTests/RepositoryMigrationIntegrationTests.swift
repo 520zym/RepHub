@@ -117,6 +117,72 @@ struct RepositoryMigrationIntegrationTests {
         #expect(try await svnStatus(fixture).isEmpty)
     }
 
+    @Test("复制改名祖先下的增量快照逐修订生成与标准 SVN 导出一致的 Git 树")
+    func incrementalSnapshotsPreserveCopiedHistoryAndComplexTrees() async throws {
+        try requireTools()
+        let fixture = try await LocalRepositoryFixture.create()
+        defer { try? fixture.remove() }
+        try await seedCopiedMigrationModule(in: fixture)
+
+        // 这是一份模拟用户工作副本。迁移只能读取远端，不能碰 wc.db 或任何已检出文件。
+        let sourceBefore = try treeSignature(at: fixture.svnWriter, excludingMetadata: true)
+        let databaseBefore = try Data(contentsOf: fixture.svnWriter.appendingPathComponent(".svn/wc.db"))
+
+        let target = fixture.root.appendingPathComponent("remotes/copied-history-target.git", isDirectory: true)
+        try await git(["init", "--bare", target.path], fixture: fixture)
+        let service = migrationService(for: fixture)
+        let sourceURL = fixture.svnURL.appendingPathComponent("迁移模块", isDirectory: true).absoluteString
+        let destination = fixture.root.appendingPathComponent("copied-history-preview", isDirectory: true)
+        let plan = try await service.plan(
+            sourceProviderID: .svn, location: RemoteRepositoryLocation(url: sourceURL), mode: .history,
+            targetProviderID: .git, remoteURL: target.absoluteURL.absoluteString, branch: "main",
+            destination: destination, progress: { _ in }
+        )
+
+        // `迁移模块` 是从 `旧迁移模块` 复制而来；固定在当前 peg 上时，历史中的旧路径
+        // 仍必须可解析。若会话把 rN 当作路径的 peg，会在复制点之前导出错误的目录。
+        #expect(plan.source.revisions.map(\.message) == [
+            "旧路径创建复杂文件", "旧路径更新二进制与文本", "复制旧路径为迁移模块",
+            "新路径改名删除并更新", "新路径再次更新"
+        ])
+        #expect(plan.source.revisions.count == 5)
+
+        let preview = try await service.prepare(plan, progress: { _ in })
+        #expect(preview.mappings.count == plan.source.revisions.count)
+        #expect(try await remoteRefs(target, fixture: fixture).isEmpty)
+
+        // 旧的逐修订 `svn export` 只作为测试 oracle。生产路径由 service 创建一个
+        // snapshot session 后顺序导出；这里逐条对比最终 Git 对象树，覆盖二进制、链接、
+        // 可执行位、svn:keywords/eol、删除以及复制后的目录改名。
+        let source = SVNProvider(runner: fixture.runner)
+        let gitTarget = GitMigrationTargetProvider(runner: fixture.runner)
+        for (index, mapping) in preview.mappings.enumerated() {
+            let oracle = fixture.root.appendingPathComponent("oracle-\(index)", isDirectory: true)
+            let restored = fixture.root.appendingPathComponent("restored-\(index)", isDirectory: true)
+            try await source.exportMigrationSnapshot(plan: plan.source, revision: mapping.source, to: oracle, progress: { _ in })
+            try await gitTarget.exportMigrationTree(at: preview.repository, revision: mapping.targetCommit, to: restored)
+            let expected = try treeSignature(at: oracle)
+            let actual = try treeSignature(at: restored)
+            try #require(!expected.isEmpty)
+            #expect(actual == expected)
+        }
+
+        let finalExport = fixture.root.appendingPathComponent("final-git-export", isDirectory: true)
+        try await gitTarget.exportMigrationTree(at: preview.repository, revision: preview.tip, to: finalExport)
+        let finalTree = try treeSignature(at: finalExport)
+        #expect(!finalTree.isEmpty)
+        #expect(finalTree["d:目录"] != nil)
+        #expect(finalTree["f:目录/新名.txt"] != nil)
+        #expect(finalTree["f:目录/旧名.txt"] == nil)
+        #expect(finalTree["f:待删除/旧文件.txt"] == nil)
+        #expect(finalTree["l:脚本链接"] == "脚本.sh")
+        #expect(finalTree["x:脚本.sh"] == "1")
+
+        #expect(try treeSignature(at: fixture.svnWriter, excludingMetadata: true) == sourceBefore)
+        #expect(try Data(contentsOf: fixture.svnWriter.appendingPathComponent(".svn/wc.db")) == databaseBefore)
+        #expect(try await svnStatus(fixture).isEmpty)
+    }
+
     @Test("首次真实 Git 提交后核对失败，恢复时不会重复追加或发布未核对历史")
     func refusesResumeWhenFirstCommitWasNotVerified() async throws {
         try requireTools()
@@ -181,6 +247,76 @@ struct RepositoryMigrationIntegrationTests {
 
         try Data([0, 9, 8, 0, 0xFE, 0x7E]).write(to: module.appendingPathComponent("二进制数据.bin"))
         try await svnCommit("更新二进制内容", author: "迁移作者甲", fixture: fixture)
+    }
+
+    private func seedCopiedMigrationModule(in fixture: LocalRepositoryFixture) async throws {
+        let oldModule = fixture.svnWriter.appendingPathComponent("旧迁移模块", isDirectory: true)
+        let folder = oldModule.appendingPathComponent("目录", isDirectory: true)
+        let deleted = oldModule.appendingPathComponent("待删除", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: deleted, withIntermediateDirectories: true)
+        try "第一版\r\n含有 $Id$ 关键字。\r\n".write(to: oldModule.appendingPathComponent("说明.txt"), atomically: true, encoding: .utf8)
+        try "旧名称\n".write(to: folder.appendingPathComponent("旧名.txt"), atomically: true, encoding: .utf8)
+        try "随后删除\n".write(to: deleted.appendingPathComponent("旧文件.txt"), atomically: true, encoding: .utf8)
+        try "#!/bin/sh\necho first\n".write(to: oldModule.appendingPathComponent("脚本.sh"), atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: oldModule.appendingPathComponent("脚本.sh").path)
+        try FileManager.default.createSymbolicLink(atPath: oldModule.appendingPathComponent("脚本链接").path, withDestinationPath: "脚本.sh")
+        try Data([0, 1, 0, 0xFF, 0x7F]).write(to: oldModule.appendingPathComponent("资料.bin"))
+        try await svn(["add", "旧迁移模块"], in: fixture.svnWriter, fixture: fixture)
+        try await svn(["propset", "svn:eol-style", "LF", "旧迁移模块/说明.txt"], in: fixture.svnWriter, fixture: fixture)
+        try await svn(["propset", "svn:keywords", "Id", "旧迁移模块/说明.txt"], in: fixture.svnWriter, fixture: fixture)
+        try await svnCommit("旧路径创建复杂文件", author: "author-a", fixture: fixture)
+
+        try "第二版\r\n含有 $Id$ 关键字。\r\n".write(to: oldModule.appendingPathComponent("说明.txt"), atomically: true, encoding: .utf8)
+        try Data([9, 8, 0, 0xFE, 0x7E]).write(to: oldModule.appendingPathComponent("资料.bin"))
+        try await svnCommit("旧路径更新二进制与文本", author: "author-b", fixture: fixture)
+
+        // SVN commit 后父目录仍可能保持旧 BASE。若此时 copy，copyfrom 会指向 r3，
+        // 形成混合版本，历史计划理应只包含 r3、而不是本用例要覆盖的 r3-r4。
+        // 先统一更新，使复制明确从包含第二次修改的 r4 创建。
+        try await svn(["update"], in: fixture.svnWriter, fixture: fixture)
+        try await svn(["copy", "旧迁移模块", "迁移模块"], in: fixture.svnWriter, fixture: fixture)
+        try await svnCommit("复制旧路径为迁移模块", author: "author-c", fixture: fixture)
+
+        let newModule = fixture.svnWriter.appendingPathComponent("迁移模块", isDirectory: true)
+        try await svn(["move", "目录/旧名.txt", "目录/新名.txt"], in: newModule, fixture: fixture)
+        try await svn(["delete", "待删除"], in: newModule, fixture: fixture)
+        try "第三版\n含有 $Id$ 关键字。\n".write(to: newModule.appendingPathComponent("说明.txt"), atomically: true, encoding: .utf8)
+        try await svnCommit("新路径改名删除并更新", author: "author-d", fixture: fixture)
+
+        try "#!/bin/sh\necho final\n".write(to: newModule.appendingPathComponent("脚本.sh"), atomically: true, encoding: .utf8)
+        try Data([42, 0, 42, 0xFF]).write(to: newModule.appendingPathComponent("资料.bin"))
+        try await svnCommit("新路径再次更新", author: "author-e", fixture: fixture)
+    }
+
+    private func treeSignature(at root: URL, excludingMetadata: Bool = false) throws -> [String: String] {
+        let manager = FileManager.default
+        var result: [String: String] = [:]
+        // 按文件名构造相对路径，避免 /var 与 /private/var 别名的字符串替换问题。
+        // 不解析单个链接的目标；签名独立比较完整字节、可执行位和链接文字。
+        func visit(_ directory: URL, prefix: String) throws {
+            for item in try manager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
+                let name = item.lastPathComponent
+                if excludingMetadata, prefix.isEmpty, name == ".svn" { continue }
+                let relative = prefix + name
+                let attributes = try manager.attributesOfItem(atPath: item.path)
+                switch attributes[.type] as? FileAttributeType {
+                case .typeSymbolicLink:
+                    result["l:\(relative)"] = try manager.destinationOfSymbolicLink(atPath: item.path)
+                case .typeDirectory:
+                    result["d:\(relative)"] = ""
+                    try visit(item, prefix: relative + "/")
+                case .typeRegular:
+                    result["f:\(relative)"] = try Data(contentsOf: item).base64EncodedString()
+                    let permissions = (attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0
+                    result["x:\(relative)"] = permissions & 0o111 == 0 ? "0" : "1"
+                default:
+                    throw VersionControlError.invalidData("测试树含未支持的文件：\(relative)")
+                }
+            }
+        }
+        try visit(root, prefix: "")
+        return result
     }
 
     private func requireTools() throws {
