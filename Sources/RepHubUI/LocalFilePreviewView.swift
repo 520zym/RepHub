@@ -37,7 +37,7 @@ struct LocalFilePreviewView: NSViewRepresentable {
         textView.isRichText = false
         textView.importsGraphics = false
         textView.drawsBackground = true
-        textView.textContainerInset = NSSize(width: 18, height: 14)
+        textView.textContainerInset = NSSize(width: 8, height: 14)
         textView.minSize = .zero
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.isHorizontallyResizable = true
@@ -47,6 +47,10 @@ struct LocalFilePreviewView: NSViewRepresentable {
         textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.layoutManager?.allowsNonContiguousLayout = true
         scrollView.documentView = textView
+        scrollView.verticalRulerView = CodeLineNumberRuler(scrollView: scrollView, textView: textView)
+        scrollView.hasVerticalRuler = true
+        scrollView.hasHorizontalRuler = false
+        scrollView.rulersVisible = true
         update(textView: textView, scrollView: scrollView, coordinator: context.coordinator)
         return scrollView
     }
@@ -102,6 +106,9 @@ struct LocalFilePreviewView: NSViewRepresentable {
         }
 
         if textChanged || languageChanged || themeChanged {
+            (scrollView.verticalRulerView as? CodeLineNumberRuler)?.update(
+                text: textChanged ? text : nil, palette: palette, font: font
+            )
             scrollView.backgroundColor = background
             textView.backgroundColor = background
             textView.insertionPointColor = foreground
@@ -236,7 +243,7 @@ struct LocalFilePreviewView: NSViewRepresentable {
 
         private static func signature(for palette: CodePalette) -> [NSColor] {
             [palette.foreground, palette.background, palette.selection, palette.keyword,
-             palette.string, palette.comment, palette.type, palette.number].map(NSColor.init)
+             palette.string, palette.comment, palette.type, palette.number, palette.lineNumber].map(NSColor.init)
         }
     }
 }

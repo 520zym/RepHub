@@ -115,4 +115,76 @@ private struct WorkingFileTree: View {
     private func row(_ node: Node) -> some View { HStack(spacing: 4) { if node.directory { Button { toggle(node.path) } label: { Image(systemName: expanded.contains(node.path) ? "chevron.down" : "chevron.right").font(.system(size: 9)).frame(width: 13, height: 23) }.buttonStyle(.plain) } else { Color.clear.frame(width: 13, height: 23) }; Button { if !node.directory { select(node.path) } } label: { HStack(spacing: 6) { Image(systemName: node.directory ? "folder" : "doc").foregroundStyle(node.directory ? palette.accent : palette.secondaryText); Text(node.name).lineLimit(1).truncationMode(.middle); Spacer(); if let item = node.item { indicator(item.state) } }.font(.system(size: 11, weight: selected == node.path ? .semibold : .regular)).frame(maxWidth: .infinity, alignment: .leading).frame(height: 23) }.buttonStyle(.plain) }.padding(.leading, CGFloat(node.depth) * 15).padding(.trailing, 5).background(selected == node.path ? palette.selection.opacity(0.68) : .clear, in: RoundedRectangle(cornerRadius: 5, style: .continuous)) }
     private func indicator(_ state: MigrationFileComparison.State) -> some View { Group { switch state { case .identical: Image(systemName: "checkmark.circle.fill").foregroundStyle(palette.accent); case .omittedDirectory: Image(systemName: "minus.circle").foregroundStyle(palette.secondaryText).help("Git 不记录空目录，本地目录会保留。"); case .different: Image(systemName: allowsDifferences ? "arrow.left.arrow.right.circle" : "exclamationmark.circle.fill").foregroundStyle(allowsDifferences ? palette.secondaryText : palette.removed) } }.font(.system(size: 10)) }
 }
-private struct WorkingPatchPreview: View { let text: String; let palette: AppPalette; var body: some View { ScrollView { LazyVStack(alignment: .leading, spacing: 0) { ForEach(Array(text.split(separator: "\n", omittingEmptySubsequences: false).enumerated()), id: \.offset) { _, raw in let line = String(raw); Text(line).font(.system(size: 11, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 13).padding(.vertical, 1.5).background(color(line)) } }.padding(.vertical, 12) } }; private func color(_ line: String) -> Color { if line.hasPrefix("+") && !line.hasPrefix("+++") { return palette.accent.opacity(0.14) }; if line.hasPrefix("-") && !line.hasPrefix("---") { return palette.removed.opacity(0.14) }; if line.hasPrefix("@@") { return palette.selection.opacity(0.55) }; return .clear } }
+private struct WorkingPatchPreview: View {
+    let palette: AppPalette
+    private let lines: [PatchDisplayLine]
+    private let lineNumberWidth: CGFloat
+
+    init(text: String, palette: AppPalette) {
+        self.palette = palette
+        let parsedLines = PatchLineParser.parse(text)
+        lines = parsedLines
+        let digits = parsedLines.reduce(1) { current, line in
+            max(current, String(max(line.oldLine ?? 0, line.newLine ?? 0)).count)
+        }
+        lineNumberWidth = CGFloat(max(3, digits)) * 7 + 10
+    }
+
+    var body: some View {
+        ScrollView([.horizontal, .vertical]) {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 0) {
+                    lineNumberLabel("旧")
+                    lineNumberLabel("新")
+                    Text("内容")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(palette.secondaryText)
+                        .padding(.leading, 7)
+                    Spacer(minLength: 12)
+                }
+                .frame(height: 23)
+                .background(palette.sidebar.opacity(0.5))
+
+                ForEach(lines.indices, id: \.self) { index in
+                    let line = lines[index]
+                    HStack(spacing: 0) {
+                        lineNumber(line.oldLine)
+                        lineNumber(line.newLine)
+                        Text(line.text.isEmpty ? " " : line.text)
+                            .font(.system(size: 11, design: .monospaced))
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .padding(.leading, 7)
+                        Spacer(minLength: 12)
+                    }
+                    .frame(minHeight: 21, alignment: .leading)
+                    .background(color(line.text))
+                }
+            }
+            .padding(.vertical, 12)
+        }
+    }
+
+    private func lineNumberLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(palette.secondaryText)
+            .frame(width: lineNumberWidth, alignment: .trailing)
+            .padding(.trailing, 7)
+    }
+
+    private func lineNumber(_ value: Int?) -> some View {
+        Text(value.map(String.init) ?? "")
+            .font(.system(size: 11, design: .monospaced))
+            .foregroundStyle(palette.secondaryText)
+            .frame(width: lineNumberWidth, alignment: .trailing)
+            .padding(.trailing, 7)
+    }
+
+    private func color(_ line: String) -> Color {
+        if line.hasPrefix("+") && !line.hasPrefix("+++") { return palette.accent.opacity(0.14) }
+        if line.hasPrefix("-") && !line.hasPrefix("---") { return palette.removed.opacity(0.14) }
+        if line.hasPrefix("@@") { return palette.selection.opacity(0.55) }
+        return .clear
+    }
+}

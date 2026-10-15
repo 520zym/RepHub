@@ -365,38 +365,75 @@ private struct SideBySideDiff: View {
         palette.secondary.opacity(0.055).frame(width: 6)
     }
 
+    /// 统一视图同时展示源、目标行号，列宽按本份差异的最大行号预留，避免五位以上行号相互挤压。
+    private var unifiedLineNumberWidth: CGFloat {
+        // SF Mono 13pt 的一个数字约 8pt；额外空间用于右对齐数字与舒适的留白。
+        return CGFloat(max(3, diff.maximumLineNumberDigits)) * 8 + 10
+    }
+
+    private var sideLineNumberWidth: CGFloat { max(45, unifiedLineNumberWidth) }
+
     private var unifiedBody: some View {
         let rows = displayedRows
         return GeometryReader { geometry in
-        ScrollViewReader { proxy in
-            ScrollView([.horizontal, .vertical]) {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(rows.indices, id: \.self) { index in
-                    let row = rows[index]
-                    switch row {
-                    case let .metadata(text, isHunk): metadataRow(text, isHunk: isHunk)
-                    case let .paired(old, new): unifiedRow(old: old, new: new).id(unifiedRowID(old: old, new: new))
+            let contentWidth = max(geometry.size.width, 620)
+            VStack(spacing: 0) {
+                unifiedColumnTitle
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                ScrollViewReader { proxy in
+                    ScrollView([.horizontal, .vertical]) {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(rows.indices, id: \.self) { index in
+                                let row = rows[index]
+                                switch row {
+                                case let .metadata(text, isHunk): metadataRow(text, isHunk: isHunk)
+                                case let .paired(old, new): unifiedRow(old: old, new: new).id(unifiedRowID(old: old, new: new))
+                                }
+                            }
+                        }
+                        .frame(minWidth: contentWidth, alignment: .leading)
+                    }
+                    .defaultScrollAnchor(.topLeading)
+                    .onChange(of: focusToken) { _, _ in
+                        guard let anchor = unifiedFocusAnchor else { return }
+                        withAnimation(.easeOut(duration: 0.18)) { proxy.scrollTo(anchor, anchor: .center) }
                     }
                 }
-                }.frame(minWidth: max(geometry.size.width, 620), alignment: .leading)
             }
-            .defaultScrollAnchor(.topLeading)
-            .onChange(of: focusToken) { _, _ in
-                guard let anchor = unifiedFocusAnchor else { return }
-                withAnimation(.easeOut(duration: 0.18)) { proxy.scrollTo(anchor, anchor: .center) }
-            }
-        }
         }
     }
 
+    private var unifiedColumnTitle: some View {
+        HStack(spacing: 0) {
+            unifiedLineNumberLabel("旧")
+            unifiedLineNumberLabel("新")
+            Color.clear.frame(width: 15)
+            Text("内容")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(palette.secondary)
+                .padding(.leading, 2)
+            Spacer(minLength: 12)
+        }
+        .frame(height: 24)
+        .background(palette.secondary.opacity(0.035))
+    }
+
+    private func unifiedLineNumberLabel(_ label: String) -> some View {
+        Text(label)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(palette.secondary)
+            .frame(width: unifiedLineNumberWidth, alignment: .trailing)
+            .padding(.trailing, 8)
+    }
+
     private func columnTitle(_ title: String, width: CGFloat) -> some View {
-        Text(title).padding(.leading, 68).frame(width: width, alignment: .leading)
+        Text(title).padding(.leading, sideLineNumberWidth + 23).frame(width: width, alignment: .leading)
             .font(.system(size: 11, weight: .medium)).foregroundStyle(palette.secondary)
             .frame(height: 28).background(palette.secondary.opacity(0.035))
     }
 
     private func diffColumn(_ side: DiffColumn, viewportWidth: CGFloat, contentHeight: CGFloat) -> some View {
-        let contentWidth = max(viewportWidth, side == .old ? diff.oldColumnWidth : diff.newColumnWidth)
+        let contentWidth = max(viewportWidth, (side == .old ? diff.oldColumnWidth : diff.newColumnWidth) + sideLineNumberWidth - 45)
         return ScrollView(.horizontal) {
             diffColumnContent(side, width: contentWidth, height: contentHeight)
         }
@@ -431,24 +468,66 @@ private struct SideBySideDiff: View {
     }
 
     @ViewBuilder private func unifiedRow(old: PreparedDiffLine?, new: PreparedDiffLine?) -> some View {
-        if old?.kind == .context, let old { codeCell(old, showMarker: true).frame(maxWidth: .infinity, alignment: .leading) }
-        else {
-            if let old { codeCell(old, showMarker: true).frame(maxWidth: .infinity, alignment: .leading) }
-            if let new { codeCell(new, showMarker: true).frame(maxWidth: .infinity, alignment: .leading) }
+        if old?.kind == .context {
+            unifiedCodeCell(new ?? old, oldNumber: old?.number, newNumber: new?.number)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            if let old {
+                unifiedCodeCell(old, oldNumber: old.number, newNumber: nil)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if let new {
+                unifiedCodeCell(new, oldNumber: nil, newNumber: new.number)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
     }
 
     private func codeCell(_ line: PreparedDiffLine?, showMarker: Bool = false) -> some View {
         let kind = line?.kind ?? .context
         return HStack(spacing: 0) {
-            Text(line?.number.map(String.init) ?? "").foregroundStyle(palette.lineNumber).frame(width: 45, alignment: .trailing).padding(.trailing, 8)
+            Text(line?.number.map(String.init) ?? "").foregroundStyle(palette.lineNumber).frame(width: sideLineNumberWidth, alignment: .trailing).padding(.trailing, 8)
             Text(marker(for: line, alwaysShow: showMarker)).foregroundStyle(foreground(for: kind)).frame(width: 15)
             inlineHighlightedText(line)
                 .fixedSize(horizontal: true, vertical: false).textSelection(.enabled)
             Spacer(minLength: 12)
         }
         .font(.system(size: 13, design: .monospaced)).frame(height: 24)
-        .background(focusLine == line?.number ? palette.selection.opacity(palette.isDark ? 0.46 : 0.58) : background(for: kind))
+        .background(focusLine != nil && focusLine == line?.number ? palette.selection.opacity(palette.isDark ? 0.46 : 0.58) : background(for: kind))
+    }
+
+    private func unifiedCodeCell(_ line: PreparedDiffLine?, oldNumber: Int?, newNumber: Int?) -> some View {
+        let kind = line?.kind ?? .context
+        return HStack(spacing: 0) {
+            unifiedLineNumber(oldNumber)
+            unifiedLineNumber(newNumber)
+            Text(marker(for: line, alwaysShow: true))
+                .foregroundStyle(foreground(for: kind))
+                .frame(width: 15)
+            inlineHighlightedText(line)
+                .fixedSize(horizontal: true, vertical: false)
+                .textSelection(.enabled)
+            Spacer(minLength: 12)
+        }
+        .font(.system(size: 13, design: .monospaced))
+        .frame(height: 24)
+        .background(
+            isFocused(oldNumber: oldNumber, newNumber: newNumber)
+                ? palette.selection.opacity(palette.isDark ? 0.46 : 0.58)
+                : background(for: kind)
+        )
+    }
+
+    private func isFocused(oldNumber: Int?, newNumber: Int?) -> Bool {
+        guard let focusLine else { return false }
+        return focusLine == oldNumber || focusLine == newNumber
+    }
+
+    private func unifiedLineNumber(_ value: Int?) -> some View {
+        Text(value.map(String.init) ?? "")
+            .foregroundStyle(palette.lineNumber)
+            .frame(width: unifiedLineNumberWidth, alignment: .trailing)
+            .padding(.trailing, 8)
     }
 
     private func inlineHighlightedText(_ line: PreparedDiffLine?) -> Text {

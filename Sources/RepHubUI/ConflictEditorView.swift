@@ -113,11 +113,12 @@ struct ConflictEditorView: View {
                     Spacer()
                     Text("可编辑").font(.system(size: 10)).foregroundStyle(palette.secondaryText)
                 }
-                TextEditor(text: $model.finalText)
-                    .font(.system(.body, design: .monospaced)).scrollContentBackground(.hidden)
-                    .padding(6).background(codePalette.background, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(palette.border.opacity(0.25), lineWidth: 1))
-                    .disabled(model.phase != .ready)
+                NumberedCodeEditor(
+                    text: $model.finalText,
+                    palette: codePalette,
+                    isEditable: model.phase == .ready
+                )
+                .background(codePalette.background, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
             .frame(height: 210)
         }
@@ -152,64 +153,23 @@ struct ConflictEditorView: View {
     private var codePalette: CodePalette { appearance.codePalette(for: appearance.preferredColorScheme ?? systemColorScheme) }
 }
 
-/// 三栏对照内容可能达到数 MB；只在内容或语言变化后后台分词一次，避免编辑最终结果时重复计算。
+/// 三栏对照复用工作区文件预览：语法着色和固定行号均由 AppKit 文本系统完成，
+/// 因此选择复制时只会得到代码本身。
 private struct ConflictReadOnlyPane: View {
-    private static let highlightLimit = 512 * 1024
-
     let title: String
     let text: String
     let language: SyntaxHighlighting.Language
     let tint: Color
     let palette: CodePalette
-    @State private var tokenLines: [[SyntaxHighlighting.Token]]?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             Label(title, systemImage: "doc.text")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(tint)
-            ScrollView([.horizontal, .vertical]) {
-                paneContent
-                    .padding(9)
-                    .fixedSize(horizontal: true, vertical: false)
-            }
-            .defaultScrollAnchor(.topLeading)
-            .background(palette.background, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            LocalFilePreviewView(text: text, palette: palette, language: language)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .task(id: Input(text: text, language: language)) {
-            tokenLines = nil
-            guard text.utf8.count <= Self.highlightLimit else { return }
-            let source = text
-            let lines = await Task.detached(priority: .userInitiated) {
-                SyntaxHighlighting.tokenize(source, language: language)
-            }.value
-            guard !Task.isCancelled else { return }
-            tokenLines = lines
-        }
-    }
-
-    @ViewBuilder
-    private var paneContent: some View {
-        if let tokenLines {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(tokenLines.enumerated()), id: \.offset) { _, line in
-                    SyntaxHighlighting.text(tokens: line, palette: palette)
-                        .font(.system(size: 11, design: .monospaced))
-                        .textSelection(.enabled)
-                }
-            }
-        } else {
-            // 超大文本不再逐行创建高亮片段；仍保持可复制的原始内容。
-            Text(text)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(palette.foreground)
-                .textSelection(.enabled)
-        }
-    }
-
-    private struct Input: Hashable {
-        let text: String
-        let language: SyntaxHighlighting.Language
     }
 }

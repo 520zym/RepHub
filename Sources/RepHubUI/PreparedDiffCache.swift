@@ -20,6 +20,7 @@ struct PreparedUnifiedDiff: Sendable {
     let columnRows: [PreparedDiffRow]
     let oldColumnWidth: CGFloat
     let newColumnWidth: CGFloat
+    let maximumLineNumberDigits: Int
 }
 
 struct PreparedDiffCacheStatistics: Sendable {
@@ -167,6 +168,7 @@ actor PreparedDiffCache {
         }
         var oldWidth = 0
         var newWidth = 0
+        var maximumLineNumberDigits = 1
         for row in columnRows {
             try Task.checkCancellation()
             switch row {
@@ -177,13 +179,17 @@ actor PreparedDiffCache {
             case let .paired(old, new):
                 oldWidth = max(oldWidth, displayUnits(of: old?.text ?? ""))
                 newWidth = max(newWidth, displayUnits(of: new?.text ?? ""))
+                for number in [old?.number, new?.number].compactMap({ $0 }) {
+                    maximumLineNumberDigits = max(maximumLineNumberDigits, String(number).count)
+                }
             }
         }
         let prepared = PreparedUnifiedDiff(
             rows: rows,
             columnRows: columnRows,
             oldColumnWidth: contentWidth(for: oldWidth),
-            newColumnWidth: contentWidth(for: newWidth)
+            newColumnWidth: contentWidth(for: newWidth),
+            maximumLineNumberDigits: maximumLineNumberDigits
         )
         return PreparedDiff(
             content: .unified(prepared),
