@@ -850,15 +850,40 @@ private struct HistoryRevisionInspector: View {
     @Binding var showsChangedFiles: Bool
     @State private var issueDetailsExpanded = false
     @State private var messageDetailsExpanded = false
+    @State private var summaryContentHeight: CGFloat = 140
     @State private var revisionTree: [PathTreeNode<FileChange>] = []
 
     var body: some View {
+        GeometryReader { geometry in
+            let contentHeight = max(1, geometry.size.height - (isCompact ? 20 : 28))
+            inspectorContent(summaryMaximumHeight: contentHeight * (model.historyFilePath == nil ? 0.65 : 1))
+        }
+        .background(palette.sidebar.opacity(0.45))
+        .background(palette.surface)
+        .task(id: revisionTreeSignature) { rebuildRevisionTree() }
+        .onChange(of: "\(model.selectedBindingID ?? "")|\(model.selectedRevisionID ?? "")") { _, _ in
+            messageDetailsExpanded = false
+        }
+    }
+
+    private func inspectorContent(summaryMaximumHeight: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: isCompact ? 7 : 10) {
             if !issues.isEmpty {
                 HistoryIssueNotice(message: issues.joined(separator: "\n"), palette: palette, isExpanded: $issueDetailsExpanded)
             }
             if let revision = selectedRevision {
-                revisionSummary(revision)
+                // 普通说明按内容自然排版；超长说明或较矮分栏才滚动整个摘要，
+                // 不再把正文嵌入只有几行高的第二层滚动框。
+                ViewThatFits(in: .vertical) {
+                    revisionSummary(revision).fixedSize(horizontal: false, vertical: true)
+                    ScrollView {
+                        revisionSummary(revision).fixedSize(horizontal: false, vertical: true)
+                    }
+                    .scrollBounceBehavior(.basedOnSize)
+                    .clipShape(RoundedRectangle(cornerRadius: isCompact ? 10 : 14, style: .continuous))
+                }
+                .frame(height: min(summaryContentHeight, summaryMaximumHeight), alignment: .topLeading)
+                .layoutPriority(1)
                 if model.historyFilePath == nil {
                     changedFilesSection
                 }
@@ -870,9 +895,6 @@ private struct HistoryRevisionInspector: View {
         }
         .padding(isCompact ? 10 : 14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(palette.sidebar.opacity(0.45))
-        .background(palette.surface)
-        .task(id: revisionTreeSignature) { rebuildRevisionTree() }
     }
 
     @ViewBuilder
@@ -889,24 +911,38 @@ private struct HistoryRevisionInspector: View {
             referenceLabels(revision.references)
             revisionMetadata(revision)
             if !messageBody.isEmpty {
-                DisclosureGroup(isExpanded: $messageDetailsExpanded) {
-                    ScrollView {
-                        Text(messageBody).font(.callout).textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("提交说明")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(palette.secondaryText)
+                        Spacer(minLength: 8)
+                        Button {
+                            messageDetailsExpanded.toggle()
+                        } label: {
+                            Label(messageDetailsExpanded ? "收起" : "展开全文",
+                                  systemImage: messageDetailsExpanded ? "chevron.up" : "chevron.down")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(palette.accent)
+                        .accessibilityLabel(messageDetailsExpanded ? "收起提交说明" : "展开完整提交说明")
                     }
-                    .frame(maxHeight: 88)
-                } label: {
-                    HStack(spacing: 7) {
-                        Text("提交说明").font(.system(size: 12, weight: .medium))
-                        Text(messageBody).font(.system(size: 12)).foregroundStyle(palette.secondaryText).lineLimit(1)
-                    }
+                    Text(messageBody)
+                        .font(.system(size: 13))
+                        .lineSpacing(5)
+                        .lineLimit(messageDetailsExpanded ? nil : 2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .tint(palette.accent)
+                .padding(.top, 8)
             }
         }
         .padding(isCompact ? 10 : 14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(palette.background.opacity(0.68), in: RoundedRectangle(cornerRadius: isCompact ? 10 : 14, style: .continuous))
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { summaryContentHeight = $0 }
     }
 
     @ViewBuilder
