@@ -6,7 +6,7 @@ import AppKit
 /// 让代码正文、空行与左侧行号保持稳定节奏。
 enum CodeTextLayout {
     static let fontSize: CGFloat = 13
-    static let lineHeight: CGFloat = 22
+    static let lineHeight: CGFloat = 24
 
     static var font: NSFont {
         NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)

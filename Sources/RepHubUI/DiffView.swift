@@ -14,6 +14,9 @@ public struct DiffView: View {
     @State private var preparedPath: String?
     @State private var isPreparingDiff = false
     @State private var ignoresWhitespace = false
+    @State private var showsDiffMetadata = false
+    @State private var addedLineCount = 0
+    @State private var removedLineCount = 0
     private let focusLine: Int?
     private let focusToken: UUID?
 
@@ -30,7 +33,7 @@ public struct DiffView: View {
         let codePalette = appearance.codePalette(for: effectiveScheme)
         VStack(spacing: 0) {
             diffHeader(appPalette: appPalette)
-                .background(appPalette.sidebar.opacity(0.45))
+                .background(appPalette.surface)
             content(appPalette: appPalette, codePalette: codePalette)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -52,7 +55,8 @@ public struct DiffView: View {
                 switch preparedDiff.content {
                 case let .unified(diff):
                     SideBySideDiff(diff: diff, presentation: presentation, palette: codePalette,
-                                   ignoresWhitespace: ignoresWhitespace, focusLine: focusLine, focusToken: focusToken)
+                                   ignoresWhitespace: ignoresWhitespace, showsMetadata: showsDiffMetadata,
+                                   focusLine: focusLine, focusToken: focusToken)
                         .id(preparedSource ?? "")
                 case let .binary(text):
                     binaryState(text, palette: appPalette)
@@ -77,15 +81,15 @@ public struct DiffView: View {
     }
 
     private func diffHeader(appPalette: AppPalette) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 14) {
         HStack(spacing: 10) {
-            Image(systemName: "doc.text").foregroundStyle(appPalette.accent)
-            VStack(alignment: .leading, spacing: 2) {
+            Image(systemName: "doc.text").font(.system(size: 19, weight: .medium)).foregroundStyle(appPalette.accent)
+            VStack(alignment: .leading, spacing: 5) {
                 Text(model.selectedPath.map { ($0 as NSString).lastPathComponent } ?? "文件差异")
-                    .font(.system(size: 14, weight: .semibold)).lineLimit(1).truncationMode(.middle)
+                    .font(.system(size: 18, weight: .semibold)).lineLimit(1).truncationMode(.middle)
                 if let path = model.selectedPath {
                     Text((path as NSString).deletingLastPathComponent)
-                        .font(.system(size: 11)).foregroundStyle(appPalette.secondaryText).lineLimit(1).truncationMode(.middle)
+                        .font(.system(size: 12)).foregroundStyle(appPalette.secondaryText).lineLimit(1).truncationMode(.middle)
                 }
             }
             .help(model.selectedPath ?? "选择文件查看差异")
@@ -101,14 +105,25 @@ public struct DiffView: View {
             if !isDocumentSelection {
                 Menu {
                     Toggle("忽略空白", isOn: $ignoresWhitespace)
+                    Toggle("显示差异元信息", isOn: $showsDiffMetadata)
                 } label: { Image(systemName: "ellipsis") }
                     .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
                     .help("差异显示选项")
             }
         }
         HStack(spacing: 8) {
-            Text(comparisonLabel).font(.system(size: 11)).foregroundStyle(appPalette.secondaryText)
+            Text(comparisonLabel).font(.system(size: 12)).foregroundStyle(appPalette.secondaryText)
                 .lineLimit(1).truncationMode(.middle)
+            if model.filePreview == nil, preparedSource != nil, preparedSource == model.patch?.text,
+               addedLineCount + removedLineCount > 0 {
+                HStack(spacing: 10) {
+                    Text("+\(addedLineCount)").foregroundStyle(appPalette.added)
+                    Text("−\(removedLineCount)").foregroundStyle(appPalette.removed)
+                }
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .fixedSize()
+                .accessibilityLabel("当前差异新增 \(addedLineCount) 行，删除 \(removedLineCount) 行")
+            }
             Spacer(minLength: 4)
             if model.isUntrackedFilePreview {
                 Label("未跟踪", systemImage: "questionmark.circle")
@@ -125,11 +140,11 @@ public struct DiffView: View {
             if model.filePreview == nil && !isDocumentSelection {
                 WorkbenchSegmentedPicker(title: "差异布局", selection: $presentation,
                     options: [.init(.sideBySide, "并排"), .init(.unified, "统一")], palette: appPalette, compact: true)
-                    .frame(width: 112)
+                    .frame(width: 120)
             }
         }
         }
-        .padding(.horizontal, 14).padding(.vertical, 10)
+        .padding(.horizontal, 20).padding(.vertical, 18)
     }
 
     private var comparisonLabel: String {
@@ -156,6 +171,8 @@ public struct DiffView: View {
             preparedSource = nil
             preparedPath = nil
             isPreparingDiff = false
+            addedLineCount = 0
+            removedLineCount = 0
             return
         }
         let source = patch.text
@@ -167,6 +184,21 @@ public struct DiffView: View {
             let prepared = try await PreparedDiffCache.shared.prepare(source, path: path)
             guard !Task.isCancelled, model.patch?.text == source, model.selectedPath == path else { return }
             preparedDiff = prepared
+            if case .unified(let diff) = prepared.content {
+                var added = 0
+                var removed = 0
+                for row in diff.rows {
+                    if case let .paired(old, new) = row {
+                        if old?.kind == .removed { removed += 1 }
+                        if new?.kind == .added { added += 1 }
+                    }
+                }
+                addedLineCount = added
+                removedLineCount = removed
+            } else {
+                addedLineCount = 0
+                removedLineCount = 0
+            }
             preparedSource = source
             preparedPath = path
             isPreparingDiff = false
@@ -261,13 +293,17 @@ private struct SideBySideDiff: View {
     let presentation: DiffPresentation
     let palette: CodePalette
     let ignoresWhitespace: Bool
+    let showsMetadata: Bool
     let focusLine: Int?
     let focusToken: UUID?
     @State private var page = 0
 
     private static let rowsPerPage = 300
     private var visibleRows: [PreparedDiffRow] {
-        ignoresWhitespace ? diff.rows.filter { !$0.isWhitespaceOnlyChange } : diff.rows
+        diff.rows.filter { row in
+            if !showsMetadata, case .metadata(_, let isHunk) = row, !isHunk { return false }
+            return !ignoresWhitespace || !row.isWhitespaceOnlyChange
+        }
     }
     private var pageCount: Int { max(1, (visibleRows.count + Self.rowsPerPage - 1) / Self.rowsPerPage) }
     private var displayedPage: Int { min(page, pageCount - 1) }
@@ -464,7 +500,7 @@ private struct SideBySideDiff: View {
             .font(.system(size: 12, design: .monospaced)).foregroundStyle(isHunk ? palette.type : palette.secondary)
             .lineLimit(1).fixedSize(horizontal: true, vertical: false)
             .padding(.horizontal, 14).frame(maxWidth: .infinity, minHeight: 24, maxHeight: 24, alignment: .leading)
-            .background(isHunk ? palette.selection.opacity(0.46) : palette.background)
+            .background { Rectangle().fill(isHunk ? palette.selection.opacity(0.46) : palette.background) }
     }
 
     @ViewBuilder private func unifiedRow(old: PreparedDiffLine?, new: PreparedDiffLine?) -> some View {
@@ -493,7 +529,9 @@ private struct SideBySideDiff: View {
             Spacer(minLength: 12)
         }
         .font(.system(size: 13, design: .monospaced)).frame(height: 24)
-        .background(focusLine != nil && focusLine == line?.number ? palette.selection.opacity(palette.isDark ? 0.46 : 0.58) : background(for: kind))
+        .background {
+            Rectangle().fill(focusLine != nil && focusLine == line?.number ? palette.selection.opacity(palette.isDark ? 0.46 : 0.58) : background(for: kind))
+        }
     }
 
     private func unifiedCodeCell(_ line: PreparedDiffLine?, oldNumber: Int?, newNumber: Int?) -> some View {
@@ -511,11 +549,11 @@ private struct SideBySideDiff: View {
         }
         .font(.system(size: 13, design: .monospaced))
         .frame(height: 24)
-        .background(
-            isFocused(oldNumber: oldNumber, newNumber: newNumber)
+        .background {
+            Rectangle().fill(isFocused(oldNumber: oldNumber, newNumber: newNumber)
                 ? palette.selection.opacity(palette.isDark ? 0.46 : 0.58)
-                : background(for: kind)
-        )
+                : background(for: kind))
+        }
     }
 
     private func isFocused(oldNumber: Int?, newNumber: Int?) -> Bool {
@@ -621,7 +659,7 @@ struct HighlightedPatchPreview: View {
                 switch prepared.content {
                 case .unified(let diff):
                     SideBySideDiff(diff: diff, presentation: .unified, palette: palette,
-                                   ignoresWhitespace: false, focusLine: nil, focusToken: nil)
+                                   ignoresWhitespace: false, showsMetadata: false, focusLine: nil, focusToken: nil)
                         .id(identity.text)
                 case .binary(let message), .unsupported(let message):
                     ScrollView { Text(message).font(.caption).textSelection(.enabled).padding(12) }

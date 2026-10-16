@@ -107,6 +107,7 @@
 
 ## 3. 正式视觉来源
 
+- 最新确认（2026-10-16）：[暖灰工作区](design/soft-surfaces-2026-10-16/workspace.png)、[历史阅读台](design/soft-surfaces-2026-10-16/history.png)、[SVN 分步检出](design/soft-surfaces-2026-10-16/svn-checkout.png)。暖灰背景、柔和白色区域和 12–16 点圆角通过留白分区；主按钮及分段选中采用中性色，业务状态保留独立强调色。原生 SF Symbols 与系统字体实现图稿中的图标和文字，生成图中的示意数据不得写入业务界面。
 - [工作区原始设计稿](design/workspace-reference.png)
 - [历史原始设计稿](design/history-reference.png)
 

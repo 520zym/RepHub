@@ -27,7 +27,7 @@ public enum AppTheme: String, CaseIterable, Identifiable, Codable {
 
     public var title: String {
         switch self {
-        case .jade: "温润翡翠"
+        case .jade: "暖灰 · 翡翠"
         case .graphite: "石墨灰"
         }
     }
@@ -61,6 +61,12 @@ public struct AppPalette {
     public let selection: Color
     public let added: Color
     public let removed: Color
+
+    /// 操作层级与业务状态分离：主操作使用中性色，强调色留给仓库和状态。
+    public var primaryFill: Color { text }
+    public var primaryText: Color { surface }
+    public var controlBackground: Color { text.opacity(0.045) }
+    public var neutralSelection: Color { text.opacity(0.085) }
 
     public init(background: Color, surface: Color, sidebar: Color, text: Color, secondaryText: Color, border: Color, accent: Color, selection: Color, added: Color, removed: Color) {
         self.background = background
@@ -173,25 +179,25 @@ public final class AppearanceStore {
 
 private extension AppearanceStore {
     static let jadeLight = AppPalette(
-        background: Color(red: 0.965, green: 0.973, blue: 0.956),
-        surface: .white,
-        sidebar: Color(red: 0.942, green: 0.963, blue: 0.944),
-        text: Color(red: 0.075, green: 0.130, blue: 0.125),
-        secondaryText: Color(red: 0.365, green: 0.435, blue: 0.420),
-        border: Color(red: 0.824, green: 0.866, blue: 0.838),
-        accent: Color(red: 0.000, green: 0.485, blue: 0.350),
-        selection: Color(red: 0.852, green: 0.945, blue: 0.901),
+        background: Color(red: 0.945, green: 0.945, blue: 0.937),
+        surface: Color(red: 0.992, green: 0.992, blue: 0.988),
+        sidebar: Color(red: 0.973, green: 0.973, blue: 0.965),
+        text: Color(red: 0.145, green: 0.153, blue: 0.145),
+        secondaryText: Color(red: 0.420, green: 0.443, blue: 0.431),
+        border: Color(red: 0.880, green: 0.884, blue: 0.873),
+        accent: Color(red: 0.137, green: 0.490, blue: 0.380),
+        selection: Color(red: 0.894, green: 0.937, blue: 0.914),
         added: Color(red: 0.000, green: 0.530, blue: 0.315),
         removed: Color(red: 0.805, green: 0.265, blue: 0.285)
     )
 
     static let jadeDark = AppPalette(
-        background: Color(red: 0.055, green: 0.086, blue: 0.078),
-        surface: Color(red: 0.085, green: 0.125, blue: 0.114),
-        sidebar: Color(red: 0.070, green: 0.110, blue: 0.098),
-        text: Color(red: 0.905, green: 0.944, blue: 0.919),
-        secondaryText: Color(red: 0.620, green: 0.704, blue: 0.667),
-        border: Color(red: 0.185, green: 0.260, blue: 0.235),
+        background: Color(red: 0.110, green: 0.118, blue: 0.114),
+        surface: Color(red: 0.157, green: 0.169, blue: 0.161),
+        sidebar: Color(red: 0.137, green: 0.149, blue: 0.141),
+        text: Color(red: 0.925, green: 0.937, blue: 0.918),
+        secondaryText: Color(red: 0.655, green: 0.686, blue: 0.663),
+        border: Color(red: 0.230, green: 0.250, blue: 0.235),
         accent: Color(red: 0.290, green: 0.790, blue: 0.575),
         selection: Color(red: 0.105, green: 0.285, blue: 0.220),
         added: Color(red: 0.285, green: 0.820, blue: 0.520),
@@ -225,10 +231,10 @@ private extension AppearanceStore {
     )
 
     static let codeLight = CodePalette(
-        background: Color(red: 0.990, green: 0.993, blue: 0.988),
-        foreground: Color(red: 0.095, green: 0.145, blue: 0.180),
-        secondary: Color(red: 0.380, green: 0.450, blue: 0.490),
-        lineNumber: Color(red: 0.510, green: 0.570, blue: 0.610),
+        background: Color(red: 0.998, green: 0.998, blue: 0.996),
+        foreground: Color(red: 0.145, green: 0.160, blue: 0.180),
+        secondary: Color(red: 0.420, green: 0.455, blue: 0.490),
+        lineNumber: Color(red: 0.465, green: 0.500, blue: 0.540),
         keyword: Color(red: 0.620, green: 0.155, blue: 0.840),
         string: Color(red: 0.650, green: 0.320, blue: 0.120),
         comment: Color(red: 0.420, green: 0.520, blue: 0.510),

@@ -177,36 +177,36 @@ public struct WorkspaceView: View {
     }
 
     private func workingCopy(size: CGSize, palette: AppPalette) -> some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 12) {
             if !currentConflicts.isEmpty { conflictBanner(palette: palette) }
             workingCopyEditor(palette: palette)
         }
-        .padding(10)
+        .padding(14)
         .frame(width: size.width, height: size.height, alignment: .topLeading)
     }
 
     private func workingCopyEditor(palette: AppPalette) -> some View {
-        SoftHorizontalSplit(initialWidth: 280, minimumFixed: 120, flexibleMinimum: 360,
-            storageKey: "workspace.current.files") {
+        SoftHorizontalSplit(initialWidth: 340, minimumFixed: 200, flexibleMinimum: 430,
+            storageKey: "workspace.soft-v3.files") {
             WorkspaceFileTreeView(model: model, palette: palette, showsBindingPicker: true,
                                   selectedChangePaths: selectedChangePaths)
-                .clipShape(RoundedRectangle(cornerRadius: 9))
-                .padding(.trailing, 5)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .padding(.trailing, 6)
         } trailing: {
             if showsCommitInspector {
-                SoftHorizontalSplit(fixedSide: .trailing, initialWidth: 292, minimumFixed: 170, flexibleMinimum: 280,
-                                    storageKey: "workspace.current.commit") {
-                    workingDiff.padding(.horizontal, 5)
+                SoftHorizontalSplit(fixedSide: .trailing, initialWidth: 340, minimumFixed: 260, flexibleMinimum: 390,
+                                    storageKey: "workspace.soft-v3.commit") {
+                    workingDiff.padding(.horizontal, 6)
                 } trailing: {
                     WorkspaceCommitInspector(palette: palette, bindings: commitBindings,
                         message: unifiedCommitMessage, targets: Binding(get: { effectiveCommitTargets }, set: { commitTargets = $0 }), selectedCount: selectedCommitCount,
                         blockedReason: commitBlockedReason, aiAvailable: model.repositoryCommit.ai != nil,
                         isLocked: model.isWorkspaceMutationLocked, collapse: { showsCommitInspector = false },
                         prepare: { prepareSelectedCommit() }, prepareAI: { prepareSelectedCommit(withAI: true) })
-                        .clipShape(RoundedRectangle(cornerRadius: 9)).padding(.leading, 5)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous)).padding(.leading, 6)
                 }
             } else {
-                workingDiff.padding(.leading, 5)
+                workingDiff.padding(.leading, 6)
             }
         }
     }
@@ -214,7 +214,7 @@ public struct WorkspaceView: View {
     private var workingDiff: some View {
         DiffView(model: model, appearance: appearance, focusLine: model.diffFocusLine, focusToken: model.diffFocusToken)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .clipShape(RoundedRectangle(cornerRadius: 9))
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
     private func conflictBanner(palette: AppPalette) -> some View {
@@ -230,7 +230,7 @@ public struct WorkspaceView: View {
                 .disabled(model.isWorkspaceMutationLocked)
         }
         .padding(.horizontal, 16).padding(.vertical, 10)
-        .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
+        .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     @ToolbarContentBuilder private func toolbar(palette: AppPalette) -> some ToolbarContent {
@@ -359,7 +359,7 @@ public struct WorkspaceView: View {
                 .disabled(model.workspace?.bindings.contains(where: { model.supports(.fetch, for: $0) || model.supports(.update, for: $0) }) != true || model.isWorkspaceMutationLocked)
                 .help("获取远端或更新一个版本控制来源")
                 if model.selectedBinding?.capabilities.contains(.push) == true {
-                    Button(action: model.prepareManagement) { Label("推送", systemImage: "arrow.up.to.line") }
+                    Button(action: model.prepareManagement) { Label("推送", systemImage: "arrow.up.to.line").labelStyle(.titleAndIcon) }
                         .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
                         .disabled(model.isWorkspaceMutationLocked)
                         .help("查看远端与目标分支，确认后推送")

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import DesignSystem
 import VersionControlCore
@@ -15,29 +16,46 @@ struct RepositoryAcquisitionView: View {
     var openInNewWindow: ((URL) -> Void)? = nil
 
     @State private var source: Source = .local
+    @State private var remoteDirectoryFilter = ""
 
     private enum Source: Hashable { case local, remote }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            WorkbenchSegmentedPicker(
-                title: "打开方式",
-                selection: $source,
-                options: [.init(.local, "本地文件夹"), .init(.remote, "远程仓库")],
-                palette: palette
-            )
-            .disabled(model.isAcquiring)
-            .padding(.horizontal, 22).padding(.top, 4).padding(.bottom, 14)
+            modePicker
             if source == .local { localContent } else { remoteContent }
         }
-        .frame(width: 720)
+        .frame(width: sheetWidth, height: sheetHeight)
         .background(palette.background)
         .foregroundStyle(palette.text)
         .onAppear { model.prepare() }
         .onDisappear { model.endSession() }
         .onChange(of: source) { _, _ in model.hidePassword() }
         .interactiveDismissDisabled(model.isBusy)
+    }
+
+    private var modePicker: some View {
+        WorkbenchSegmentedPicker(
+            title: "打开方式",
+            selection: $source,
+            options: [.init(.local, "本地文件夹"), .init(.remote, "远程仓库")],
+            palette: palette
+        )
+        .disabled(model.isAcquiring)
+        .frame(maxWidth: 390)
+        .padding(.horizontal, 26).padding(.top, 13).padding(.bottom, 12)
+    }
+
+    /// sheet 首次呈现按可用屏幕宽度确定，避免 SwiftUI 只取最小尺寸而压缩三栏浏览页。
+    private var sheetWidth: CGFloat {
+        let availableWidth = (NSApp.keyWindow?.screen ?? NSScreen.main)?.visibleFrame.width ?? 1_260
+        return min(1_180, max(640, availableWidth - 80))
+    }
+
+    private var sheetHeight: CGFloat {
+        let availableHeight = (NSApp.keyWindow?.screen ?? NSScreen.main)?.visibleFrame.height ?? 820
+        return min(760, max(560, availableHeight - 110))
     }
 
     private var header: some View {
@@ -48,7 +66,7 @@ struct RepositoryAcquisitionView: View {
                 .frame(width: 31, height: 31)
                 .background(palette.selection.opacity(0.65), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
             VStack(alignment: .leading, spacing: 2) {
-                Text("打开仓库").font(.system(size: 15, weight: .semibold))
+                Text("打开仓库").font(.system(size: 18, weight: .semibold))
                 Text(source == .local ? "识别已有 Git 或 SVN 工作副本" : remoteSubtitle)
                     .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
             }
@@ -59,17 +77,17 @@ struct RepositoryAcquisitionView: View {
                     .accessibilityLabel("关闭打开仓库窗口")
             }
         }
-        .padding(.horizontal, 22).padding(.vertical, 18)
+        .padding(.horizontal, 26).padding(.vertical, 18)
         .background(palette.surface)
     }
 
     private var localContent: some View {
-        VStack(alignment: .leading, spacing: 15) {
+        VStack(alignment: .leading, spacing: 18) {
             Text("选择已经存在的本地文件夹。RepHub 会自动识别 Git、SVN，或两者同时存在的工作副本。")
                 .font(.system(size: 12)).foregroundStyle(palette.secondaryText)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(14)
-                .background(palette.sidebar.opacity(0.58), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .padding(16)
+                .background(palette.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             HStack {
                 Spacer()
                 Button("选择本地文件夹…") {
@@ -86,27 +104,30 @@ struct RepositoryAcquisitionView: View {
                     .disabled(model.isBusy)
             }
         }
-        .padding(22).frame(minHeight: 205, alignment: .topLeading)
+        .padding(.horizontal, 26).padding(.bottom, 26)
+        .frame(minHeight: 300, maxHeight: .infinity, alignment: .topLeading)
     }
 
     @ViewBuilder private var remoteContent: some View {
         if model.isAcquiring || model.transferHasFinished {
             transferPage
         } else {
-            VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 0) {
                 wizardProgress
-                Group {
-                    switch model.wizardStep {
-                    case .connection: connectionPage
-                    case .browse: browsePage
-                    case .destination: destinationPage
-                    case .review: reviewPage
+                VStack(spacing: 0) {
+                    Group {
+                        switch model.wizardStep {
+                        case .connection: connectionPage
+                        case .browse: browsePage
+                        case .destination: destinationPage
+                        case .review: reviewPage
+                        }
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    wizardFooter
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                wizardFooter
             }
-            .frame(height: 500)
+            .frame(maxHeight: .infinity)
         }
     }
 
@@ -125,25 +146,62 @@ struct RepositoryAcquisitionView: View {
         let steps: [RepositoryAcquisitionModel.WizardStep] = model.usesBrowseStep
             ? [.connection, .browse, .destination, .review]
             : [.connection, .destination, .review]
-        return HStack(spacing: 7) {
-            ForEach(steps, id: \.self) { step in
-                let complete = step.rawValue <= model.wizardStep.rawValue
-                HStack(spacing: 5) {
-                    Image(systemName: complete ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 12, weight: .medium))
-                    Text(step.title).font(.system(size: 11, weight: step == model.wizardStep ? .semibold : .regular))
+        return VStack(alignment: .leading, spacing: 5) {
+            Text("远程获取")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(palette.text)
+                .padding(.bottom, 13)
+            ForEach(Array(steps.enumerated()), id: \.element) { index, step in
+                let isComplete = step.rawValue < model.wizardStep.rawValue
+                let isCurrent = step == model.wizardStep
+                HStack(spacing: 10) {
+                    ZStack {
+                        Circle().fill(isCurrent ? palette.text : (isComplete ? palette.accent : palette.secondaryText.opacity(0.11)))
+                        if isComplete {
+                            Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)).foregroundStyle(palette.surface)
+                        } else {
+                            Text("\(index + 1)").font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(isCurrent ? palette.surface : palette.secondaryText)
+                        }
+                    }
+                    .frame(width: 28, height: 28)
+                    Text(step.title).font(.system(size: 14, weight: isCurrent ? .semibold : .regular))
                 }
-                .foregroundStyle(complete ? palette.accent : palette.secondaryText)
-                if step != steps.last { Spacer(minLength: 3) }
+                .foregroundStyle(isCurrent ? palette.surface : palette.secondaryText)
+                .padding(.horizontal, 9).frame(height: 42)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(isCurrent ? palette.text : .clear, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+            }
+            Spacer(minLength: 18)
+            connectionStatusCard
+        }
+        .padding(18)
+        .frame(width: 184, alignment: .topLeading)
+        .background(palette.background)
+    }
+
+    private var connectionStatusCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("当前连接").font(.system(size: 10, weight: .medium)).foregroundStyle(palette.secondaryText)
+            Text(model.remoteURL.isEmpty ? "尚未连接" : model.remoteURL)
+                .font(.system(size: 10, design: .monospaced)).lineLimit(2).truncationMode(.middle)
+                .foregroundStyle(palette.secondaryText)
+            if model.rootListingURL != nil {
+                Label("已连接并读取目录", systemImage: "checkmark.circle.fill")
+                    .font(.system(size: 10, weight: .medium)).foregroundStyle(palette.accent)
+            } else if !model.remoteURL.isEmpty {
+                Label("等待连接", systemImage: "circle.dotted")
+                    .font(.system(size: 10, weight: .medium)).foregroundStyle(palette.secondaryText)
             }
         }
-        .padding(.horizontal, 22).padding(.vertical, 12)
-        .background(palette.sidebar.opacity(0.45))
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(palette.surface.opacity(0.74), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
     }
 
     private var connectionPage: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 20) {
                 pageHeading("连接远程仓库", detail: "可选择最近使用的远程地址；SVN 账号会按服务器自动填入。")
                 if model.isLoadingOptions {
                     HStack(spacing: 8) { ProgressView().controlSize(.small); Text("正在准备版本控制方式…") }
@@ -162,7 +220,8 @@ struct RepositoryAcquisitionView: View {
                 if let notice = model.historyNotice { note(notice) }
                 wizardError
             }
-            .padding(22)
+            .padding(26)
+            .frame(maxWidth: 720, alignment: .leading)
         }
     }
 
@@ -247,7 +306,7 @@ struct RepositoryAcquisitionView: View {
 
     private var browsePage: some View {
         VStack(alignment: .leading, spacing: 15) {
-            pageHeading("选择 SVN 目录", detail: "展开文件夹继续浏览；点文件夹名称选择检出目标，箭头只负责展开或收起。")
+            pageHeading("浏览远程仓库", detail: "展开文件夹继续浏览；点文件夹名称选择检出目标，箭头只负责展开或收起。")
             HStack(spacing: 9) {
                 Text(model.remoteURL.removingPercentEncoding ?? model.remoteURL)
                     .font(.system(size: 11, design: .monospaced)).foregroundStyle(palette.secondaryText)
@@ -261,26 +320,96 @@ struct RepositoryAcquisitionView: View {
                     .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary, compact: true))
                     .disabled(model.isBrowsing)
             }
-            if let rootURL = model.rootListingURL, let listing = model.listings[rootURL] {
-                RemoteDirectoryTree(listing: listing, listings: model.listings, expandedURLs: model.expandedURLs,
-                                    selectedURL: model.selectedRemoteURL, palette: palette,
-                                    toggle: model.toggleDirectory, toggleRoot: model.toggleRootDirectory, select: model.selectDirectory)
-                    .frame(maxHeight: .infinity, alignment: .topLeading)
-                    .background(palette.sidebar.opacity(0.52), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            } else {
-                VStack(spacing: 10) {
-                    if model.isBrowsing { ProgressView().controlSize(.small); Text("正在读取仓库目录…") }
-                    else { Image(systemName: "folder.badge.questionmark").font(.system(size: 24)); Text("尚未读取远程目录") }
+            WorkbenchSearchField("筛选已读取的目录或文件", text: $remoteDirectoryFilter, palette: palette)
+            GeometryReader { proxy in
+                let showsSummary = proxy.size.width >= 600
+                HStack(alignment: .top, spacing: 16) {
+                    directoryBrowser
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    if showsSummary { selectedDirectorySummary }
                 }
-                .font(.system(size: 12)).foregroundStyle(palette.secondaryText)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(palette.sidebar.opacity(0.42), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
-            if let selected = model.selectedRemoteURL { note("将检出：\(selected.removingPercentEncoding ?? selected)") }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             if let notice = model.historyNotice { note(notice) }
             wizardError
         }
-        .padding(22)
+        .padding(26)
+    }
+
+    @ViewBuilder private var directoryBrowser: some View {
+        if let rootURL = model.rootListingURL, let listing = model.listings[rootURL] {
+            RemoteDirectoryTree(listing: listing, listings: model.listings, expandedURLs: model.expandedURLs,
+                                selectedURL: model.selectedRemoteURL, palette: palette,
+                                filter: remoteDirectoryFilter, toggle: model.toggleDirectory,
+                                toggleRoot: model.toggleRootDirectory, select: model.selectDirectory)
+                .background(palette.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        } else {
+            VStack(spacing: 10) {
+                if model.isBrowsing { ProgressView().controlSize(.small); Text("正在读取仓库目录…") }
+                else { Image(systemName: "folder.badge.questionmark").font(.system(size: 24)); Text("尚未读取远程目录") }
+            }
+            .font(.system(size: 12)).foregroundStyle(palette.secondaryText)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(palette.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+    }
+
+    private var selectedDirectorySummary: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("将检出的目录").font(.system(size: 13, weight: .semibold))
+            Image(systemName: model.selectedRemoteURL == nil ? "folder.badge.questionmark" : "folder.fill")
+                .font(.system(size: 32, weight: .medium)).foregroundStyle(model.selectedRemoteURL == nil ? palette.secondaryText : palette.accent)
+            Text(selectedRemoteDisplayName)
+                .font(.system(size: 18, weight: .semibold)).lineLimit(2).truncationMode(.middle)
+            Text(selectedSourceSummary ?? "从列表中选择一个文件夹")
+                .font(.system(size: 11, design: .monospaced)).foregroundStyle(palette.secondaryText)
+                .lineLimit(3).truncationMode(.middle).textSelection(.enabled)
+            VStack(alignment: .leading, spacing: 9) {
+                summaryMetadataRow("版本", value: selectedRemoteEntry?.latestRevision.map { "r\($0)" } ?? "—")
+                summaryMetadataRow("提交人", value: selectedRemoteAuthor)
+                summaryMetadataRow("提交时间", value: selectedRemoteEntry?.latestDate.map { $0.formatted(date: .long, time: .shortened) } ?? "—")
+            }
+            .padding(.top, 2)
+            Spacer()
+            Label(model.selectedRemoteURL == nil ? "尚未选择检出范围" : "仅检出此目录及其内容", systemImage: model.selectedRemoteURL == nil ? "info.circle" : "checkmark.circle.fill")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(model.selectedRemoteURL == nil ? palette.secondaryText : palette.accent)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background((model.selectedRemoteURL == nil ? palette.sidebar : palette.selection).opacity(0.7), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        }
+        .padding(18)
+        .frame(width: 245)
+        .frame(maxHeight: .infinity, alignment: .topLeading)
+        .background(palette.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private var selectedRemoteDisplayName: String {
+        guard let source = selectedSourceSummary, !source.isEmpty else { return "尚未选择目录" }
+        return URL(string: source)?.lastPathComponent.isEmpty == false ? (URL(string: source)?.lastPathComponent ?? source) : source
+    }
+
+    /// 只复用浏览树已读取的数据；根节点和未读取的节点没有条目元数据，按缺失展示。
+    private var selectedRemoteEntry: RemoteDirectoryEntry? {
+        guard let selectedURL = model.selectedRemoteURL else { return nil }
+        return model.listings.values.lazy
+            .flatMap { $0.entries }
+            .first { $0.url == selectedURL }
+    }
+
+    private var selectedRemoteAuthor: String {
+        guard let author = selectedRemoteEntry?.latestAuthor, !author.isEmpty else { return "—" }
+        return author
+    }
+
+    private func summaryMetadataRow(_ title: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(title).font(.system(size: 10, weight: .medium)).foregroundStyle(palette.secondaryText)
+                .frame(width: 48, alignment: .leading)
+            Text(value).font(.system(size: 11, design: .monospaced)).foregroundStyle(palette.text)
+                .lineLimit(1).truncationMode(.tail)
+        }
     }
 
     private var destinationPage: some View {
@@ -291,7 +420,7 @@ struct RepositoryAcquisitionView: View {
             wizardError
             Spacer()
         }
-        .padding(22)
+        .padding(26)
     }
 
     private var reviewPage: some View {
@@ -310,7 +439,7 @@ struct RepositoryAcquisitionView: View {
             wizardError
             Spacer()
         }
-        .padding(22)
+        .padding(26)
     }
 
     private var sourceSummary: some View {
@@ -340,7 +469,7 @@ struct RepositoryAcquisitionView: View {
                     .disabled(model.isLoadingSavedCredentials)
             }
         }
-        .padding(.horizontal, 22).padding(.vertical, 16).background(palette.surface)
+        .padding(.horizontal, 26).padding(.vertical, 16).background(palette.surface)
     }
 
     private var transferPage: some View {
@@ -360,11 +489,11 @@ struct RepositoryAcquisitionView: View {
                     if let notice = model.historyNotice { note(notice) }
                     transferOutcome
                 }
-                .padding(.horizontal, 22).padding(.top, 22).padding(.bottom, 12)
+                .padding(.horizontal, 26).padding(.top, 26).padding(.bottom, 14)
             }
             transferControls
         }
-        .frame(height: 500, alignment: .topLeading)
+        .frame(maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var transferTitle: String {
@@ -399,7 +528,7 @@ struct RepositoryAcquisitionView: View {
             }
             Spacer()
         }
-        .padding(.horizontal, 22).padding(.vertical, 14)
+        .padding(.horizontal, 26).padding(.vertical, 16)
         .background(palette.surface)
     }
 
@@ -411,8 +540,8 @@ struct RepositoryAcquisitionView: View {
                     .font(.system(size: 12)).lineLimit(1).truncationMode(.middle)
                     .foregroundStyle(model.destinationParent == nil ? palette.secondaryText : palette.text)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 10).frame(height: 30)
-                    .background(palette.secondaryText.opacity(0.05), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .padding(.horizontal, 12).frame(height: 34)
+                    .background(palette.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 Button("选择…", action: model.chooseDestinationParent)
                     .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary, compact: true))
                     .disabled(model.isBusy)
@@ -431,22 +560,22 @@ struct RepositoryAcquisitionView: View {
     @ViewBuilder private var wizardError: some View {
         if let message = model.errorMessage {
             Text(message).font(.system(size: 11)).foregroundStyle(palette.secondaryText)
-                .padding(11).frame(maxWidth: .infinity, alignment: .leading)
-                .background(palette.selection.opacity(0.5), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                .background(palette.selection.opacity(0.56), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
         }
     }
 
     private func pageHeading(_ title: String, detail: String) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(title).font(.system(size: 17, weight: .semibold))
+            Text(title).font(.system(size: 24, weight: .semibold))
             Text(detail).font(.system(size: 12)).foregroundStyle(palette.secondaryText).fixedSize(horizontal: false, vertical: true)
         }
     }
 
     private func note(_ text: String) -> some View {
         Text(text).font(.system(size: 11)).foregroundStyle(palette.secondaryText)
-            .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-            .background(palette.sidebar.opacity(0.48), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .padding(13).frame(maxWidth: .infinity, alignment: .leading)
+            .background(palette.surface.opacity(0.82), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private func reviewRow(_ name: String, value: String) -> some View {
@@ -470,8 +599,8 @@ struct RepositoryAcquisitionView: View {
             if !details.isEmpty { Text(details).font(.system(size: 11)).foregroundStyle(palette.secondaryText).fixedSize(horizontal: false, vertical: true) }
             if let partial { Text("保留位置：\(partial.path)").font(.system(size: 11, design: .monospaced)).foregroundStyle(palette.secondaryText).textSelection(.enabled) }
         }
-        .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-        .background(palette.sidebar.opacity(0.62), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .padding(14).frame(maxWidth: .infinity, alignment: .leading)
+        .background(palette.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private func isSuccessful(_ outcome: RepositoryOperationOutcome) -> Bool {
@@ -506,8 +635,8 @@ struct RepositoryAcquisitionView: View {
     private func field<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(palette.secondaryText)
-            content().padding(.horizontal, 10).frame(height: 30)
-                .background(palette.secondaryText.opacity(0.05), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            content().padding(.horizontal, 12).frame(height: 34)
+                .background(palette.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
     }
 
@@ -517,8 +646,8 @@ struct RepositoryAcquisitionView: View {
                 .lineLimit(1).frame(width: 62, alignment: .leading)
             TextField(title, text: text).textFieldStyle(.plain)
         }
-        .padding(.horizontal, 10).frame(height: 30)
-        .background(palette.secondaryText.opacity(0.05), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .padding(.horizontal, 12).frame(height: 34)
+        .background(palette.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
 
@@ -528,47 +657,95 @@ private struct RemoteDirectoryTree: View {
     let expandedURLs: Set<String>
     let selectedURL: String?
     let palette: AppPalette
+    let filter: String
     let toggle: (RemoteDirectoryEntry) -> Void
     let toggleRoot: () -> Void
     let select: (String) -> Void
 
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 1) {
-                directoryRow(name: listing.url, url: listing.url, depth: 0, isRoot: true)
-                if expandedURLs.contains(listing.url) {
-                    RemoteDirectoryChildren(
-                        entries: listing.entries, listings: listings, expandedURLs: expandedURLs,
-                        selectedURL: selectedURL, palette: palette, toggle: toggle, select: select, depth: 1
-                    )
+        VStack(spacing: 0) {
+            directoryColumnHeader
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    directoryRow(name: listing.url, url: listing.url, depth: 0, isRoot: true)
+                    if expandedURLs.contains(listing.url) || !filter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        RemoteDirectoryChildren(
+                            entries: listing.entries, listings: listings, expandedURLs: expandedURLs,
+                            selectedURL: selectedURL, palette: palette, filter: filter,
+                            toggle: toggle, select: select, depth: 1
+                        )
+                    }
                 }
+                .padding(8)
             }
-            .padding(6)
         }
+    }
+
+    private var directoryColumnHeader: some View {
+        HStack(spacing: 0) {
+            Text("目录名称").frame(maxWidth: .infinity, alignment: .leading)
+            Text("最近修订").frame(width: RemoteDirectoryColumns.revision, alignment: .leading)
+            Text("提交人").frame(width: RemoteDirectoryColumns.author, alignment: .leading)
+            Text("更新时间").frame(width: RemoteDirectoryColumns.date, alignment: .leading)
+        }
+        .font(.system(size: 12, weight: .medium)).foregroundStyle(palette.secondaryText)
+        .padding(.horizontal, 18).frame(height: 38)
+        .background(palette.background.opacity(0.72))
     }
 
     private func directoryRow(name: String, url: String, depth: Int, isRoot: Bool, entry: RemoteDirectoryEntry? = nil) -> some View {
         let selected = selectedURL == url
-        return HStack(spacing: 4) {
+        return HStack(spacing: 0) {
             Button { if let entry { toggle(entry) } else { toggleRoot() } } label: {
                 Image(systemName: expandedURLs.contains(url) ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 9, weight: .semibold)).frame(width: 14, height: 22)
+                    .font(.system(size: 9, weight: .semibold)).frame(width: 18, height: 42)
             }
             .buttonStyle(.plain)
             .accessibilityLabel(expandedURLs.contains(url) ? "收起根目录" : "展开根目录")
             Button { select(url) } label: {
-                HStack(spacing: 7) {
+                HStack(spacing: 8) {
                     Image(systemName: "folder").foregroundStyle(palette.accent).frame(width: 14)
                     Text(isRoot ? "仓库根目录" : name).lineLimit(1).truncationMode(.middle)
                 }
-                .font(.system(size: 11, weight: selected ? .semibold : .regular))
-                .frame(maxWidth: .infinity, alignment: .leading).frame(height: 24)
+                .font(.system(size: 14, weight: selected ? .semibold : .regular))
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(.plain)
+            metadataColumns(for: entry)
         }
-        .padding(.leading, CGFloat(depth) * 16)
-        .padding(.trailing, 7)
-        .background(selected ? palette.selection.opacity(0.7) : .clear, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .padding(.leading, CGFloat(depth) * 18 + 6).padding(.trailing, 12).frame(height: 44)
+        .background(selected ? palette.selection.opacity(0.74) : .clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private func metadataColumns(for entry: RemoteDirectoryEntry?) -> some View {
+        Group {
+            metadataValue(entry?.latestRevision.map { "r\($0)" }).frame(width: RemoteDirectoryColumns.revision, alignment: .leading)
+            metadataValue(entry?.latestAuthor).frame(width: RemoteDirectoryColumns.author, alignment: .leading)
+            metadataValue(entry?.latestDate.map(RemoteDirectoryColumns.numericDate)).frame(width: RemoteDirectoryColumns.date, alignment: .leading)
+        }
+    }
+
+    private func metadataValue(_ value: String?) -> some View {
+        Text(value?.isEmpty == false ? value! : "—")
+            .font(.system(size: 12, design: .monospaced)).foregroundStyle(palette.secondaryText)
+            .lineLimit(1).truncationMode(.tail)
+    }
+}
+
+private enum RemoteDirectoryColumns {
+    static let revision: CGFloat = 78
+    static let author: CGFloat = 112
+    static let date: CGFloat = 150
+
+    static func numericDate(_ date: Date) -> String {
+        date.formatted(
+            .dateTime
+                .year()
+                .month(.twoDigits)
+                .day(.twoDigits)
+                .hour(.twoDigits(amPM: .omitted))
+                .minute(.twoDigits)
+        )
     }
 }
 
@@ -578,76 +755,88 @@ private struct RemoteDirectoryChildren: View {
     let expandedURLs: Set<String>
     let selectedURL: String?
     let palette: AppPalette
+    let filter: String
     let toggle: (RemoteDirectoryEntry) -> Void
     let select: (String) -> Void
     let depth: Int
 
     var body: some View {
-        ForEach(entries) { entry in
+        ForEach(entries.filter(isVisible)) { entry in
             row(entry)
-            if entry.isDirectory, expandedURLs.contains(entry.url), let child = listings[entry.url] {
+            if entry.isDirectory, displaysChildren(of: entry), let child = listings[entry.url] {
                 RemoteDirectoryChildren(
                     entries: child.entries, listings: listings, expandedURLs: expandedURLs,
-                    selectedURL: selectedURL, palette: palette, toggle: toggle, select: select, depth: depth + 1
+                    selectedURL: selectedURL, palette: palette, filter: filter,
+                    toggle: toggle, select: select, depth: depth + 1
                 )
             }
         }
     }
 
+    private var normalizedFilter: String {
+        filter.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func isVisible(_ entry: RemoteDirectoryEntry) -> Bool {
+        guard !normalizedFilter.isEmpty else { return true }
+        if entry.name.localizedCaseInsensitiveContains(normalizedFilter) { return true }
+        guard entry.isDirectory, let children = listings[entry.url]?.entries else { return false }
+        return children.contains(where: isVisible)
+    }
+
+    private func displaysChildren(of entry: RemoteDirectoryEntry) -> Bool {
+        expandedURLs.contains(entry.url) || (!normalizedFilter.isEmpty && isVisible(entry))
+    }
+
     @ViewBuilder private func row(_ entry: RemoteDirectoryEntry) -> some View {
         if entry.isDirectory {
             let selected = selectedURL == entry.url
-            HStack(spacing: 4) {
+            HStack(spacing: 0) {
                 Button { toggle(entry) } label: {
                     Image(systemName: expandedURLs.contains(entry.url) ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .semibold)).frame(width: 14, height: 22)
+                        .font(.system(size: 9, weight: .semibold)).frame(width: 18, height: 42)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("\(expandedURLs.contains(entry.url) ? "收起" : "展开") \(entry.name)")
                 Button { select(entry.url) } label: {
-                    HStack(spacing: 7) {
+                    HStack(spacing: 8) {
                         Image(systemName: "folder").foregroundStyle(palette.accent).frame(width: 14)
                         Text(entry.name).lineLimit(1).truncationMode(.middle)
-                    Spacer(minLength: 6)
-                    remoteMetadata(for: entry)
                     }
-                    .font(.system(size: 11, weight: selected ? .semibold : .regular))
-                    .frame(maxWidth: .infinity, alignment: .leading).frame(height: 24)
+                    .font(.system(size: 14, weight: selected ? .semibold : .regular))
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .buttonStyle(.plain)
+                metadataColumns(for: entry)
             }
-            .padding(.leading, CGFloat(depth) * 16).padding(.trailing, 7)
-            .background(selected ? palette.selection.opacity(0.7) : .clear, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+            .padding(.leading, CGFloat(depth) * 18 + 6).padding(.trailing, 12).frame(height: 44)
+            .background(selected ? palette.selection.opacity(0.74) : .clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         } else {
-            HStack(spacing: 7) {
-                Image(systemName: "doc").foregroundStyle(palette.secondaryText).frame(width: 14)
-                Text(entry.name).lineLimit(1).truncationMode(.middle)
-                Spacer(minLength: 6)
-                remoteMetadata(for: entry)
+            HStack(spacing: 0) {
+                Color.clear.frame(width: 18)
+                HStack(spacing: 8) {
+                    Image(systemName: "doc").foregroundStyle(palette.secondaryText).frame(width: 14)
+                    Text(entry.name).lineLimit(1).truncationMode(.middle)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                metadataColumns(for: entry)
             }
-            .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
-            .padding(.leading, CGFloat(depth) * 16 + 7).padding(.trailing, 7).frame(height: 24)
+            .font(.system(size: 14)).foregroundStyle(palette.secondaryText)
+            .padding(.leading, CGFloat(depth) * 18 + 6).padding(.trailing, 12).frame(height: 44)
         }
     }
 
-    @ViewBuilder private func remoteMetadata(for entry: RemoteDirectoryEntry) -> some View {
-        if entry.latestRevision != nil || entry.latestDate != nil {
-            HStack(spacing: 5) {
-                if let revision = entry.latestRevision { Text("r\(revision)") }
-                if let date = entry.latestDate { Text(date.formatted(date: .abbreviated, time: .shortened)) }
-            }
-            .font(.system(size: 9, design: .monospaced))
-            .foregroundStyle(palette.secondaryText)
-            .lineLimit(1)
-            .help(metadataHelp(for: entry))
+    private func metadataColumns(for entry: RemoteDirectoryEntry) -> some View {
+        Group {
+            metadataValue(entry.latestRevision.map { "r\($0)" }).frame(width: RemoteDirectoryColumns.revision, alignment: .leading)
+            metadataValue(entry.latestAuthor).frame(width: RemoteDirectoryColumns.author, alignment: .leading)
+            metadataValue(entry.latestDate.map(RemoteDirectoryColumns.numericDate)).frame(width: RemoteDirectoryColumns.date, alignment: .leading)
         }
     }
 
-    private func metadataHelp(for entry: RemoteDirectoryEntry) -> String {
-        var parts: [String] = []
-        if let revision = entry.latestRevision { parts.append("修订 r\(revision)") }
-        if let date = entry.latestDate { parts.append(date.formatted(date: .long, time: .shortened)) }
-        if let author = entry.latestAuthor, !author.isEmpty { parts.append(author) }
-        return parts.joined(separator: " · ")
+    private func metadataValue(_ value: String?) -> some View {
+        Text(value?.isEmpty == false ? value! : "—")
+            .font(.system(size: 12, design: .monospaced)).foregroundStyle(palette.secondaryText)
+            .lineLimit(1).truncationMode(.tail)
     }
 }

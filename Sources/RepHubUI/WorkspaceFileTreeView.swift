@@ -28,6 +28,10 @@ struct WorkspaceFileTreeView: View {
 
     private var conflictedChanges: [FileChange] { changes.filter { $0.kind == .conflicted } }
     private var ordinaryChanges: [FileChange] { changes.filter { $0.kind != .conflicted } }
+    private var selectableChanges: [FileChange] { (model.snapshot?.changes ?? []).filter { $0.kind != .conflicted } }
+    private var selectedChangeCount: Int {
+        selectedChangePaths.intersection(Set(selectableChanges.map(\.path))).count
+    }
 
     private var changesByPath: [String: FileChange] {
         Dictionary((model.snapshot?.changes ?? []).map { ($0.path, $0) }, uniquingKeysWith: { _, latest in latest })
@@ -45,11 +49,11 @@ struct WorkspaceFileTreeView: View {
             header
             if showsBindingPicker, let bindings = model.workspace?.bindings, bindings.count > 1 { bindingPicker(bindings) }
             WorkbenchSearchField(browser.mode == .files ? "筛选已读取的文件…" : "筛选变更文件…", text: $browser.filter, palette: palette)
-                .padding(.horizontal, 10).padding(.bottom, 8)
+                .padding(.horizontal, 18).padding(.bottom, 10)
             if browser.mode == .files, !browser.filter.isEmpty {
                 Text("仅搜索已展开并读取的目录")
                     .font(.system(size: 10)).foregroundStyle(palette.secondaryText)
-                    .padding(.horizontal, 12).padding(.bottom, 6)
+                    .padding(.horizontal, 18).padding(.bottom, 7)
             }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
@@ -61,35 +65,64 @@ struct WorkspaceFileTreeView: View {
             if let issue = browser.mode == .files ? browser.issue(in: "") : model.snapshot?.issues.first {
                 ErrorStrip(message: issue, palette: palette)
             }
+            if browser.mode == .changes {
+                HStack {
+                    Text("已选 \(selectedChangeCount) / \(selectableChanges.count)")
+                    Spacer(minLength: 0)
+                    if !conflictedChanges.isEmpty {
+                        Text("\(conflictedChanges.count) 个冲突")
+                            .foregroundStyle(palette.removed)
+                    }
+                }
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(palette.secondaryText)
+                .padding(.horizontal, 18)
+                .frame(height: 42)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(palette.sidebar)
+        .background(palette.surface)
         .onAppear(perform: rebuildChangeRows)
         .onChange(of: changeInputKey) { _, _ in rebuildChangeRows() }
         .onChange(of: model.treeState.workingCollapsed) { _, _ in rebuildChangeRows() }
     }
 
     private var header: some View {
-        HStack(spacing: 8) {
-            WorkbenchSegmentedPicker(title: "文件范围", selection: $browser.mode,
-                                     options: [.init(.files, "全部文件"), .init(.changes, "变更")], palette: palette)
-                .frame(width: 155)
-            Spacer(minLength: 0)
-            if browser.mode == .files {
-                Menu {
-                    Button("展开已读取的目录", action: browser.expandLoadedDirectories)
-                    Button("全部收起", action: browser.collapseAll)
-                } label: {
-                    Image(systemName: "ellipsis.circle").font(.system(size: 13))
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("工作区")
+                    .font(.system(size: 24, weight: .semibold))
+                Spacer(minLength: 0)
+                if browser.mode == .changes {
+                    if conflictedChanges.isEmpty {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(palette.accent)
+                    }
+                    Text("\(model.snapshot?.changes.count ?? 0) 项变更")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(palette.secondaryText)
                 }
-                .menuStyle(.borderlessButton)
-                .help("仅展开已读取的目录，不扫描整个工作区")
-            } else {
-                Text("\(model.snapshot?.changes.count ?? 0)")
-                    .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
+            }
+            HStack(spacing: 8) {
+                WorkbenchSegmentedPicker(title: "文件范围", selection: $browser.mode,
+                                         options: [.init(.changes, "变更"), .init(.files, "全部文件")], palette: palette)
+                    .frame(maxWidth: .infinity)
+                if browser.mode == .files {
+                    Menu {
+                        Button("展开已读取的目录", action: browser.expandLoadedDirectories)
+                        Button("全部收起", action: browser.collapseAll)
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 13, weight: .semibold))
+                            .frame(width: 30, height: 30)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .help("仅展开已读取的目录，不扫描整个工作区")
+                }
             }
         }
-        .padding(.horizontal, 12).frame(height: 43)
+        .padding(.horizontal, 18).padding(.top, 18).padding(.bottom, 12)
     }
 
     private func bindingPicker(_ bindings: [RepositoryBinding]) -> some View {
@@ -128,7 +161,7 @@ struct WorkspaceFileTreeView: View {
             Spacer(minLength: 0)
             if browser.isLoading("") { ProgressView().controlSize(.mini) }
         }
-        .font(.system(size: 13)).padding(.horizontal, 12).frame(height: 30)
+        .font(.system(size: 14, weight: .medium)).padding(.horizontal, 16).frame(height: 34)
     }
 
     private func matchingLoadedRows() -> [WorkspaceFileBrowserRow] {
@@ -157,11 +190,11 @@ struct WorkspaceFileTreeView: View {
                 changeBadge(change)
             }
         }
-        .font(.system(size: 12))
-        .padding(.leading, 9 + CGFloat(min(row.depth, 5)) * 13).padding(.trailing, 9)
-        .frame(maxWidth: .infinity, minHeight: 29, alignment: .leading)
+        .font(.system(size: 14))
+        .padding(.leading, 12 + CGFloat(min(row.depth, 5)) * 14).padding(.trailing, 12)
+        .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
         .contentShape(Rectangle())
-        .background(entry.path == model.selectedPath ? palette.selection : .clear, in: RoundedRectangle(cornerRadius: 6))
+        .background(entry.path == model.selectedPath ? palette.selection : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .onTapGesture {
             if entry.isDirectory {
                 browser.toggleDirectory(entry)
@@ -223,7 +256,7 @@ struct WorkspaceFileTreeView: View {
             Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
             Image(systemName: "folder.fill").foregroundStyle(palette.accent)
             Text(model.selectedBinding?.root.lastPathComponent ?? model.workspace?.name ?? "工作区").fontWeight(.medium)
-        }.font(.system(size: 13)).padding(.horizontal, 12).frame(height: 30)
+        }.font(.system(size: 13, weight: .medium)).padding(.horizontal, 16).frame(height: 34)
         if !conflictedChanges.isEmpty {
             changeGroupHeader(title: "冲突", count: conflictedChanges.count, systemImage: "exclamationmark.triangle.fill", tint: palette.removed)
             changeRows(cachedConflictRows)
@@ -249,7 +282,7 @@ struct WorkspaceFileTreeView: View {
             Spacer(minLength: 0)
         }
         .font(.system(size: 12))
-        .padding(.horizontal, 12).padding(.top, 10).padding(.bottom, 4)
+        .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 6)
     }
 
     private func changeRows(_ rows: [WorkspaceChangeRow]) -> some View {
@@ -268,9 +301,9 @@ struct WorkspaceFileTreeView: View {
                     changeBadge(change)
                 }
             }
-            .font(.system(size: 12)).padding(.leading, 9 + CGFloat(min(row.depth, 5)) * 13).padding(.trailing, 9)
-            .frame(maxWidth: .infinity, minHeight: 29, alignment: .leading).contentShape(Rectangle())
-            .background(row.change.map { $0.path == model.selectedPath } == true ? palette.selection : .clear, in: RoundedRectangle(cornerRadius: 6))
+            .font(.system(size: 14)).padding(.leading, 12 + CGFloat(min(row.depth, 5)) * 14).padding(.trailing, 12)
+            .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading).contentShape(Rectangle())
+            .background(row.change.map { $0.path == model.selectedPath } == true ? palette.selection : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             .onTapGesture {
                 if row.isDirectory {
                     if model.treeState.workingCollapsed.contains(row.id) { model.treeState.workingCollapsed.remove(row.id) }

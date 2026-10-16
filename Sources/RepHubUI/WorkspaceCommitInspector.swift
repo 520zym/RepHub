@@ -20,21 +20,23 @@ struct WorkspaceCommitInspector: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("准备提交").font(.system(size: 18, weight: .semibold))
+                Text("准备提交").font(.system(size: 22, weight: .semibold))
                 Spacer(minLength: 4)
                 Button(action: collapse) { Image(systemName: "sidebar.right") }
                     .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
                     .accessibilityLabel("收起提交区")
             }
-            .padding(.bottom, 8)
-            Text("已选 \(selectedCount) 项变更").font(.system(size: 13)).foregroundStyle(palette.secondaryText)
-                .padding(.bottom, 14)
+            .padding(.bottom, 6)
+            Text("\(selectedCount) 个文件已选择")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(palette.secondaryText)
+                .padding(.bottom, 18)
 
             messageSection
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 20) {
+                    VStack(alignment: .leading, spacing: 11) {
                         if bindings.count == 1, let binding = bindings.first {
                             Text("提交到 \(binding.providerID == .svn ? "SVN" : binding.providerName)")
                                 .font(.system(size: 13, weight: .semibold))
@@ -54,7 +56,7 @@ struct WorkspaceCommitInspector: View {
                         Text(targetDescription).font(.system(size: 12)).foregroundStyle(palette.secondaryText)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    .padding(.top, 12)
+                    .padding(.top, 14)
 
                     VStack(alignment: .leading, spacing: 8) {
                         Text("提交范围").font(.system(size: 13, weight: .semibold))
@@ -68,9 +70,9 @@ struct WorkspaceCommitInspector: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             VStack(spacing: 9) {
                 Button(action: prepare) {
-                    Text("提交 \(selectedCount) 项变更…")
+                    Text("检查并提交 \(selectedCount) 项变更…")
                         .font(.system(size: 14, weight: .semibold))
-                        .frame(maxWidth: .infinity).frame(height: 14)
+                        .frame(maxWidth: .infinity, minHeight: 40)
                 }
                 .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
                 .disabled(!canPrepare)
@@ -79,18 +81,18 @@ struct WorkspaceCommitInspector: View {
                     .font(.system(size: 11)).foregroundStyle(blockedReason == nil ? palette.secondaryText : .orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(.top, 12)
+            .padding(.top, 16)
         }
-        .padding(18)
+        .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(palette.sidebar)
+        .background(palette.surface)
         .disabled(isLocked)
     }
 
     private var canPrepare: Bool { !isLocked && blockedReason == nil && !targets.isEmpty && selectedCount > 0 }
 
     private var messageSection: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: 9) {
             HStack {
                 Text("提交说明").font(.system(size: 13, weight: .semibold))
                 Spacer()
@@ -99,7 +101,7 @@ struct WorkspaceCommitInspector: View {
                 } label: {
                     Label(expandsMessageEditor ? "收起" : "展开", systemImage: expandsMessageEditor ? "arrow.up.left.and.arrow.down.right" : "arrow.down.right.and.arrow.up.left")
                 }
-                .font(.system(size: 11))
+                .font(.system(size: 11, weight: .medium))
                 .buttonStyle(.plain)
                 .foregroundStyle(palette.secondaryText)
                 .help(expandsMessageEditor ? "恢复提交说明的默认高度" : "为提交说明提供更多编辑空间")
@@ -114,7 +116,7 @@ struct WorkspaceCommitInspector: View {
                 text: $message,
                 palette: palette,
                 placeholder: "描述这次修改…",
-                height: expandsMessageEditor ? 250 : 156,
+                height: expandsMessageEditor ? 310 : 224,
                 isEnabled: !isLocked,
                 help: bindings.count > 1
                     ? "在这里编辑会更新所有提交目标的说明；可在确认窗口分别修改。支持多行和内部滚动。"

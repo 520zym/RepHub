@@ -14,8 +14,8 @@ struct CommitMessageEditor: View {
     var body: some View {
         ZStack(alignment: .topLeading) {
             TextEditor(text: $text)
-                .font(.system(size: 13))
-                .lineSpacing(4)
+                .font(.system(size: 14))
+                .lineSpacing(5)
                 .scrollContentBackground(.hidden)
                 .padding(.horizontal, 7)
                 .padding(.vertical, 6)
@@ -25,7 +25,7 @@ struct CommitMessageEditor: View {
 
             if text.isEmpty {
                 Text(placeholder)
-                    .font(.system(size: 13))
+                    .font(.system(size: 14))
                     .foregroundStyle(palette.secondaryText)
                     .padding(.horizontal, 12)
                     .padding(.top, 14)
@@ -34,6 +34,6 @@ struct CommitMessageEditor: View {
         }
         .frame(maxWidth: .infinity)
         .frame(height: height)
-        .background(palette.sidebar.opacity(0.50), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .background(palette.controlBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }

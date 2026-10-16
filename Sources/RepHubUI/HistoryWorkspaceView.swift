@@ -25,11 +25,14 @@ struct HistoryWorkspaceView: View {
                     palette: palette,
                     clear: model.clearFileHistory
                 )
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .padding(.horizontal, 12)
+                .padding(.top, 12)
             }
             historyContent(palette: palette)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(palette.sidebar)
+        .background(palette.background)
         .onAppear {
             if showAsMainView { model.setHistoryVisible(true) }
         }
@@ -50,15 +53,18 @@ struct HistoryWorkspaceView: View {
 
     @ViewBuilder
     private func historyContent(palette: AppPalette) -> some View {
-        // 历史页面的主线是“选提交 → 看摘要及文件 → 阅读差异”。
-        // 分支树在左上按需展开，不能像仓库导航一样常驻并挤压提交列表。
+        // 历史页面保持三段明确的阅读节奏：提交列表、提交概览、代码差异。
+        // 区域之间以暖灰留白区分，不依赖分割线。
         SoftHorizontalSplit(
-            initialWidth: showAsMainView ? 430 : 360,
-            minimumFixed: 220,
-            flexibleMinimum: showAsMainView ? 420 : 280,
-            storageKey: showAsMainView ? "history.reader.revisions" : "history.compact.revisions"
+            initialWidth: showAsMainView ? 404 : 350,
+            minimumFixed: 280,
+            flexibleMinimum: showAsMainView ? 500 : 320,
+            storageKey: showAsMainView ? "history.reader.revisions.soft-v2" : "history.compact.revisions.soft-v2"
         ) {
             revisionTable(palette: palette)
+                .background(palette.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .padding(.trailing, 6)
         } trailing: {
             HistoryReaderPane(
                 model: model,
@@ -67,7 +73,9 @@ struct HistoryWorkspaceView: View {
                 isFileHistory: isFileHistory,
                 showAsMainView: showAsMainView
             )
+            .padding(.leading, 6)
         }
+        .padding(12)
         .background(palette.background)
     }
 
@@ -174,9 +182,9 @@ private struct HistoryFileHistoryScopeBar: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 14)
-        .frame(height: 56)
-        .background(palette.selection.opacity(0.42))
+        .padding(.horizontal, 18)
+        .frame(height: 58)
+        .background(palette.surface)
         .help(path)
     }
 
@@ -199,13 +207,12 @@ private struct HistoryReaderPane: View {
     var body: some View {
         SoftVerticalSplit(
             fixedSide: .top,
-            // 摘要与文件树都属于“阅读提交”的上下文，不应为了给差异让位而压成一条。
-            // 使用新 key，避免旧版本保存的窄高度继续影响新布局。
-            initialHeight: isFileHistory ? 180 : 456,
-            minimumFixed: isFileHistory ? 132 : 188,
+            // 摘要和文件树在宽窗口内横向并列；使用新 key，避免旧布局的高度继续影响新界面。
+            initialHeight: isFileHistory ? 188 : 344,
+            minimumFixed: isFileHistory ? 132 : 216,
             flexibleMinimum: 220,
             storageKey: (showAsMainView ? "history.reader.summary" : "history.compact.summary")
-                + (isFileHistory ? ".file.v2" : ".repository.v2")
+                + (isFileHistory ? ".file.soft-v2" : ".repository.soft-v2")
         ) {
             HistoryRevisionInspector(
                 model: model,
@@ -213,6 +220,8 @@ private struct HistoryReaderPane: View {
                 isCompact: false,
                 showsChangedFiles: $showsChangedFiles
             )
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .padding(.bottom, 6)
         } bottom: {
             DiffView(
                 model: model,
@@ -220,7 +229,9 @@ private struct HistoryReaderPane: View {
                 focusLine: model.diffFocusLine,
                 focusToken: model.diffFocusToken
             )
-            .background(palette.background)
+            .background(palette.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .padding(.top, 6)
         }
         .id(isFileHistory)
     }
@@ -466,7 +477,11 @@ private struct HistoryRevisionTable: View {
             let compactMetadata = proxy.size.width < 360
             let rowHeight: CGFloat = compactMetadata ? 94 : 78
             VStack(spacing: 0) {
-                VStack(spacing: 7) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("提交历史")
+                        .font(.system(size: 24, weight: .semibold))
+                        .tracking(-0.35)
+                        .padding(.top, 3)
                     HStack(spacing: 8) {
                         bindingSource
                         if supportsBranches {
@@ -507,7 +522,8 @@ private struct HistoryRevisionTable: View {
                         filterControl
                     }
                 }
-                .padding(.horizontal, 14).padding(.vertical, 9).background(palette.surface)
+                .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 12)
+                .background(palette.surface)
                 if supportsBranches, isBranchNavigatorExpanded {
                     HistoryBranchSidebar(
                         snapshot: snapshot,
@@ -524,8 +540,8 @@ private struct HistoryRevisionTable: View {
                     .frame(maxWidth: .infinity)
                     .frame(height: 228)
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .padding(.horizontal, 10)
-                    .padding(.bottom, 8)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 10)
                     .transition(.opacity.combined(with: .move(edge: .top)))
                 }
                 if let syncStatus {
@@ -567,7 +583,7 @@ private struct HistoryRevisionTable: View {
                                 VStack(alignment: .leading, spacing: 8) {
                                     HStack(spacing: 6) {
                                         Text(revision.subject)
-                                            .font(.system(size: 13, weight: .semibold))
+                                            .font(.system(size: 14, weight: .semibold))
                                             .lineSpacing(3)
                                             .lineLimit(2)
                                             .help(revision.subject)
@@ -583,7 +599,7 @@ private struct HistoryRevisionTable: View {
                             .frame(height: rowHeight, alignment: .center)
                             .tag(Optional(revision.id))
                             .contentShape(Rectangle())
-                            .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 12))
+                            .listRowInsets(EdgeInsets(top: 0, leading: 14, bottom: 0, trailing: 14))
                             .listRowSeparator(.hidden)
                             .listRowBackground(Color.clear)
                             .contextMenu {
@@ -605,7 +621,7 @@ private struct HistoryRevisionTable: View {
                     }
                     .listStyle(.plain)
                     .scrollContentBackground(.hidden)
-                    .background(palette.sidebar)
+                    .background(palette.surface)
                 }
                 paginationFooter
             }
@@ -613,7 +629,7 @@ private struct HistoryRevisionTable: View {
             .animation(.easeInOut(duration: 0.18), value: isBranchNavigatorExpanded)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(palette.sidebar)
+        .background(palette.surface)
         .task(id: supportsGraph && drawsGraphConnections ? revisions : []) {
             guard supportsGraph, drawsGraphConnections else { graphRows = []; graphSource = []; return }
             let source = revisions
@@ -654,8 +670,8 @@ private struct HistoryRevisionTable: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(palette.secondaryText)
-        .padding(.horizontal, 14)
-        .background(palette.sidebar.opacity(0.55))
+        .padding(.horizontal, 16)
+        .background(palette.background.opacity(0.52))
     }
 
     private func revisionMetadata(_ revision: Revision, compact: Bool) -> some View {
@@ -673,7 +689,7 @@ private struct HistoryRevisionTable: View {
                 Text(revision.date.formatted(date: .numeric, time: .shortened)).lineLimit(1)
             }
         }
-        .font(.system(size: 11))
+        .font(.system(size: 12))
         .foregroundStyle(palette.secondaryText)
         .help("\(revision.author) · \(revision.date.formatted()) · \(revision.id)")
     }
@@ -709,8 +725,8 @@ private struct HistoryRevisionTable: View {
                 }
             }
         }
-        .padding(.horizontal, 12).padding(.vertical, 5)
-        .background(palette.sidebar.opacity(0.4))
+        .padding(.horizontal, 16).padding(.vertical, 10)
+        .background(palette.background.opacity(0.5))
     }
 
     private var hasActiveFilter: Bool {
@@ -752,9 +768,9 @@ private struct HistoryRevisionTable: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 14)
-        .frame(height: 27)
-        .background(palette.sidebar.opacity(0.55))
+        .padding(.horizontal, 16)
+        .frame(height: 32)
+        .background(palette.background.opacity(0.54))
         .help(status.detail.isEmpty ? status.summary : "\(status.summary)\n\(status.detail)")
     }
 
@@ -856,36 +872,42 @@ private struct HistoryRevisionInspector: View {
     var body: some View {
         GeometryReader { geometry in
             let contentHeight = max(1, geometry.size.height - (isCompact ? 20 : 28))
-            inspectorContent(summaryMaximumHeight: contentHeight * (model.historyFilePath == nil ? 0.65 : 1))
+            // 宽窗口让说明与文件树同层，提交内容和文件范围一眼可见；
+            // 窄窗口则恢复上下阅读，避免把文件名和说明压成窄列。
+            let usesSideBySideLayout = !isCompact && model.historyFilePath == nil && geometry.size.width >= 760
+            inspectorContent(
+                summaryMaximumHeight: contentHeight * (usesSideBySideLayout || model.historyFilePath != nil ? 1 : 0.65),
+                usesSideBySideLayout: usesSideBySideLayout
+            )
         }
-        .background(palette.sidebar.opacity(0.45))
-        .background(palette.surface)
+        .background(palette.background)
         .task(id: revisionTreeSignature) { rebuildRevisionTree() }
         .onChange(of: "\(model.selectedBindingID ?? "")|\(model.selectedRevisionID ?? "")") { _, _ in
             messageDetailsExpanded = false
         }
     }
 
-    private func inspectorContent(summaryMaximumHeight: CGFloat) -> some View {
+    @ViewBuilder
+    private func inspectorContent(summaryMaximumHeight: CGFloat, usesSideBySideLayout: Bool) -> some View {
         VStack(alignment: .leading, spacing: isCompact ? 7 : 10) {
             if !issues.isEmpty {
                 HistoryIssueNotice(message: issues.joined(separator: "\n"), palette: palette, isExpanded: $issueDetailsExpanded)
             }
             if let revision = selectedRevision {
-                // 普通说明按内容自然排版；超长说明或较矮分栏才滚动整个摘要，
-                // 不再把正文嵌入只有几行高的第二层滚动框。
-                ViewThatFits(in: .vertical) {
-                    revisionSummary(revision).fixedSize(horizontal: false, vertical: true)
-                    ScrollView {
-                        revisionSummary(revision).fixedSize(horizontal: false, vertical: true)
+                if usesSideBySideLayout {
+                    HStack(alignment: .top, spacing: 12) {
+                        summarySection(revision, maximumHeight: summaryMaximumHeight, fillsAvailableHeight: true)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                            .background(palette.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        changedFilesSection
+                            .frame(maxWidth: 420)
                     }
-                    .scrollBounceBehavior(.basedOnSize)
-                    .clipShape(RoundedRectangle(cornerRadius: isCompact ? 10 : 14, style: .continuous))
-                }
-                .frame(height: min(summaryContentHeight, summaryMaximumHeight), alignment: .topLeading)
-                .layoutPriority(1)
-                if model.historyFilePath == nil {
-                    changedFilesSection
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                } else {
+                    summarySection(revision, maximumHeight: summaryMaximumHeight)
+                    if model.historyFilePath == nil {
+                        changedFilesSection
+                    }
                 }
             } else {
                 ContentUnavailableView("选择一个提交", systemImage: "arrowshape.turn.up.right")
@@ -893,44 +915,55 @@ private struct HistoryRevisionInspector: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(isCompact ? 10 : 14)
+        // 外层只提供暖灰底；白色卡片自身处理内边距，避免顶部比左栏低一层。
+        .padding(.horizontal, isCompact ? 10 : 0)
+        .padding(.vertical, isCompact ? 10 : 0)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    @ViewBuilder
+    private func summarySection(_ revision: Revision, maximumHeight: CGFloat, fillsAvailableHeight: Bool = false) -> some View {
+        // 说明区单独滚动，底部操作始终可见，长说明不会挤掉文件树或操作按钮。
+        // 给窄窗的两行操作留出完整高度，避免操作按钮被长说明或窄卡片裁掉。
+        let footerHeight: CGFloat = 68
+        let totalHeight = fillsAvailableHeight
+            ? maximumHeight
+            : min(summaryContentHeight + footerHeight, maximumHeight)
+        let readableHeight = max(1, totalHeight - footerHeight)
+        VStack(spacing: 0) {
+            ViewThatFits(in: .vertical) {
+                revisionSummary(revision).fixedSize(horizontal: false, vertical: true)
+                ScrollView {
+                    revisionSummary(revision).fixedSize(horizontal: false, vertical: true)
+                }
+                .scrollBounceBehavior(.basedOnSize)
+            }
+            .frame(height: readableHeight, alignment: .topLeading)
+            summaryFooter(revision)
+                .frame(minHeight: footerHeight)
+        }
+        .frame(height: totalHeight, alignment: .topLeading)
+        .layoutPriority(1)
+        .background(palette.surface, in: RoundedRectangle(cornerRadius: isCompact ? 10 : 14, style: .continuous))
     }
 
     @ViewBuilder
     private func revisionSummary(_ revision: Revision) -> some View {
         VStack(alignment: .leading, spacing: isCompact ? 6 : 9) {
-            HStack(alignment: .top, spacing: 12) {
-                Text(revision.subject)
-                    .font(.system(size: 18, weight: .semibold))
-                    .lineLimit(isCompact ? 2 : 3)
-                    .layoutPriority(1)
-                Spacer(minLength: 0)
-                revisionActions(revision)
-            }
+            Text(revision.subject)
+                .font(.system(size: 20, weight: .semibold))
+                .lineLimit(isCompact ? 2 : 3)
+                .layoutPriority(1)
             referenceLabels(revision.references)
             revisionMetadata(revision)
             if !messageBody.isEmpty {
                 VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        Text("提交说明")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(palette.secondaryText)
-                        Spacer(minLength: 8)
-                        Button {
-                            messageDetailsExpanded.toggle()
-                        } label: {
-                            Label(messageDetailsExpanded ? "收起" : "展开全文",
-                                  systemImage: messageDetailsExpanded ? "chevron.up" : "chevron.down")
-                                .font(.system(size: 11, weight: .medium))
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(palette.accent)
-                        .accessibilityLabel(messageDetailsExpanded ? "收起提交说明" : "展开完整提交说明")
-                    }
+                    Text("提交说明")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(palette.secondaryText)
                     Text(messageBody)
-                        .font(.system(size: 13))
-                        .lineSpacing(5)
+                        .font(.system(size: 14))
+                        .lineSpacing(5.5)
                         .lineLimit(messageDetailsExpanded ? nil : 2)
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
@@ -941,8 +974,54 @@ private struct HistoryRevisionInspector: View {
         }
         .padding(isCompact ? 10 : 14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(palette.background.opacity(0.68), in: RoundedRectangle(cornerRadius: isCompact ? 10 : 14, style: .continuous))
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { summaryContentHeight = $0 }
+    }
+
+    @ViewBuilder
+    private func summaryFooter(_ revision: Revision) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 6) {
+                messageVisibilityAction
+                copyMessageAction(revision)
+                Spacer(minLength: 4)
+                revisionActions(revision)
+            }
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 6) {
+                    messageVisibilityAction
+                    copyMessageAction(revision)
+                }
+                revisionActions(revision)
+            }
+        }
+        .padding(.horizontal, isCompact ? 10 : 14)
+        .padding(.bottom, isCompact ? 8 : 10)
+    }
+
+    @ViewBuilder
+    private var messageVisibilityAction: some View {
+        if !messageBody.isEmpty {
+            Button {
+                messageDetailsExpanded.toggle()
+            } label: {
+                Label(messageDetailsExpanded ? "收起" : "展开全文",
+                      systemImage: messageDetailsExpanded ? "chevron.up" : "chevron.down")
+            }
+            .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
+            .accessibilityLabel(messageDetailsExpanded ? "收起提交说明" : "展开完整提交说明")
+        }
+    }
+
+    private func copyMessageAction(_ revision: Revision) -> some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(revision.message, forType: .string)
+        } label: {
+            Label("复制说明", systemImage: "doc.on.doc")
+        }
+        .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
+        .accessibilityLabel("复制完整提交说明")
+        .help("复制完整提交说明")
     }
 
     @ViewBuilder
@@ -951,9 +1030,9 @@ private struct HistoryRevisionInspector: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("变更的文件")
-                        .font(.subheadline.weight(.semibold))
+                        .font(.system(size: 14, weight: .semibold))
                     Text("共 \(model.revisionFiles.count) 项")
-                        .font(.system(size: 11))
+                        .font(.system(size: 12))
                         .foregroundStyle(palette.secondaryText)
                 }
                 Spacer()
@@ -982,7 +1061,7 @@ private struct HistoryRevisionInspector: View {
         }
         .padding(isCompact ? 9 : 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(palette.sidebar.opacity(0.72), in: RoundedRectangle(cornerRadius: isCompact ? 10 : 14, style: .continuous))
+        .background(palette.surface, in: RoundedRectangle(cornerRadius: isCompact ? 10 : 14, style: .continuous))
     }
 
     private var selectedRevision: Revision? {
@@ -1196,9 +1275,9 @@ private struct RevisionFileTreeNodeView: View {
                     statusMark(for: node.payload).frame(width: 20, alignment: .center)
                 }
             }
-            .font(.system(size: 12))
+            .font(.system(size: 14))
             .padding(.leading, 8 + CGFloat(depth) * 13).padding(.trailing, 8)
-            .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+            .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
             .background(isSelected(node) ? palette.selection : .clear, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
         .buttonStyle(.plain)

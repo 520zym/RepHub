@@ -25,7 +25,7 @@ public struct WorkbenchButtonStyle: ButtonStyle {
             configuration: configuration,
             palette: palette,
             role: role,
-            height: compact ? 26 : 30
+            height: compact ? 28 : 34
         )
     }
 }
@@ -40,32 +40,31 @@ private struct WorkbenchButtonBody: View {
 
     private var foreground: Color {
         guard isEnabled else { return palette.secondaryText.opacity(0.72) }
-        return role == .primary ? palette.surface : palette.text
+        return role == .primary ? palette.primaryText : palette.text
     }
 
     private var fill: Color {
         guard isEnabled else { return role == .quiet ? .clear : palette.sidebar.opacity(0.72) }
         switch role {
         case .quiet:
-            return configuration.isPressed ? palette.selection.opacity(0.85) : (isHovering ? palette.sidebar.opacity(0.62) : .clear)
+            return configuration.isPressed ? palette.neutralSelection : (isHovering ? palette.controlBackground : .clear)
         case .secondary:
-            if configuration.isPressed { return palette.selection.opacity(0.92) }
-            return isHovering ? palette.sidebar.opacity(0.96) : palette.background.opacity(0.80)
+            return configuration.isPressed || isHovering ? palette.neutralSelection : palette.controlBackground
         case .primary:
-            return configuration.isPressed ? palette.accent.opacity(0.80) : palette.accent
+            return palette.primaryFill.opacity(configuration.isPressed ? 0.80 : (isHovering ? 0.90 : 1))
         }
     }
 
     var body: some View {
         configuration.label
-            .font(.system(size: 12, weight: .medium))
+            .font(.system(size: 13, weight: .medium))
             .foregroundStyle(foreground)
             .lineLimit(1)
             .padding(.horizontal, 12)
             .frame(minHeight: height)
-            .background(fill, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .background(fill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             .opacity(configuration.isPressed ? 0.94 : 1)
-            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .onHover { isHovering = $0 }
     }
 }
@@ -113,13 +112,13 @@ public struct WorkbenchSegmentedPicker<Value: Hashable>: View {
                     selection = option.value
                 } label: {
                     Text(option.title)
-                        .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
-                        .foregroundStyle(isSelected ? palette.accent : palette.secondaryText)
+                        .font(.system(size: compact ? 12 : 13, weight: isSelected ? .semibold : .medium))
+                        .foregroundStyle(isSelected ? palette.primaryText : palette.secondaryText)
                         .frame(maxWidth: .infinity)
-                        .frame(height: compact ? 22 : 26)
+                        .frame(height: compact ? 24 : 28)
                         .background {
-                            RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                .fill(isSelected ? palette.selection : .clear)
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(isSelected ? palette.primaryFill : .clear)
                         }
                 }
                 .buttonStyle(.plain)
@@ -128,8 +127,8 @@ public struct WorkbenchSegmentedPicker<Value: Hashable>: View {
             }
         }
         .padding(2)
-        .frame(height: compact ? 26 : 30)
-        .background(palette.secondaryText.opacity(0.06), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .frame(height: compact ? 28 : 32)
+        .background(palette.controlBackground, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
         .accessibilityElement(children: .contain)
         .accessibilityLabel(title)
         .accessibilityValue(options.first(where: { $0.value == selection })?.title ?? "")
@@ -162,21 +161,18 @@ public struct WorkbenchSearchField: View {
     public var body: some View {
         HStack(spacing: 7) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(palette.secondaryText)
                 .accessibilityHidden(true)
             TextField(placeholder, text: $text)
                 .textFieldStyle(.plain)
-                .font(.system(size: 12))
+                .font(.system(size: 13))
                 .focused($isFocused)
         }
-        .padding(.horizontal, 10)
-        .frame(height: 30)
-        .background(palette.secondaryText.opacity(0.05), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .stroke(isFocused ? palette.accent.opacity(0.85) : .clear, lineWidth: 1)
-        }
+        .padding(.horizontal, 12)
+        .frame(height: 34)
+        .background(isFocused ? palette.selection.opacity(0.65) : palette.controlBackground,
+                    in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .accessibilityElement(children: .contain)
     }
 }
