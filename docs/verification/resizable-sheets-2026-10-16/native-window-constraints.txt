@@ -1,0 +1,1 @@
+style=73 resizable=true frame=(510.0, 209.0, 900.0, 720.0) min=(680.0, 600.0) max=(inf, inf) contentMin=(680.0, 600.0) contentMax=(inf, inf) sheet=true

@@ -8,6 +8,7 @@ public struct SoftHorizontalSplit<Leading: View, Trailing: View>: View {
     private let flexibleMinimum: CGFloat
     private let storageKey: String?
     private let storage: SplitLayoutStore
+    private let resizeAccessibilityLabel: String
     private let leading: () -> Leading
     private let trailing: () -> Trailing
 
@@ -22,6 +23,7 @@ public struct SoftHorizontalSplit<Leading: View, Trailing: View>: View {
         flexibleMinimum: CGFloat,
         storageKey: String? = nil,
         storage: SplitLayoutStore = SplitLayoutStore(),
+        accessibilityLabel: String = "调整分栏宽度",
         @ViewBuilder leading: @escaping () -> Leading,
         @ViewBuilder trailing: @escaping () -> Trailing
     ) {
@@ -30,6 +32,7 @@ public struct SoftHorizontalSplit<Leading: View, Trailing: View>: View {
         self.flexibleMinimum = flexibleMinimum
         self.storageKey = storageKey
         self.storage = storage
+        self.resizeAccessibilityLabel = accessibilityLabel
         self.leading = leading
         self.trailing = trailing
         let restoredWidth = storageKey.flatMap { storage.value(for: $0) } ?? initialWidth
@@ -42,20 +45,20 @@ public struct SoftHorizontalSplit<Leading: View, Trailing: View>: View {
             let fixedWidth = clamp(width, to: bounds)
             let flexibleWidth = max(0, proxy.size.width - fixedWidth)
 
-            HStack(spacing: 0) {
+            HStack(alignment: .top, spacing: 0) {
                 if fixedSide == .leading {
                     leading()
-                        .frame(width: fixedWidth)
+                        .frame(width: fixedWidth, height: proxy.size.height, alignment: .topLeading)
                         .clipped()
                     trailing()
-                        .frame(width: flexibleWidth)
+                        .frame(width: flexibleWidth, height: proxy.size.height, alignment: .topLeading)
                         .clipped()
                 } else {
                     leading()
-                        .frame(width: flexibleWidth)
+                        .frame(width: flexibleWidth, height: proxy.size.height, alignment: .topLeading)
                         .clipped()
                     trailing()
-                        .frame(width: fixedWidth)
+                        .frame(width: fixedWidth, height: proxy.size.height, alignment: .topLeading)
                         .clipped()
                 }
             }
@@ -102,7 +105,8 @@ public struct SoftHorizontalSplit<Leading: View, Trailing: View>: View {
                 }
             }
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("调整分栏宽度")
+            .help("拖动\(resizeAccessibilityLabel)")
+            .accessibilityLabel(resizeAccessibilityLabel)
             .accessibilityValue("\(Int(clamp(width, to: bounds))) 点")
             .accessibilityAdjustableAction { direction in
                 switch direction {

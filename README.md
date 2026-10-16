@@ -48,6 +48,14 @@ open build/RepHub.app
 
 也可以在 Xcode 中打开 `Package.swift`。打包脚本生成本地临时签名的 `.app`，不是公证分发包。构建产物在 `build/` 与 `.build/`，不纳入 Git。
 
+生成本机架构的 Release DMG 安装包：
+
+```sh
+./scripts/build-dmg.sh
+```
+
+安装包及 SHA-256 校验文件输出至 `build/dist/`。打开 DMG 后，将 `RepHub` 拖入 `Applications`，再从“应用程序”启动。DMG 构建使用临时应用目录并在结束后清理，不注册额外的开发应用入口；包内应用仍为本机临时签名，未经过 Apple 公证。`build-app.sh` 默认行为不变，也可通过 `REPHUB_APP_OUTPUT` 指定输出应用路径、`REPHUB_REGISTER_APP=0` 跳过注册。
+
 ## 模块
 
 | 模块 | 职责 |

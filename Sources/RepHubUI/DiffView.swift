@@ -81,12 +81,14 @@ public struct DiffView: View {
     }
 
     private func diffHeader(appPalette: AppPalette) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-        HStack(spacing: 10) {
+        VStack(alignment: .leading, spacing: WorkbenchLayout.sectionGap) {
+        HStack(alignment: .top, spacing: 10) {
             Image(systemName: "doc.text").font(.system(size: 19, weight: .medium)).foregroundStyle(appPalette.accent)
-            VStack(alignment: .leading, spacing: 5) {
+                .frame(width: 20, height: WorkbenchLayout.titleRowHeight)
+            VStack(alignment: .leading, spacing: 2) {
                 Text(model.selectedPath.map { ($0 as NSString).lastPathComponent } ?? "文件差异")
-                    .font(.system(size: 18, weight: .semibold)).lineLimit(1).truncationMode(.middle)
+                    .font(.system(size: 20, weight: .semibold)).lineLimit(1).truncationMode(.middle)
+                    .frame(height: WorkbenchLayout.titleRowHeight, alignment: .leading)
                 if let path = model.selectedPath {
                     Text((path as NSString).deletingLastPathComponent)
                         .font(.system(size: 12)).foregroundStyle(appPalette.secondaryText).lineLimit(1).truncationMode(.middle)
@@ -99,6 +101,7 @@ public struct DiffView: View {
                     Label("文件历史", systemImage: "clock.arrow.circlepath")
                 }
                 .buttonStyle(WorkbenchButtonStyle(palette: appPalette, role: .quiet, compact: true))
+                .frame(height: WorkbenchLayout.titleRowHeight)
                 .disabled(model.isInteractionLocked || model.isUntrackedFilePreview)
                 .help("切换到提交历史，查看此文件的版本")
             }
@@ -108,6 +111,7 @@ public struct DiffView: View {
                     Toggle("显示差异元信息", isOn: $showsDiffMetadata)
                 } label: { Image(systemName: "ellipsis") }
                     .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                    .frame(height: WorkbenchLayout.titleRowHeight)
                     .help("差异显示选项")
             }
         }
@@ -144,7 +148,7 @@ public struct DiffView: View {
             }
         }
         }
-        .padding(.horizontal, 20).padding(.vertical, 18)
+        .padding(WorkbenchLayout.cardInset)
     }
 
     private var comparisonLabel: String {

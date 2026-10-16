@@ -9,7 +9,7 @@ if [[ "$configuration" != debug && "$configuration" != release ]]; then
 fi
 swift build -c "$configuration"
 binary_dir="$(swift build -c "$configuration" --show-bin-path)"
-bundle="$PWD/build/RepHub.app"
+bundle="${REPHUB_APP_OUTPUT:-$PWD/build/RepHub.app}"
 scripts/generate-app-icon.sh
 mkdir -p "$bundle/Contents/MacOS"
 cp "$binary_dir/RepHub" "$bundle/Contents/MacOS/RepHub"
@@ -20,7 +20,7 @@ codesign --force --sign - "$bundle"
 # 原地重建不会必然更新顶层目录时间；让 LaunchServices 重新读取本包的图标元数据。
 touch "$bundle"
 launch_services="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
-if [[ -x "$launch_services" ]]; then
+if [[ "${REPHUB_REGISTER_APP:-1}" == 1 && -x "$launch_services" ]]; then
     "$launch_services" -f "$bundle"
 fi
 print "已生成：$bundle"

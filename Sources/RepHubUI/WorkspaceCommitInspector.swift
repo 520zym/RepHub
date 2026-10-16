@@ -26,6 +26,7 @@ struct WorkspaceCommitInspector: View {
                     .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
                     .accessibilityLabel("收起提交区")
             }
+            .frame(height: WorkbenchLayout.titleRowHeight)
             .padding(.bottom, 6)
             Text("\(selectedCount) 个文件已选择")
                 .font(.system(size: 13, weight: .medium))
@@ -56,7 +57,6 @@ struct WorkspaceCommitInspector: View {
                         Text(targetDescription).font(.system(size: 12)).foregroundStyle(palette.secondaryText)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    .padding(.top, 14)
 
                     VStack(alignment: .leading, spacing: 8) {
                         Text("提交范围").font(.system(size: 13, weight: .semibold))
@@ -65,9 +65,10 @@ struct WorkspaceCommitInspector: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                .padding(.top, 12).padding(.bottom, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, WorkbenchLayout.cardInset)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             VStack(spacing: 9) {
                 Button(action: prepare) {
                     Text("检查并提交 \(selectedCount) 项变更…")
@@ -83,7 +84,7 @@ struct WorkspaceCommitInspector: View {
             }
             .padding(.top, 16)
         }
-        .padding(20)
+        .padding(WorkbenchLayout.cardInset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(palette.surface)
         .disabled(isLocked)

@@ -35,10 +35,13 @@ struct RepositoryOperationView: View {
             } else if let result = model.operationResult {
                 resultContent(result)
             } else {
-                setupContent
+                ScrollView { setupContent }
+                setupActions
+                    .padding(22)
+                    .background(palette.surface)
             }
         }
-        .frame(width: 520)
+        .workbenchSheet(minWidth: 480, idealWidth: 560, minHeight: 420, idealHeight: 540)
         .background(palette.background)
         .foregroundStyle(palette.text)
         .onChange(of: selectedBindingID) { _, _ in
@@ -106,18 +109,21 @@ struct RepositoryOperationView: View {
                     .font(.system(size: 13)).foregroundStyle(palette.secondaryText)
             }
 
-            HStack {
-                Spacer()
-                Button("取消", action: dismiss)
-                    .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
-                Button(selectedKind.title) {
-                    if let binding = selectedBinding { model.performOperation(selectedKind, on: binding) }
-                }
-                .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
-                .disabled(selectedBinding == nil || !supportedKinds.contains(selectedKind) || model.isWorkspaceMutationLocked)
-            }
         }
         .padding(22)
+    }
+
+    private var setupActions: some View {
+        HStack {
+            Spacer()
+            Button("取消", action: dismiss)
+                .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
+            Button(selectedKind.title) {
+                if let binding = selectedBinding { model.performOperation(selectedKind, on: binding) }
+            }
+            .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
+            .disabled(selectedBinding == nil || !supportedKinds.contains(selectedKind) || model.isWorkspaceMutationLocked)
+        }
     }
 
     private func bindingDetails(_ binding: RepositoryBinding) -> some View {
@@ -164,7 +170,7 @@ struct RepositoryOperationView: View {
                  : "当前阶段完成后会重新读取工作区状态。")
                 .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
         }
-        .padding(22).frame(minHeight: 290, alignment: .topLeading)
+        .padding(22).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func resultContent(_ result: RepositoryOperationResult) -> some View {
@@ -248,10 +254,10 @@ struct RepositoryOperationView: View {
                     }
                 }
             }
-            .frame(maxHeight: 410, alignment: .topLeading)
+            .frame(maxHeight: .infinity, alignment: .topLeading)
             HStack { Spacer(); Button("完成", action: dismiss).buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary)) }
         }
-        .padding(22).frame(minHeight: 190, alignment: .topLeading)
+        .padding(22).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var outcomeIcon: String {

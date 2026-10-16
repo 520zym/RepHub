@@ -32,7 +32,7 @@ struct ConflictEditorView: View {
             content
             footer
         }
-        .frame(minWidth: 920, idealWidth: 1120, minHeight: 650, idealHeight: 760)
+        .workbenchSheet(minWidth: 920, idealWidth: 1120, minHeight: 650, idealHeight: 760)
         .background(palette.background)
         .foregroundStyle(palette.text)
         .tint(palette.accent)
@@ -120,7 +120,7 @@ struct ConflictEditorView: View {
                 )
                 .background(codePalette.background, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
-            .frame(height: 210)
+            .frame(minHeight: 180, idealHeight: 210, maxHeight: .infinity)
         }
         .padding(18).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }

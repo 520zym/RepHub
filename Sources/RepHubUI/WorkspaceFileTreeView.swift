@@ -49,11 +49,11 @@ struct WorkspaceFileTreeView: View {
             header
             if showsBindingPicker, let bindings = model.workspace?.bindings, bindings.count > 1 { bindingPicker(bindings) }
             WorkbenchSearchField(browser.mode == .files ? "筛选已读取的文件…" : "筛选变更文件…", text: $browser.filter, palette: palette)
-                .padding(.horizontal, 18).padding(.bottom, 10)
+                .padding(.horizontal, WorkbenchLayout.cardInset).padding(.bottom, 10)
             if browser.mode == .files, !browser.filter.isEmpty {
                 Text("仅搜索已展开并读取的目录")
                     .font(.system(size: 10)).foregroundStyle(palette.secondaryText)
-                    .padding(.horizontal, 18).padding(.bottom, 7)
+                    .padding(.horizontal, WorkbenchLayout.cardInset).padding(.bottom, 7)
             }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
@@ -76,7 +76,7 @@ struct WorkspaceFileTreeView: View {
                 }
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(palette.secondaryText)
-                .padding(.horizontal, 18)
+                .padding(.horizontal, WorkbenchLayout.cardInset)
                 .frame(height: 42)
             }
         }
@@ -91,7 +91,7 @@ struct WorkspaceFileTreeView: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .firstTextBaseline) {
                 Text("工作区")
-                    .font(.system(size: 24, weight: .semibold))
+                    .font(.system(size: 22, weight: .semibold))
                 Spacer(minLength: 0)
                 if browser.mode == .changes {
                     if conflictedChanges.isEmpty {
@@ -104,6 +104,7 @@ struct WorkspaceFileTreeView: View {
                         .foregroundStyle(palette.secondaryText)
                 }
             }
+            .frame(height: WorkbenchLayout.titleRowHeight)
             HStack(spacing: 8) {
                 WorkbenchSegmentedPicker(title: "文件范围", selection: $browser.mode,
                                          options: [.init(.changes, "变更"), .init(.files, "全部文件")], palette: palette)
@@ -122,13 +123,13 @@ struct WorkspaceFileTreeView: View {
                 }
             }
         }
-        .padding(.horizontal, 18).padding(.top, 18).padding(.bottom, 12)
+        .padding(.horizontal, WorkbenchLayout.cardInset).padding(.top, WorkbenchLayout.cardInset).padding(.bottom, 12)
     }
 
     private func bindingPicker(_ bindings: [RepositoryBinding]) -> some View {
         RepositorySourcePicker(bindings: bindings, selectedID: model.selectedBindingID,
                                select: model.selectBinding, palette: palette)
-            .padding(.horizontal, 10).padding(.bottom, 8)
+            .padding(.horizontal, WorkbenchLayout.cardInset).padding(.bottom, 8)
     }
 
     @ViewBuilder private func fileTree(_ changeIndex: [String: FileChange]) -> some View {

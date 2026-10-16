@@ -23,7 +23,7 @@ struct WorkingCopyMigrationView: View {
             Divider().opacity(0.24)
             footer
         }
-        .frame(minWidth: 760, idealWidth: 930, minHeight: 580, idealHeight: 710)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(palette.background).foregroundStyle(palette.text)
     }
     private var header: some View { HStack(spacing: 11) {
@@ -174,7 +174,7 @@ private struct WorkingFileTree: View {
             return directory && expanded.contains(path) ? [node] + flatten(parent: path, depth: depth + 1, items: items, directories: directories) : [node]
         }
     }
-    private func row(_ node: Node) -> some View { HStack(spacing: 4) { if node.directory { Button { toggle(node.path) } label: { Image(systemName: expanded.contains(node.path) ? "chevron.down" : "chevron.right").font(.system(size: 9)).frame(width: 13, height: 23) }.buttonStyle(.plain) } else { Color.clear.frame(width: 13, height: 23) }; Button { if !node.directory { select(node.path) } } label: { HStack(spacing: 6) { Image(systemName: node.directory ? "folder" : "doc").foregroundStyle(node.directory ? palette.accent : palette.secondaryText); Text(node.name).lineLimit(1).truncationMode(.middle); Spacer(); if let item = node.item { indicator(item.state) } }.font(.system(size: 11, weight: selected == node.path ? .semibold : .regular)).frame(maxWidth: .infinity, alignment: .leading).frame(height: 23) }.buttonStyle(.plain) }.padding(.leading, CGFloat(node.depth) * 15).padding(.trailing, 5).background(selected == node.path ? palette.selection.opacity(0.68) : .clear, in: RoundedRectangle(cornerRadius: 5, style: .continuous)) }
+    private func row(_ node: Node) -> some View { HStack(spacing: 4) { if node.directory { Button { toggle(node.path) } label: { Image(systemName: expanded.contains(node.path) ? "chevron.down" : "chevron.right").font(.system(size: 9)).frame(width: 13, height: 23).contentShape(.interaction, Rectangle()) }.buttonStyle(.plain) } else { Color.clear.frame(width: 13, height: 23) }; Button { if !node.directory { select(node.path) } } label: { HStack(spacing: 6) { Image(systemName: node.directory ? "folder" : "doc").foregroundStyle(node.directory ? palette.accent : palette.secondaryText); Text(node.name).lineLimit(1).truncationMode(.middle); Spacer(); if let item = node.item { indicator(item.state) } }.font(.system(size: 11, weight: selected == node.path ? .semibold : .regular)).frame(maxWidth: .infinity, alignment: .leading).frame(height: 23).contentShape(.interaction, Rectangle()) }.buttonStyle(.plain) }.padding(.leading, CGFloat(node.depth) * 15).padding(.trailing, 5).background(selected == node.path ? palette.selection.opacity(0.68) : .clear, in: RoundedRectangle(cornerRadius: 5, style: .continuous)) }
     private func indicator(_ state: MigrationFileComparison.State) -> some View { Group { switch state { case .identical: Image(systemName: "checkmark.circle.fill").foregroundStyle(palette.accent); case .omittedDirectory: Image(systemName: "minus.circle").foregroundStyle(palette.secondaryText).help("Git 不记录空目录，本地目录会保留。"); case .different: Image(systemName: allowsDifferences ? "arrow.left.arrow.right.circle" : "exclamationmark.circle.fill").foregroundStyle(allowsDifferences ? palette.secondaryText : palette.removed) } }.font(.system(size: 10)) }
 }
 private struct WorkingPatchPreview: View {

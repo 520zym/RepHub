@@ -26,10 +26,10 @@ struct RepositoryCommitView: View {
             switch model.phase {
             case .preparing:
                 ProgressView("正在读取各版本控制来源的可提交文件…")
-                    .frame(width: 760, height: 390)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .idle:
                 ContentUnavailableView("无法准备提交", systemImage: "exclamationmark.bubble", description: Text(model.errorMessage ?? "请关闭后重新打开提交窗口。"))
-                    .frame(width: 760, height: 390)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .ready:
                 preparationContent
             case .committing:
@@ -38,7 +38,7 @@ struct RepositoryCommitView: View {
                 resultContent
             }
         }
-        .frame(width: 760)
+        .workbenchSheet(minWidth: 680, idealWidth: 900, minHeight: 600, idealHeight: 720)
         .background(palette.background)
         .foregroundStyle(palette.text)
         .tint(palette.accent)
@@ -90,7 +90,7 @@ struct RepositoryCommitView: View {
                     .accessibilityLabel("关闭提交窗口")
             }
         }
-        .padding(.horizontal, 22).padding(.vertical, 18)
+        .padding(.horizontal, WorkbenchLayout.cardInset).padding(.vertical, 18)
         .background(palette.surface)
     }
 
@@ -110,36 +110,42 @@ struct RepositoryCommitView: View {
     }
 
     private var preparationContent: some View {
-        VStack(spacing: 0) {
-            if model.preparations.count > 1 {
-                WorkbenchSegmentedPicker(
-                    title: "提交目标",
-                    selection: Binding(get: { model.selectedBindingID }, set: { model.selectBinding($0) }),
-                    options: model.preparations.map { .init(Optional($0.binding.id), title(for: $0)) },
-                    palette: palette
-                )
-                .padding(.horizontal, 22).padding(.top, 14).padding(.bottom, 10)
-            }
-            if let preparation = model.selectedPreparation {
-                HStack(alignment: .top, spacing: 14) {
-                    fileSelection(preparation)
-                        .frame(width: 320, alignment: .topLeading)
-                    preview(preparation)
+        GeometryReader { geometry in
+            VStack(spacing: 0) {
+                if model.preparations.count > 1 {
+                    WorkbenchSegmentedPicker(
+                        title: "提交目标",
+                        selection: Binding(get: { model.selectedBindingID }, set: { model.selectBinding($0) }),
+                        options: model.preparations.map { .init(Optional($0.binding.id), title(for: $0)) },
+                        palette: palette
+                    )
+                    .padding(.horizontal, WorkbenchLayout.cardInset).padding(.top, 14).padding(.bottom, 10)
                 }
-                // 说明展开时由预览区让出空间，底栏始终留在固定高度窗口内。
-                .frame(minHeight: 140, maxHeight: .infinity, alignment: .top)
-                .padding(.horizontal, 22).padding(.bottom, 14)
+                if let preparation = model.selectedPreparation {
+                    preparationNotice(preparation)
+                        .padding(.horizontal, WorkbenchLayout.cardInset)
+                        .padding(.top, WorkbenchLayout.sectionGap)
+                        .padding(.bottom, WorkbenchLayout.sectionGap)
+                    HStack(alignment: .top, spacing: WorkbenchLayout.sectionGap) {
+                        fileSelection(preparation)
+                            .frame(width: max(220, (geometry.size.width - 52) * 0.4), alignment: .topLeading)
+                        preview(preparation)
+                    }
+                    // 文件预览使用剩余空间，说明和底栏随窗口尺寸保持可见。
+                    .frame(minHeight: 100, maxHeight: .infinity, alignment: .top)
+                    .padding(.horizontal, WorkbenchLayout.cardInset).padding(.bottom, 14)
 
-                messageEditor(preparation)
-                    .padding(.horizontal, 22)
-                    .padding(.bottom, 12)
-            } else {
-                ContentUnavailableView("没有可提交的版本控制来源", systemImage: "checkmark.circle")
-                    .frame(height: 300)
+                    messageEditor(preparation, availableHeight: geometry.size.height)
+                        .padding(.horizontal, WorkbenchLayout.cardInset)
+                        .padding(.bottom, 12)
+                } else {
+                    ContentUnavailableView("没有可提交的版本控制来源", systemImage: "checkmark.circle")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                footer
             }
-            footer
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
-        .frame(height: 540, alignment: .top)
     }
 
     private func title(for preparation: RepositoryCommitPreparation) -> String {
@@ -169,17 +175,7 @@ struct RepositoryCommitView: View {
                 } label: { Image(systemName: "ellipsis.circle") }
                 .menuStyle(.borderlessButton).help("全选或清空")
             }
-            if !preparation.notice.isEmpty {
-                Text(preparation.notice).font(.system(size: 11)).foregroundStyle(palette.secondaryText)
-                    .padding(9).frame(maxWidth: .infinity, alignment: .leading)
-                    .background(palette.sidebar.opacity(0.58), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            }
-            if let reason = preparation.blockingReason {
-                Label(reason, systemImage: "exclamationmark.triangle")
-                    .font(.system(size: 12)).foregroundStyle(palette.removed)
-                    .padding(10).frame(maxWidth: .infinity, alignment: .leading)
-                    .background(palette.removed.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            }
+            .frame(height: WorkbenchLayout.titleRowHeight, alignment: .top)
             ScrollView {
                 CommitFileTree(files: preparation.files, selected: model.selectedFiles(for: preparation.binding.id), palette: palette,
                                toggle: { model.toggleFile($0, in: preparation) }, preview: { model.selectFileForPreview($0, in: preparation) })
@@ -187,6 +183,25 @@ struct RepositoryCommitView: View {
             }
             .background(palette.sidebar.opacity(0.33), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
             .disabled(!model.enabledBindingIDs.contains(preparation.binding.id) || preparation.blockingReason != nil)
+        }
+    }
+
+    @ViewBuilder private func preparationNotice(_ preparation: RepositoryCommitPreparation) -> some View {
+        if !preparation.notice.isEmpty {
+            Text(preparation.notice)
+                .font(.system(size: 11))
+                .foregroundStyle(palette.secondaryText)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(palette.sidebar.opacity(0.58), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        if let reason = preparation.blockingReason {
+            Label(reason, systemImage: "exclamationmark.triangle")
+                .font(.system(size: 12))
+                .foregroundStyle(palette.removed)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(palette.removed.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
     }
 
@@ -203,6 +218,7 @@ struct RepositoryCommitView: View {
                 Spacer()
                 if model.patch?.isTruncated == true { Text("内容已截断").font(.system(size: 10)).foregroundStyle(palette.secondaryText) }
             }
+            .frame(height: WorkbenchLayout.titleRowHeight, alignment: .top)
             Group {
                 if let patch = model.patch, !patch.text.isEmpty {
                     HighlightedPatchPreview(text: patch.text, path: model.selectedFile?.change.path, palette: codePalette)
@@ -221,7 +237,7 @@ struct RepositoryCommitView: View {
         }
     }
 
-    private func messageEditor(_ preparation: RepositoryCommitPreparation) -> some View {
+    private func messageEditor(_ preparation: RepositoryCommitPreparation, availableHeight: CGFloat) -> some View {
         let enabled = model.enabledBindingIDs.contains(preparation.binding.id) && preparation.blockingReason == nil
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
@@ -232,6 +248,9 @@ struct RepositoryCommitView: View {
                     expandsMessageEditor.toggle()
                 } label: {
                     Label(expandsMessageEditor ? "收起编辑区" : "展开编辑区", systemImage: expandsMessageEditor ? "arrow.up.left.and.arrow.down.right" : "arrow.down.right.and.arrow.up.left")
+                        .padding(.horizontal, 5)
+                        .frame(height: 26)
+                        .contentShape(Rectangle())
                 }
                 .font(.system(size: 11))
                 .buttonStyle(.plain)
@@ -243,7 +262,12 @@ struct RepositoryCommitView: View {
                     aiSelectedPaths = model.selectedFiles(for: preparation.binding.id)
                     model.prepareAI()
                     showsAI = true
-                } label: { Label("AI 生成", systemImage: "sparkles") }
+                } label: {
+                    Label("AI 生成", systemImage: "sparkles")
+                        .padding(.horizontal, 5)
+                        .frame(height: 26)
+                        .contentShape(Rectangle())
+                }
                 .font(.system(size: 11, weight: .medium)).buttonStyle(.plain).foregroundStyle(palette.accent)
                 .disabled(model.ai == nil || !enabled || model.selectedFiles(for: preparation.binding.id).isEmpty)
             }
@@ -251,7 +275,7 @@ struct RepositoryCommitView: View {
                 text: Binding(get: { model.message(for: preparation.binding.id) }, set: { model.setMessage($0, for: preparation.binding.id) }),
                 palette: palette,
                 placeholder: "描述这次修改…",
-                height: expandsMessageEditor ? 240 : 150,
+                height: expandsMessageEditor ? min(300, max(170, availableHeight * 0.4)) : min(200, max(110, availableHeight * 0.25)),
                 isEnabled: enabled,
                 help: "支持多行、换行、复制粘贴和撤销。长说明可在编辑区内滚动查看。"
             )
@@ -272,7 +296,7 @@ struct RepositoryCommitView: View {
             .disabled(!model.canCommit || workspace == nil)
             .help(model.canCommit ? "提交所选目标和文件" : "请至少选择一个文件，并填写每个已选目标的提交说明")
         }
-        .padding(.horizontal, 22).padding(.vertical, 12)
+        .padding(.horizontal, WorkbenchLayout.cardInset).padding(.vertical, 12)
         .background(palette.surface)
     }
 
@@ -296,7 +320,7 @@ struct RepositoryCommitView: View {
             Text("取消不会回滚已经提交成功的目标；完成后会刷新全部工作区状态。")
                 .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
         }
-        .padding(22).frame(height: 390, alignment: .topLeading)
+        .padding(22).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var resultContent: some View {
@@ -334,7 +358,7 @@ struct RepositoryCommitView: View {
                 Button("关闭", action: dismiss).buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
             }
         }
-        .padding(22).frame(height: 390, alignment: .topLeading)
+        .padding(22).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
 
@@ -346,9 +370,14 @@ private struct CommitFileTree: View {
     let preview: (RepositoryCommitFile) -> Void
 
     var body: some View {
-        ForEach(CommitTreeNode.make(files: files)) { node in
-            CommitTreeRow(node: node, depth: 0, selected: selected, palette: palette, toggle: toggle, preview: preview)
+        LazyVStack(alignment: .leading, spacing: 0) {
+            ForEach(CommitTreeNode.make(files: files)) { node in
+                CommitTreeRow(node: node, depth: 0, selected: selected, palette: palette, toggle: toggle, preview: preview)
+            }
         }
+        // ScrollView otherwise measures this tree at its intrinsic width and centers
+        // short top-level directories in the available column.
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -389,27 +418,48 @@ private struct CommitTreeRow: View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
                 if node.children.isEmpty { Color.clear.frame(width: 13) }
-                else { Button { expanded.toggle() } label: { Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.system(size: 9, weight: .semibold)).frame(width: 13) }.buttonStyle(.plain) }
+                else {
+                    Button { expanded.toggle() } label: {
+                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 9, weight: .semibold))
+                            .frame(width: 13, height: 20)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
                 if let file = node.file {
                     Toggle("", isOn: Binding(get: { selected.contains(file.id) }, set: { _ in toggle(file) }))
                         .toggleStyle(.checkbox).labelsHidden().disabled(file.restriction != nil)
                     Button { preview(file) } label: {
-                        if file.isDirectory {
-                            Image(systemName: "folder").foregroundStyle(palette.accent).font(.system(size: 12))
+                        HStack(spacing: 6) {
+                            if file.isDirectory {
+                                Image(systemName: "folder").foregroundStyle(palette.accent).font(.system(size: 12))
+                            }
+                            Text(file.change.kind.symbol).font(.system(size: 10, weight: .semibold, design: .monospaced)).foregroundStyle(file.restriction == nil ? palette.accent : palette.secondaryText)
+                            Text(node.name).lineLimit(1).truncationMode(.middle)
+                            Spacer(minLength: 0)
                         }
-                        Text(file.change.kind.symbol).font(.system(size: 10, weight: .semibold, design: .monospaced)).foregroundStyle(file.restriction == nil ? palette.accent : palette.secondaryText)
-                        Text(node.name).lineLimit(1).truncationMode(.middle)
+                        .frame(maxWidth: .infinity, minHeight: 20, alignment: .leading)
+                        .contentShape(.interaction, Rectangle())
                     }
-                    .buttonStyle(.plain).frame(maxWidth: .infinity, alignment: .leading)
+                    .buttonStyle(.plain)
                     .help(file.restriction ?? (file.isDirectory ? "\(file.change.path) · 仅提交目录自身，子项须单独选择" : file.change.path))
                     if file.restriction != nil { Image(systemName: "lock.fill").font(.system(size: 9)).foregroundStyle(palette.secondaryText) }
                 } else {
                     Image(systemName: "folder").foregroundStyle(palette.accent).font(.system(size: 12))
-                    Text(node.name).lineLimit(1)
+                    Text(node.name)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .layoutPriority(1)
                 }
             }
-            .font(.system(size: 12)).padding(.leading, CGFloat(depth) * 14).padding(.horizontal, 7).padding(.vertical, 3)
+            .font(.system(size: 12))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, 7 + CGFloat(depth) * 14)
+            .padding(.trailing, 7)
+            .padding(.vertical, 3)
             if expanded { ForEach(node.children) { child in CommitTreeRow(node: child, depth: depth + 1, selected: selected, palette: palette, toggle: toggle, preview: preview) } }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

@@ -35,8 +35,9 @@ public struct AIRunView: View {
                 }
                 .background(palette.background)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .frame(width: 900, height: 620)
+        .workbenchSheet(minWidth: 720, idealWidth: 900, minHeight: 520, idealHeight: 620)
         .foregroundStyle(palette.text)
         .tint(palette.accent)
         .background(palette.background)
@@ -111,6 +112,7 @@ public struct AIRunView: View {
                             .padding(.horizontal, 10).frame(height: 28)
                             .background(model.selectedPaths.contains(path) ? palette.selection.opacity(0.62) : .clear,
                                         in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            .contentShape(.interaction, RoundedRectangle(cornerRadius: 6, style: .continuous))
                         }
                         .buttonStyle(.plain)
                         .disabled(!model.canEditFileSelection)

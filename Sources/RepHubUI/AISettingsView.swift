@@ -255,7 +255,7 @@ private struct ConnectionEditor: View {
                 Button("保存") { primarySave() }.keyboardShortcut(.defaultAction).disabled(isDiscovering || isChecking)
             }.padding()
         }
-        .frame(width: 620, height: 640)
+        .workbenchSheet(minWidth: 540, idealWidth: 620, minHeight: 500, idealHeight: 640)
         .onDisappear { cancelTasks() }
         .alert(item: $notice) { Alert(title: Text($0.title), message: Text($0.message), dismissButton: .default(Text("好"))) }
     }
@@ -436,7 +436,8 @@ private struct SceneEditor: View {
                 }
             }.formStyle(.grouped)
             Divider(); HStack { Spacer(); Button("取消") { dismiss() }; Button("保存") { save() }.keyboardShortcut(.defaultAction) }.padding()
-        }.frame(width: 600, height: 570)
+        }
+        .workbenchSheet(minWidth: 520, idealWidth: 600, minHeight: 460, idealHeight: 570)
         .alert(item: $notice) { Alert(title: Text($0.title), message: Text($0.message), dismissButton: .default(Text("好"))) }
     }
     @ViewBuilder private func sceneModelPicker(_ connection: AIConnection) -> some View {

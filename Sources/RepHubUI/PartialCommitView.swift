@@ -34,7 +34,7 @@ public struct PartialCommitView: View {
             Divider().opacity(0.25)
             footer.padding(16)
         }
-        .frame(minWidth: 900, minHeight: 620)
+        .workbenchSheet(minWidth: 900, idealWidth: 1080, minHeight: 620, idealHeight: 740)
         .background(palette.background).foregroundStyle(palette.text)
         .task { model.load() }
         .onChange(of: model.isBusy, initial: true) { _, busy in onBusyChange?(busy) }
@@ -52,6 +52,7 @@ public struct PartialCommitView: View {
                 ScrollView([.horizontal, .vertical]) { preview.padding(16) }
                     .defaultScrollAnchor(.topLeading).frame(minWidth: 320, maxWidth: .infinity)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 

@@ -47,7 +47,7 @@ struct RepositoryInspectionView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(width: 900, height: 650)
+        .workbenchSheet(minWidth: 720, idealWidth: 900, minHeight: 520, idealHeight: 650)
         .background(palette.background).foregroundStyle(palette.text)
         .task { model.loadInitial() }
         .interactiveDismissDisabled(model.isLoading)

@@ -42,7 +42,7 @@ struct RepositoryManagementView: View {
             else if let context = model.context { content(context) }
             else { unavailable }
         }
-        .frame(width: 820, height: 620)
+        .workbenchSheet(minWidth: 700, idealWidth: 820, minHeight: 520, idealHeight: 620)
         .background(palette.background).foregroundStyle(palette.text)
         .onChange(of: model.context?.stateToken) { _, _ in syncInputs() }
         .onChange(of: model.comparisonSeed) { _, _ in applyComparisonSeed() }
@@ -137,9 +137,9 @@ struct RepositoryManagementView: View {
                     .font(.system(size: 12)).foregroundStyle(palette.secondaryText)
             } else {
                 HStack(spacing: 10) {
-                    Text("远端").font(.system(size: 12)).foregroundStyle(palette.secondaryText).frame(width: 42, alignment: .leading)
+                    Text("远端").font(.system(size: 12)).foregroundStyle(palette.secondaryText).frame(width: 64, alignment: .leading)
                     Picker("远端", selection: $remote) { ForEach(context.remotes) { Text($0.name).tag($0.name) } }
-                        .labelsHidden().frame(maxWidth: .infinity)
+                        .labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
                 }
                 if let endpoint = selectedRemote(in: context) {
                     Text("推送地址：\(endpoint.pushURL ?? endpoint.url)")
@@ -176,9 +176,9 @@ struct RepositoryManagementView: View {
                 }
                 if !context.branches.isEmpty {
                     HStack(spacing: 10) {
-                        Text("已有分支").font(.system(size: 12)).foregroundStyle(palette.secondaryText).frame(width: 52, alignment: .leading)
+                        Text("已有分支").font(.system(size: 12)).foregroundStyle(palette.secondaryText).frame(width: 64, alignment: .leading)
                         Picker("已有分支", selection: $selectedBranch) { ForEach(context.branches) { Text($0.name).tag($0.name) } }
-                            .labelsHidden().frame(maxWidth: .infinity)
+                            .labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
                     }
                     HStack {
                         Button("切换") { execute(.switchBranch(name: selectedBranch)) }.buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary)).disabled(selectedBranch.isEmpty)
@@ -316,7 +316,15 @@ struct RepositoryManagementView: View {
         .frame(maxHeight: .infinity, alignment: .top)
     }
 
-    private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View { VStack(alignment: .leading, spacing: 9) { Text(title).font(.system(size: 13, weight: .semibold)); content() }.padding(14).background(palette.sidebar.opacity(0.52), in: RoundedRectangle(cornerRadius: 10, style: .continuous)) }
+    private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: WorkbenchLayout.sectionGap) {
+            Text(title).font(.system(size: 13, weight: .semibold))
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(WorkbenchLayout.cardInset)
+        .background(palette.surface, in: RoundedRectangle(cornerRadius: WorkbenchLayout.cornerRadius, style: .continuous))
+    }
     private func patchPreview(_ patch: RepositoryPatch) -> some View {
         HighlightedPatchPreview(text: patch.text, path: model.comparisonPath, palette: codePalette)
     }

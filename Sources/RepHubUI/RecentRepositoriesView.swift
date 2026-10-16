@@ -45,7 +45,8 @@ struct RecentRepositoriesView: View {
     @Bindable var store: RecentRepositoryStore
     let palette: AppPalette
     let open: (RecentRepository) -> Void
-    var maximumHeight: CGFloat = 264
+    /// 欢迎页可限制高度；打开仓库窗口传 nil，由父布局分配剩余空间。
+    var maximumHeight: CGFloat? = 264
     var openInNewWindow: ((URL) -> Void)? = nil
 
     var body: some View {
@@ -68,7 +69,8 @@ struct RecentRepositoriesView: View {
                     }
                 }
             }
-            .frame(height: min(maximumHeight, max(0, CGFloat(store.entries.count) * 60 - 4)))
+            .frame(height: maximumHeight.map { min($0, max(0, CGFloat(store.entries.count) * 60 - 4)) })
+            .frame(maxHeight: maximumHeight == nil ? .infinity : nil, alignment: .top)
         }
     }
 }

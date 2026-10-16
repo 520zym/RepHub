@@ -23,7 +23,7 @@ struct RepositoryShelfView: View {
             Divider().opacity(0.18)
             footer
         }
-        .frame(minWidth: 790, minHeight: 510)
+        .workbenchSheet(minWidth: 790, idealWidth: 900, minHeight: 510, idealHeight: 600)
         .background(palette.surface)
         .task { await model.loadThenPrepare() }
         .onChange(of: model.isBusy, initial: true) { _, busy in onBusyChange?(busy) }

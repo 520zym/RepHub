@@ -26,7 +26,7 @@ struct RepositoryAcquisitionView: View {
             modePicker
             if source == .local { localContent } else { remoteContent }
         }
-        .frame(width: sheetWidth, height: sheetHeight)
+        .workbenchSheet(minWidth: 740, idealWidth: sheetWidth, minHeight: 560, idealHeight: sheetHeight)
         .background(palette.background)
         .foregroundStyle(palette.text)
         .onAppear { model.prepare() }
@@ -43,8 +43,8 @@ struct RepositoryAcquisitionView: View {
             palette: palette
         )
         .disabled(model.isAcquiring)
-        .frame(maxWidth: 390)
-        .padding(.horizontal, 26).padding(.top, 13).padding(.bottom, 12)
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, WorkbenchLayout.cardInset).padding(.top, 13).padding(.bottom, WorkbenchLayout.sectionGap)
     }
 
     /// sheet 首次呈现按可用屏幕宽度确定，避免 SwiftUI 只取最小尺寸而压缩三栏浏览页。
@@ -77,34 +77,44 @@ struct RepositoryAcquisitionView: View {
                     .accessibilityLabel("关闭打开仓库窗口")
             }
         }
-        .padding(.horizontal, 26).padding(.vertical, 18)
+        .padding(.horizontal, WorkbenchLayout.cardInset).padding(.vertical, 18)
         .background(palette.surface)
     }
 
     private var localContent: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("选择已经存在的本地文件夹。RepHub 会自动识别 Git、SVN，或两者同时存在的工作副本。")
-                .font(.system(size: 12)).foregroundStyle(palette.secondaryText)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(16)
-                .background(palette.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            HStack {
-                Spacer()
-                Button("选择本地文件夹…") {
-                    dismiss()
-                    openLocalFolder()
+        VStack(alignment: .leading, spacing: WorkbenchLayout.sectionGap) {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("选择已经存在的本地文件夹。RepHub 会自动识别 Git、SVN，或两者同时存在的工作副本。")
+                    .font(.system(size: 12)).foregroundStyle(palette.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Spacer()
+                    Button {
+                        dismiss()
+                        openLocalFolder()
+                    } label: {
+                        Label {
+                            Text("选择本地文件夹…")
+                        } icon: {
+                            Image(systemName: "folder.badge.plus").foregroundStyle(palette.accent)
+                        }
+                    }
+                    .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary))
+                    Spacer()
                 }
-                .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
-                Spacer()
             }
+            .padding(WorkbenchLayout.cardInset)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(palette.surface, in: RoundedRectangle(cornerRadius: WorkbenchLayout.cornerRadius, style: .continuous))
             if !recentRepositories.entries.isEmpty {
                 RecentRepositoriesView(store: recentRepositories, palette: palette, open: openRecentRepository,
+                                       maximumHeight: nil,
                                        openInNewWindow: openInNewWindow)
-                    .padding(.top, 8)
+                    .padding(.top, WorkbenchLayout.sectionGap)
                     .disabled(model.isBusy)
             }
         }
-        .padding(.horizontal, 26).padding(.bottom, 26)
+        .padding(.horizontal, WorkbenchLayout.cardInset).padding(.bottom, WorkbenchLayout.cardInset)
         .frame(minHeight: 300, maxHeight: .infinity, alignment: .topLeading)
     }
 
@@ -112,9 +122,9 @@ struct RepositoryAcquisitionView: View {
         if model.isAcquiring || model.transferHasFinished {
             transferPage
         } else {
-            HStack(spacing: 0) {
-                wizardProgress
-                VStack(spacing: 0) {
+            VStack(spacing: 0) {
+                HStack(spacing: 0) {
+                    wizardProgress
                     Group {
                         switch model.wizardStep {
                         case .connection: connectionPage
@@ -124,8 +134,8 @@ struct RepositoryAcquisitionView: View {
                         }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    wizardFooter
                 }
+                wizardFooter
             }
             .frame(maxHeight: .infinity)
         }
@@ -150,6 +160,7 @@ struct RepositoryAcquisitionView: View {
             Text("远程获取")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(palette.text)
+                .frame(height: WorkbenchLayout.titleRowHeight, alignment: .leading)
                 .padding(.bottom, 13)
             ForEach(Array(steps.enumerated()), id: \.element) { index, step in
                 let isComplete = step.rawValue < model.wizardStep.rawValue
@@ -175,7 +186,7 @@ struct RepositoryAcquisitionView: View {
             Spacer(minLength: 18)
             connectionStatusCard
         }
-        .padding(18)
+        .padding(WorkbenchLayout.cardInset)
         .frame(width: 184, alignment: .topLeading)
         .background(palette.background)
     }
@@ -220,8 +231,8 @@ struct RepositoryAcquisitionView: View {
                 if let notice = model.historyNotice { note(notice) }
                 wizardError
             }
-            .padding(26)
-            .frame(maxWidth: 720, alignment: .leading)
+            .padding(WorkbenchLayout.cardInset)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -240,13 +251,14 @@ struct RepositoryAcquisitionView: View {
                 Button(action: model.togglePasswordVisibility) {
                     Image(systemName: model.isPasswordVisible ? "eye.slash" : "eye")
                         .font(.system(size: 12, weight: .medium)).frame(width: 22, height: 22)
+                        .contentShape(.interaction, Rectangle())
                 }
                 .buttonStyle(.plain).foregroundStyle(palette.secondaryText)
                 .accessibilityLabel(model.isPasswordVisible ? "隐藏密码" : "显示密码")
                 .help(model.isPasswordVisible ? "隐藏密码" : "显示密码")
             }
-            .padding(.horizontal, 10).frame(height: 32)
-            .background(palette.secondaryText.opacity(0.05), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .padding(.horizontal, 12).frame(height: 34)
+            .background(palette.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             if model.isLoadingSavedCredentials {
                 HStack(spacing: 6) { ProgressView().controlSize(.mini); Text("正在读取上次使用的 SVN 账号…") }
                     .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
@@ -265,10 +277,13 @@ struct RepositoryAcquisitionView: View {
                                 Text(entry.url.removingPercentEncoding ?? entry.url)
                                     .font(.system(size: 11, design: .monospaced)).lineLimit(1).truncationMode(.middle)
                                     .frame(maxWidth: .infinity, alignment: .leading)
+                                    .frame(height: 25)
+                                    .contentShape(.interaction, Rectangle())
                             }
                             .buttonStyle(.plain).foregroundStyle(palette.secondaryText)
                             Button { model.removeRecentRemote(entry) } label: {
                                 Image(systemName: "xmark").font(.system(size: 8, weight: .semibold)).frame(width: 18, height: 18)
+                                    .contentShape(.interaction, Rectangle())
                             }
                             .buttonStyle(.plain).foregroundStyle(palette.secondaryText)
                             .accessibilityLabel("移除最近地址")
@@ -323,7 +338,7 @@ struct RepositoryAcquisitionView: View {
             WorkbenchSearchField("筛选已读取的目录或文件", text: $remoteDirectoryFilter, palette: palette)
             GeometryReader { proxy in
                 let showsSummary = proxy.size.width >= 600
-                HStack(alignment: .top, spacing: 16) {
+                HStack(alignment: .top, spacing: WorkbenchLayout.sectionGap) {
                     directoryBrowser
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     if showsSummary { selectedDirectorySummary }
@@ -333,7 +348,7 @@ struct RepositoryAcquisitionView: View {
             if let notice = model.historyNotice { note(notice) }
             wizardError
         }
-        .padding(26)
+        .padding(WorkbenchLayout.cardInset)
     }
 
     @ViewBuilder private var directoryBrowser: some View {
@@ -379,7 +394,7 @@ struct RepositoryAcquisitionView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background((model.selectedRemoteURL == nil ? palette.sidebar : palette.selection).opacity(0.7), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
         }
-        .padding(18)
+        .padding(WorkbenchLayout.cardInset)
         .frame(width: 245)
         .frame(maxHeight: .infinity, alignment: .topLeading)
         .background(palette.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -420,7 +435,7 @@ struct RepositoryAcquisitionView: View {
             wizardError
             Spacer()
         }
-        .padding(26)
+        .padding(WorkbenchLayout.cardInset)
     }
 
     private var reviewPage: some View {
@@ -432,14 +447,16 @@ struct RepositoryAcquisitionView: View {
                 reviewRow("本地位置", value: model.destinationURL?.path ?? "")
                 if model.supportsCredentials, !model.username.isEmpty { reviewRow("认证用户", value: model.username) }
             }
-            .padding(16).background(palette.sidebar.opacity(0.54), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(WorkbenchLayout.cardInset)
+            .background(palette.surface, in: RoundedRectangle(cornerRadius: WorkbenchLayout.cornerRadius, style: .continuous))
             note(model.supportsCredentials
                  ? "密码不会显示或写入日志；检出成功后会安全记住，以便下次自动填入。"
                  : "Git 凭据由系统钥匙串或 SSH 代理管理。")
             wizardError
             Spacer()
         }
-        .padding(26)
+        .padding(WorkbenchLayout.cardInset)
     }
 
     private var sourceSummary: some View {
@@ -449,6 +466,7 @@ struct RepositoryAcquisitionView: View {
                 .lineLimit(2).truncationMode(.middle).textSelection(.enabled)
         }
         .foregroundStyle(palette.secondaryText).padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(palette.sidebar.opacity(0.48), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
     }
 
@@ -469,7 +487,7 @@ struct RepositoryAcquisitionView: View {
                     .disabled(model.isLoadingSavedCredentials)
             }
         }
-        .padding(.horizontal, 26).padding(.vertical, 16).background(palette.surface)
+        .padding(.horizontal, WorkbenchLayout.cardInset).padding(.vertical, 16).background(palette.surface)
     }
 
     private var transferPage: some View {
@@ -489,7 +507,7 @@ struct RepositoryAcquisitionView: View {
                     if let notice = model.historyNotice { note(notice) }
                     transferOutcome
                 }
-                .padding(.horizontal, 26).padding(.top, 26).padding(.bottom, 14)
+                .padding(.horizontal, WorkbenchLayout.cardInset).padding(.top, WorkbenchLayout.cardInset).padding(.bottom, 14)
             }
             transferControls
         }
@@ -528,7 +546,7 @@ struct RepositoryAcquisitionView: View {
             }
             Spacer()
         }
-        .padding(.horizontal, 26).padding(.vertical, 16)
+        .padding(.horizontal, WorkbenchLayout.cardInset).padding(.vertical, 16)
         .background(palette.surface)
     }
 
@@ -568,6 +586,7 @@ struct RepositoryAcquisitionView: View {
     private func pageHeading(_ title: String, detail: String) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(title).font(.system(size: 24, weight: .semibold))
+                .frame(height: WorkbenchLayout.titleRowHeight, alignment: .leading)
             Text(detail).font(.system(size: 12)).foregroundStyle(palette.secondaryText).fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -699,19 +718,24 @@ private struct RemoteDirectoryTree: View {
             Button { if let entry { toggle(entry) } else { toggleRoot() } } label: {
                 Image(systemName: expandedURLs.contains(url) ? "chevron.down" : "chevron.right")
                     .font(.system(size: 9, weight: .semibold)).frame(width: 18, height: 42)
+                    .contentShape(.interaction, Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(expandedURLs.contains(url) ? "收起根目录" : "展开根目录")
             Button { select(url) } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "folder").foregroundStyle(palette.accent).frame(width: 14)
-                    Text(isRoot ? "仓库根目录" : name).lineLimit(1).truncationMode(.middle)
+                HStack(spacing: 0) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "folder").foregroundStyle(palette.accent).frame(width: 14)
+                        Text(isRoot ? "仓库根目录" : name).lineLimit(1).truncationMode(.middle)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    metadataColumns(for: entry)
                 }
                 .font(.system(size: 14, weight: selected ? .semibold : .regular))
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(height: 44)
+                .contentShape(.interaction, Rectangle())
             }
             .buttonStyle(.plain)
-            metadataColumns(for: entry)
         }
         .padding(.leading, CGFloat(depth) * 18 + 6).padding(.trailing, 12).frame(height: 44)
         .background(selected ? palette.selection.opacity(0.74) : .clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -795,19 +819,24 @@ private struct RemoteDirectoryChildren: View {
                 Button { toggle(entry) } label: {
                     Image(systemName: expandedURLs.contains(entry.url) ? "chevron.down" : "chevron.right")
                         .font(.system(size: 9, weight: .semibold)).frame(width: 18, height: 42)
+                        .contentShape(.interaction, Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("\(expandedURLs.contains(entry.url) ? "收起" : "展开") \(entry.name)")
                 Button { select(entry.url) } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "folder").foregroundStyle(palette.accent).frame(width: 14)
-                        Text(entry.name).lineLimit(1).truncationMode(.middle)
+                    HStack(spacing: 0) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "folder").foregroundStyle(palette.accent).frame(width: 14)
+                            Text(entry.name).lineLimit(1).truncationMode(.middle)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        metadataColumns(for: entry)
                     }
                     .font(.system(size: 14, weight: selected ? .semibold : .regular))
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(height: 44)
+                    .contentShape(.interaction, Rectangle())
                 }
                 .buttonStyle(.plain)
-                metadataColumns(for: entry)
             }
             .padding(.leading, CGFloat(depth) * 18 + 6).padding(.trailing, 12).frame(height: 44)
             .background(selected ? palette.selection.opacity(0.74) : .clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))

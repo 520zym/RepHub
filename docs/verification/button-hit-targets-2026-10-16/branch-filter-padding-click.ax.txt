@@ -1,0 +1,105 @@
+The following is a diff from the previous accessibility tree for Window: "git-workspace" with ~ and + representing changed and added elements, respectively. Removed elements are summarized by ID range.
+Removed element IDs: 133-152
++		190 text 分支
++		191 button Description: 全部展开, ID: arrow.up.left.and.arrow.down.right
++		192 button Description: 全部收起, ID: arrow.down.right.and.arrow.up.left
++		193 text field (settable) 搜索分支或标签…
++		194 scroll area Secondary Actions: Scroll Up, Scroll Down
++			195 button Description: 所有分支, Help: 显示已加载的全部提交
++			196 text 本地
++			197 button (selected) main
++			198 text 远端
++			199 button Description: branch/remote/origin, Help: origin
++			200 button Description: branch/remote/origin/feature, Help: feature
++			201 button origin/feature/soft-surface
++			202 button origin/HEAD
++			203 button Description: branch/remote/origin/hotfix, Help: hotfix
++			204 button origin/hotfix/response-status
++			205 button origin/main
++			206 scroll bar (settable, float) 0
++				207 value indicator (settable, float) 0
++				208 increment arrow button
++				209 decrement arrow button
++				210 increment page button
++				211 decrement page button
++		212 scroll area Secondary Actions: Scroll Up, Scroll Down
++			213 list
++				214 row (selected) merge: 合并响应状态修复
+RepHub 视觉验收
+·
+2026/10/16 13:54
+·
+1a904f83
++				215 row (selectable) fix: 标注响应状态判定
+张一鸣
+·
+2026/10/5 9:00
+·
+bb00bc1b
++				216 row (selectable) merge: 合并 soft surface 验收分支
+RepHub 视觉验收
+·
+2026/10/16 13:54
+·
+f9bba968
++				217 row (selectable) docs: 补充分支验收说明
+陈晨
+·
+2026/10/4 11:00
+·
+e7a58deb
++				218 row (selectable) feat: 为请求选项补充重试标记
+李书文
+·
+2026/10/4 9:00
+·
+ca6b14ce
++				219 row (selectable) feat(网络): 优化请求流程与历史阅读体验（第 6 次迭代）
+张一鸣
+·
+2026/10/3 3:00
+·
+e9695990
++				220 row (selectable) feat(网络): 优化请求流程与历史阅读体验（第 5 次迭代）
+陈晨
+·
+2026/10/2 20:00
+·
+9c3fb293
++				221 row (selectable) feat(网络): 优化请求流程与历史阅读体验（第 4 次迭代）
+李书文
+·
+2026/10/2 13:00
+·
+b615faf6
++				222 row (selectable) feat(网络): 优化请求流程与历史阅读体验（第 3 次迭代）
+张一鸣
+·
+2026/10/2 6:00
+·
+4f3d6d35
++				223 row (selectable) feat(网络): 优化请求流程与历史阅读体验（第 2 次迭代）
+陈晨
+·
+2026/10/1 23:00
+·
+37c1f558
++				224 row (selectable) feat(网络): 优化请求流程与历史阅读体验（第 1 次迭代）
+李书文
+·
+2026/10/1 16:00
+·
+0b222263
++				225 row (selectable) chore: 初始化网络组件和说明文件
+张一鸣
+·
+2026/10/1 9:00
+·
+ed29ab10
++			226 scroll bar (settable, float) 0.0006816821071488772
++				227 value indicator (settable, float) 0.0006816821071488772
++				228 increment arrow button
++				229 decrement arrow button
++				230 increment page button
++				231 decrement page button
+The focused UI element is 0 standard window git-workspace, Secondary Actions: Raise, ID: SwiftUI.WindowGroup<SwiftUI.PresentedWindowContent<RepHubApp.(unknown context at $104a60818).WorkspaceWindowID, RepHubApp.(unknown context at $104a607e8).WorkspaceWindowRoot>>-1-AppWindow-1

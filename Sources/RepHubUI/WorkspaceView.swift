@@ -18,6 +18,7 @@ public struct WorkspaceView: View {
     @State private var showsCommitSheet = false
     @State private var startsCommitWithAI = false
     @State private var conflictToOpen: String?
+    @State private var toolbarWindowWidth: CGFloat = 1_440
 
     public init(model: WorkspaceModel, appearance: AppearanceStore,
                 onOpenInNewWindow: ((URL?) -> Void)? = nil) {
@@ -46,11 +47,13 @@ public struct WorkspaceView: View {
             }
             .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
             .background(palette.background)
+            .onAppear { toolbarWindowWidth = geometry.size.width }
+            .onChange(of: geometry.size.width) { _, width in toolbarWindowWidth = width }
         }
         .tint(palette.accent)
         .foregroundStyle(palette.text)
         .preferredColorScheme(appearance.preferredColorScheme)
-        .toolbar { toolbar(palette: palette) }
+        .toolbar { toolbar(palette: palette, availableWidth: toolbarWindowWidth) }
         .toolbar(removing: .title)
         .onChange(of: section) { _, value in
             model.setHistoryVisible(value == .history)
@@ -177,11 +180,11 @@ public struct WorkspaceView: View {
     }
 
     private func workingCopy(size: CGSize, palette: AppPalette) -> some View {
-        VStack(spacing: 12) {
+        VStack(spacing: WorkbenchLayout.sectionGap) {
             if !currentConflicts.isEmpty { conflictBanner(palette: palette) }
             workingCopyEditor(palette: palette)
         }
-        .padding(14)
+        .padding(WorkbenchLayout.pageInset)
         .frame(width: size.width, height: size.height, alignment: .topLeading)
     }
 
@@ -190,23 +193,23 @@ public struct WorkspaceView: View {
             storageKey: "workspace.soft-v3.files") {
             WorkspaceFileTreeView(model: model, palette: palette, showsBindingPicker: true,
                                   selectedChangePaths: selectedChangePaths)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .padding(.trailing, 6)
+                .clipShape(RoundedRectangle(cornerRadius: WorkbenchLayout.cornerRadius, style: .continuous))
+                .padding(.trailing, WorkbenchLayout.sectionGap / 2)
         } trailing: {
             if showsCommitInspector {
                 SoftHorizontalSplit(fixedSide: .trailing, initialWidth: 340, minimumFixed: 260, flexibleMinimum: 390,
                                     storageKey: "workspace.soft-v3.commit") {
-                    workingDiff.padding(.horizontal, 6)
+                    workingDiff.padding(.horizontal, WorkbenchLayout.sectionGap / 2)
                 } trailing: {
                     WorkspaceCommitInspector(palette: palette, bindings: commitBindings,
                         message: unifiedCommitMessage, targets: Binding(get: { effectiveCommitTargets }, set: { commitTargets = $0 }), selectedCount: selectedCommitCount,
                         blockedReason: commitBlockedReason, aiAvailable: model.repositoryCommit.ai != nil,
                         isLocked: model.isWorkspaceMutationLocked, collapse: { showsCommitInspector = false },
                         prepare: { prepareSelectedCommit() }, prepareAI: { prepareSelectedCommit(withAI: true) })
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous)).padding(.leading, 6)
+                        .clipShape(RoundedRectangle(cornerRadius: WorkbenchLayout.cornerRadius, style: .continuous)).padding(.leading, WorkbenchLayout.sectionGap / 2)
                 }
             } else {
-                workingDiff.padding(.leading, 6)
+                workingDiff.padding(.leading, WorkbenchLayout.sectionGap / 2)
             }
         }
     }
@@ -214,7 +217,7 @@ public struct WorkspaceView: View {
     private var workingDiff: some View {
         DiffView(model: model, appearance: appearance, focusLine: model.diffFocusLine, focusToken: model.diffFocusToken)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: WorkbenchLayout.cornerRadius, style: .continuous))
     }
 
     private func conflictBanner(palette: AppPalette) -> some View {
@@ -233,7 +236,7 @@ public struct WorkspaceView: View {
         .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
-    @ToolbarContentBuilder private func toolbar(palette: AppPalette) -> some ToolbarContent {
+    @ToolbarContentBuilder private func toolbar(palette: AppPalette, availableWidth: CGFloat) -> some ToolbarContent {
         ToolbarItem(placement: .navigation) {
             HStack(spacing: 12) {
                 Menu {
@@ -309,13 +312,12 @@ public struct WorkspaceView: View {
                 .help("打开或切换仓库")
                 .disabled(model.isInteractionLocked)
                 if let binding = model.selectedBinding {
-                    Label(binding.currentBranch.isEmpty ? binding.providerName : binding.currentBranch,
-                          systemImage: binding.capabilities.contains(.branches) ? "arrow.triangle.branch" : "externaldrive")
-                        .labelStyle(.titleAndIcon)
-                        .font(.system(size: 12)).lineLimit(1)
-                        .truncationMode(.middle).frame(maxWidth: 170)
+                    ToolbarBindingLabel(
+                        title: binding.currentBranch.isEmpty ? binding.providerName : binding.currentBranch,
+                        symbol: binding.capabilities.contains(.branches) ? "arrow.triangle.branch" : "externaldrive",
+                        availableWidth: branchLabelWidth(in: availableWidth)
+                    )
                         .foregroundStyle(palette.secondaryText)
-                        .help(binding.currentBranch.isEmpty ? binding.providerName : binding.currentBranch)
                 }
             }
         }
@@ -390,6 +392,12 @@ public struct WorkspaceView: View {
 
     private var commitBindings: [RepositoryBinding] {
         (model.workspace?.bindings ?? []).filter { $0.capabilities.contains(.commit) }
+    }
+
+    /// 工具栏中间的视图切换、右侧操作与仓库菜单均需保留；其余空间交给分支名。
+    /// 值仅为可收缩的上限，不会放大短分支名，因此宽窗口会采用文字的自然完整宽度。
+    private func branchLabelWidth(in windowWidth: CGFloat) -> CGFloat {
+        max(0, windowWidth - 820)
     }
 
     /// 系统关闭 sheet 时会先把绑定置为 false；在 setter 内先收起，才能保留完成或失败的迁移提示。
@@ -605,6 +613,29 @@ public struct WorkspaceView: View {
             }
         }
         .disabled(model.isInteractionLocked)
+    }
+}
+
+/// 顶部来源标签的宽度先按完整分支名协商；工具栏不足时才收缩并在中间省略。
+/// 收缩上限由窗口宽度计算，为中间的视图切换和右侧仓库操作留出空间。
+private struct ToolbarBindingLabel: View {
+    let title: String
+    let symbol: String
+    let availableWidth: CGFloat
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .medium))
+            Text(title)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .layoutPriority(1)
+        }
+        .font(.system(size: 12))
+        .frame(maxWidth: availableWidth, alignment: .leading)
+        .accessibilityLabel(title)
+        .help(title)
     }
 }
 

@@ -94,13 +94,19 @@ public struct IgnoreRuleView: View {
             case .failed: ContentUnavailableView("无法添加忽略规则", systemImage: "exclamationmark.triangle", description: Text(model.errorMessage ?? "请刷新后重试。"))
             default: editor
             }
-        }.frame(width: 680, height: 460).background(palette.background).foregroundStyle(palette.text)
+        }
+        .workbenchSheet(minWidth: 600, idealWidth: 680, minHeight: 460, idealHeight: 540)
+        .background(palette.background).foregroundStyle(palette.text)
             .task { model.load() }.onChange(of: model.isBusy, initial: true) { _, busy in onBusyChange?(busy) }
     }
     private var editor: some View {
         HStack(spacing: 0) {
             List(model.preparation?.candidates ?? [], id: \.path, selection: $model.selectedPath) { candidate in
-                Button { model.select(candidate) } label: { Text(candidate.path).font(.system(.caption, design: .monospaced)) }.buttonStyle(.plain)
+                Button { model.select(candidate) } label: {
+                    Text(candidate.path).font(.system(.caption, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(.interaction, Rectangle())
+                }.buttonStyle(.plain)
             }.frame(width: 250)
             Divider().opacity(0.25)
             VStack(alignment: .leading, spacing: 13) {

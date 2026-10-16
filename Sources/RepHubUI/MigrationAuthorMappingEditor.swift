@@ -96,7 +96,7 @@ public struct MigrationAuthorMappingEditor: View {
         }
         .sheet(isPresented: $showsDirectory) {
             MigrationAuthorDirectorySettingsView(store: store, palette: palette)
-                .frame(minWidth: 700, minHeight: 520)
+                .workbenchSheet(minWidth: 700, idealWidth: 860, minHeight: 520, idealHeight: 660)
         }
         .onChange(of: authors) { _, next in
             // 外部重新预检或切换来源时才同步；输入变更已在下方写入 workingAuthors。

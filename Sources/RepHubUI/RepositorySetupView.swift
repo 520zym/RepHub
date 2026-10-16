@@ -20,7 +20,7 @@ struct RepositorySetupView: View {
                 form
             }
         }
-        .frame(width: 620)
+        .workbenchSheet(minWidth: 540, idealWidth: 620, minHeight: 460, idealHeight: 540)
         .background(palette.background)
         .foregroundStyle(palette.text)
         .onAppear {
@@ -80,7 +80,7 @@ struct RepositorySetupView: View {
             }
             .padding(22)
         }
-        .frame(height: 438)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var directoryRow: some View {
@@ -163,7 +163,7 @@ struct RepositorySetupView: View {
             Text("取消不会回滚已执行的版本控制步骤；完成后请重新打开文件夹核对状态。")
                 .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
         }
-        .padding(22).frame(minHeight: 270, alignment: .topLeading)
+        .padding(22).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func outcome(_ result: RepositorySetupResult) -> some View {
@@ -192,7 +192,7 @@ struct RepositorySetupView: View {
                 }
             }
         }
-        .padding(22).frame(minHeight: 230, alignment: .topLeading)
+        .padding(22).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var providerBinding: Binding<ProviderID> {

@@ -105,7 +105,8 @@ struct RepHubApp: App {
                 AuthorDirectorySettingsContent(store: dependencies.authorDirectory, appearance: dependencies.appearance)
                     .tabItem { Label("作者通讯录", systemImage: "person.crop.rectangle.stack") }
             }
-            .frame(width: 760, height: 600)
+            .frame(minWidth: 680, idealWidth: 760, maxWidth: .infinity,
+                   minHeight: 500, idealHeight: 600, maxHeight: .infinity)
             .preferredColorScheme(dependencies.appearance.preferredColorScheme)
         }
     }

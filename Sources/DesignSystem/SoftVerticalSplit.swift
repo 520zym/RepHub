@@ -42,13 +42,13 @@ public struct SoftVerticalSplit<Top: View, Bottom: View>: View {
             let fixedHeight = clamp(height, to: bounds)
             let flexibleHeight = max(0, proxy.size.height - fixedHeight)
 
-            VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 0) {
                 if fixedSide == .top {
-                    top().frame(height: fixedHeight).clipped()
-                    bottom().frame(height: flexibleHeight).clipped()
+                    top().frame(width: proxy.size.width, height: fixedHeight, alignment: .topLeading).clipped()
+                    bottom().frame(width: proxy.size.width, height: flexibleHeight, alignment: .topLeading).clipped()
                 } else {
-                    top().frame(height: flexibleHeight).clipped()
-                    bottom().frame(height: fixedHeight).clipped()
+                    top().frame(width: proxy.size.width, height: flexibleHeight, alignment: .topLeading).clipped()
+                    bottom().frame(width: proxy.size.width, height: fixedHeight, alignment: .topLeading).clipped()
                 }
             }
             .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)

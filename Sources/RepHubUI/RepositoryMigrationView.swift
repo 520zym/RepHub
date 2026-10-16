@@ -42,6 +42,7 @@ struct RepositoryMigrationView: View {
                 newDirectoryContent
             }
         }
+        .workbenchSheet(minWidth: 760, idealWidth: 930, minHeight: 580, idealHeight: 760)
         .background(palette.background)
         .foregroundStyle(palette.text)
     }
@@ -59,7 +60,7 @@ struct RepositoryMigrationView: View {
             Divider().opacity(0.25)
             footer
         }
-        .frame(minWidth: 760, idealWidth: 930, minHeight: 580, idealHeight: 710)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var header: some View {
@@ -442,9 +443,11 @@ private struct MigrationDirectoryTree: View {
         return HStack(spacing: 3) {
             Button { if node.root { toggleRoot() } else { toggle(.init(name: node.name, url: node.url, isDirectory: true)) } } label: {
                 Image(systemName: isExpanded ? "chevron.down" : "chevron.right").font(.system(size: 9)).frame(width: 14, height: 22)
+                    .contentShape(.interaction, Rectangle())
             }.buttonStyle(.plain)
             Button { select(node.url) } label: {
                 Label(node.name, systemImage: "folder").font(.system(size: 11, weight: selected == node.url ? .semibold : .regular)).frame(maxWidth: .infinity, alignment: .leading).frame(height: 22)
+                    .contentShape(.interaction, Rectangle())
             }.buttonStyle(.plain)
         }
         .padding(.leading, CGFloat(node.depth) * 15).padding(.trailing, 5)
@@ -490,11 +493,16 @@ private struct MigrationFileTree: View {
     private func row(_ node: Node) -> some View {
         HStack(spacing: 4) {
             if node.directory {
-                Button { toggle(node.path) } label: { Image(systemName: expanded.contains(node.path) ? "chevron.down" : "chevron.right").font(.system(size: 9)).frame(width: 13, height: 23) }.buttonStyle(.plain)
+                Button { toggle(node.path) } label: {
+                    Image(systemName: expanded.contains(node.path) ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9)).frame(width: 13, height: 23)
+                        .contentShape(.interaction, Rectangle())
+                }.buttonStyle(.plain)
             } else { Color.clear.frame(width: 13, height: 23) }
             Button { if !node.directory { select(node.path) } } label: {
                 HStack(spacing: 6) { Image(systemName: node.directory ? "folder" : "doc").foregroundStyle(node.directory ? palette.accent : palette.secondaryText); Text(node.name).lineLimit(1).truncationMode(.middle); Spacer(); if let item = node.comparison { stateMark(item.state) } }
                     .font(.system(size: 11, weight: selected == node.path ? .semibold : .regular)).frame(maxWidth: .infinity, alignment: .leading).frame(height: 23)
+                    .contentShape(.interaction, Rectangle())
             }.buttonStyle(.plain)
         }
         .padding(.leading, CGFloat(node.depth) * 15).padding(.trailing, 5)

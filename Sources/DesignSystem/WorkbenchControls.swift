@@ -120,6 +120,8 @@ public struct WorkbenchSegmentedPicker<Value: Hashable>: View {
                             RoundedRectangle(cornerRadius: 7, style: .continuous)
                                 .fill(isSelected ? palette.primaryFill : .clear)
                         }
+                        // 未选中的透明区域也属于按钮，不能只命中文字才响应。
+                        .contentShape(.interaction, RoundedRectangle(cornerRadius: 7, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("\(title)：\(option.title)")
