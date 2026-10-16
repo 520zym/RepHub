@@ -18,6 +18,7 @@ struct RepositoryCommitView: View {
     @State private var aiBindingID: String?
     @State private var aiSelectedPaths: Set<String> = []
     @State private var didOpenInitialAI = false
+    @State private var expandsMessageEditor = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -125,12 +126,17 @@ struct RepositoryCommitView: View {
                         .frame(width: 320, alignment: .topLeading)
                     preview(preparation)
                 }
+                // 说明展开时由预览区让出空间，底栏始终留在固定高度窗口内。
+                .frame(minHeight: 140, maxHeight: .infinity, alignment: .top)
                 .padding(.horizontal, 22).padding(.bottom, 14)
+
+                messageEditor(preparation)
+                    .padding(.horizontal, 22)
+                    .padding(.bottom, 12)
             } else {
                 ContentUnavailableView("没有可提交的版本控制来源", systemImage: "checkmark.circle")
                     .frame(height: 300)
             }
-            Divider().opacity(0.28)
             footer
         }
         .frame(height: 540, alignment: .top)
@@ -215,30 +221,47 @@ struct RepositoryCommitView: View {
         }
     }
 
-    private var footer: some View {
-        HStack(alignment: .bottom, spacing: 12) {
-            if let preparation = model.selectedPreparation {
-                VStack(alignment: .leading, spacing: 5) {
-                    HStack {
-                        Text("\(preparation.binding.providerID == .svn ? "SVN" : preparation.binding.providerName) 提交说明")
-                            .font(.system(size: 11, weight: .medium)).foregroundStyle(palette.secondaryText)
-                        Spacer()
-                        Button {
-                            aiBindingID = preparation.binding.id
-                            aiSelectedPaths = model.selectedFiles(for: preparation.binding.id)
-                            model.prepareAI()
-                            showsAI = true
-                        } label: { Label("AI 生成", systemImage: "sparkles") }
-                        .font(.system(size: 11)).buttonStyle(.plain).foregroundStyle(palette.accent)
-                        .disabled(model.ai == nil || !model.enabledBindingIDs.contains(preparation.binding.id)
-                                  || model.selectedFiles(for: preparation.binding.id).isEmpty || preparation.blockingReason != nil)
-                    }
-                    TextField("提交说明…", text: Binding(get: { model.message(for: preparation.binding.id) }, set: { model.setMessage($0, for: preparation.binding.id) }), axis: .vertical)
-                        .textFieldStyle(.plain).lineLimit(2...4).padding(.horizontal, 10).padding(.vertical, 5).frame(minHeight: 42, maxHeight: 70)
-                        .background(palette.sidebar.opacity(0.48), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-                        .disabled(!model.enabledBindingIDs.contains(preparation.binding.id) || preparation.blockingReason != nil)
+    private func messageEditor(_ preparation: RepositoryCommitPreparation) -> some View {
+        let enabled = model.enabledBindingIDs.contains(preparation.binding.id) && preparation.blockingReason == nil
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text("\(preparation.binding.providerID == .svn ? "SVN" : preparation.binding.providerName) 提交说明")
+                    .font(.system(size: 12, weight: .medium)).foregroundStyle(palette.secondaryText)
+                Spacer()
+                Button {
+                    expandsMessageEditor.toggle()
+                } label: {
+                    Label(expandsMessageEditor ? "收起编辑区" : "展开编辑区", systemImage: expandsMessageEditor ? "arrow.up.left.and.arrow.down.right" : "arrow.down.right.and.arrow.up.left")
                 }
+                .font(.system(size: 11))
+                .buttonStyle(.plain)
+                .foregroundStyle(palette.secondaryText)
+                .help(expandsMessageEditor ? "恢复文件预览高度" : "为提交说明提供更多编辑空间")
+
+                Button {
+                    aiBindingID = preparation.binding.id
+                    aiSelectedPaths = model.selectedFiles(for: preparation.binding.id)
+                    model.prepareAI()
+                    showsAI = true
+                } label: { Label("AI 生成", systemImage: "sparkles") }
+                .font(.system(size: 11, weight: .medium)).buttonStyle(.plain).foregroundStyle(palette.accent)
+                .disabled(model.ai == nil || !enabled || model.selectedFiles(for: preparation.binding.id).isEmpty)
             }
+            CommitMessageEditor(
+                text: Binding(get: { model.message(for: preparation.binding.id) }, set: { model.setMessage($0, for: preparation.binding.id) }),
+                palette: palette,
+                placeholder: "描述这次修改…",
+                height: expandsMessageEditor ? 240 : 150,
+                isEnabled: enabled,
+                help: "支持多行、换行、复制粘贴和撤销。长说明可在编辑区内滚动查看。"
+            )
+            // 每个提交目标保持独立原生编辑状态，避免切换 Git/SVN 后撤销栈串到另一份草稿。
+            .id(preparation.binding.id)
+        }
+    }
+
+    private var footer: some View {
+        HStack(spacing: 12) {
             Spacer()
             Button("取消", action: dismiss).buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
             Button(commitTitle) {
@@ -249,7 +272,7 @@ struct RepositoryCommitView: View {
             .disabled(!model.canCommit || workspace == nil)
             .help(model.canCommit ? "提交所选目标和文件" : "请至少选择一个文件，并填写每个已选目标的提交说明")
         }
-        .padding(.horizontal, 22).padding(.vertical, 13)
+        .padding(.horizontal, 22).padding(.vertical, 12)
         .background(palette.surface)
     }
 

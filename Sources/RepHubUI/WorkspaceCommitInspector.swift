@@ -15,6 +15,7 @@ struct WorkspaceCommitInspector: View {
     let collapse: () -> Void
     let prepare: () -> Void
     let prepareAI: () -> Void
+    @State private var expandsMessageEditor = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -27,28 +28,12 @@ struct WorkspaceCommitInspector: View {
             }
             .padding(.bottom, 8)
             Text("已选 \(selectedCount) 项变更").font(.system(size: 13)).foregroundStyle(palette.secondaryText)
-                .padding(.bottom, 20)
+                .padding(.bottom, 14)
+
+            messageSection
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    ZStack(alignment: .topLeading) {
-                        TextEditor(text: $message)
-                            .font(.system(size: 13)).scrollContentBackground(.hidden)
-                            .padding(7).frame(minHeight: 150, maxHeight: 200)
-                            .accessibilityLabel("提交说明")
-                            .help(bindings.count > 1 ? "在这里编辑会更新所有提交目标的说明；可在确认窗口分别修改。" : "编辑本次提交说明，可在确认窗口继续修改。")
-                        if message.isEmpty {
-                            Text("描述这次修改…").font(.system(size: 13)).foregroundStyle(palette.secondaryText)
-                                .padding(.horizontal, 12).padding(.top, 14).allowsHitTesting(false)
-                        }
-                    }
-                    .background(palette.surface, in: RoundedRectangle(cornerRadius: 8))
-
-                    Button(action: prepareAI) { Label("AI 生成", systemImage: "sparkles") }
-                        .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary))
-                        .disabled(!aiAvailable || !canPrepare)
-                        .help("进入提交预检，按真实文件范围选择场景并生成说明")
-
+                VStack(alignment: .leading, spacing: 16) {
                     VStack(alignment: .leading, spacing: 12) {
                         if bindings.count == 1, let binding = bindings.first {
                             Text("提交到 \(binding.providerID == .svn ? "SVN" : binding.providerName)")
@@ -78,7 +63,7 @@ struct WorkspaceCommitInspector: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                .padding(.bottom, 18)
+                .padding(.top, 12).padding(.bottom, 12)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             VStack(spacing: 9) {
@@ -103,6 +88,40 @@ struct WorkspaceCommitInspector: View {
     }
 
     private var canPrepare: Bool { !isLocked && blockedReason == nil && !targets.isEmpty && selectedCount > 0 }
+
+    private var messageSection: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Text("提交说明").font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Button {
+                    expandsMessageEditor.toggle()
+                } label: {
+                    Label(expandsMessageEditor ? "收起" : "展开", systemImage: expandsMessageEditor ? "arrow.up.left.and.arrow.down.right" : "arrow.down.right.and.arrow.up.left")
+                }
+                .font(.system(size: 11))
+                .buttonStyle(.plain)
+                .foregroundStyle(palette.secondaryText)
+                .help(expandsMessageEditor ? "恢复提交说明的默认高度" : "为提交说明提供更多编辑空间")
+                Button(action: prepareAI) { Label("AI 生成", systemImage: "sparkles") }
+                    .font(.system(size: 11, weight: .medium))
+                    .buttonStyle(.plain)
+                    .foregroundStyle(palette.accent)
+                    .disabled(!aiAvailable || !canPrepare)
+                    .help("进入提交预检，按真实文件范围选择场景并生成说明")
+            }
+            CommitMessageEditor(
+                text: $message,
+                palette: palette,
+                placeholder: "描述这次修改…",
+                height: expandsMessageEditor ? 250 : 156,
+                isEnabled: !isLocked,
+                help: bindings.count > 1
+                    ? "在这里编辑会更新所有提交目标的说明；可在确认窗口分别修改。支持多行和内部滚动。"
+                    : "编辑本次提交说明，可在确认窗口继续修改。支持多行和内部滚动。"
+            )
+        }
+    }
 
     private var targetDescription: String {
         let selected = bindings.filter { targets.contains($0.id) }

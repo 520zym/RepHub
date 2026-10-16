@@ -429,6 +429,14 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
                 states[revision.id] = .uncertain
             }
         }
+        // 混合工作副本中 rMax 不能仅按范围推断：它可能刚由当前工作副本提交，
+        // 也可能只是别的节点的 BASE。只为这个一个候选修订按实际变更路径读取
+        // 本地 BASE；不能证明时仍保持“需核对”。
+        if version.minimum != version.maximum, path == nil,
+           let maximumRevision = revisions.first(where: { Int(normalizedRevision($0.id)) == version.maximum }),
+           await maximumRevisionIsPresentLocally(maximumRevision.id, in: binding) {
+            states[maximumRevision.id] = .synchronized
+        }
         let incoming = revisionNumbers.filter { $0 > version.maximum }.count
         let uncertain = revisions.filter { states[$0.id] == .uncertain }.count
         let scope = path.map { "文件 \($0)" } ?? "工作副本"
@@ -2128,6 +2136,101 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         return SynchronizationLayout(isUncertain: false, reason: nil)
     }
 
+    /// `svnversion` 的最高修订只说明工作副本中至少有一个节点到达该修订，不能据此
+    /// 推定某条历史提交已经落在本地。这里仅核对 mixed range 的 rMax：要求它在当前
+    /// 绑定目录内的所有变更都是非复制的普通文件，并且每个文件的本地 BASE 都是该修订。
+    /// 任何目录、删除、复制、缺失或本地信息读取失败都保守返回 false。
+    private func maximumRevisionIsPresentLocally(_ revision: String, in binding: RepositoryBinding) async -> Bool {
+        guard let expected = Int(normalizedRevision(revision)), expected > 0 else { return false }
+        do {
+            let changes = try await changedPaths(in: binding, revision: revision)
+            guard !changes.isEmpty,
+                  changes.allSatisfy({ $0.action == "M" || ($0.action == "A" && $0.copyFromPath == nil && $0.copyFromRevision == nil) }) else {
+                return false
+            }
+
+            var paths: [String] = []
+            var seen = Set<String>()
+            for change in changes where seen.insert(change.path).inserted {
+                let local = try CommitFileSnapshot.validatedURL(root: binding.root, path: change.path)
+                let attributes = try FileManager.default.attributesOfItem(atPath: local.path)
+                guard attributes[.type] as? FileAttributeType == .typeRegular else { return false }
+                paths.append(change.path)
+            }
+            guard !paths.isEmpty else { return false }
+
+            // 一次 `svn info --xml` 批量读取所有路径；这是本地工作副本数据库读取，
+            // 不触发 update。不能使用 --show-item：多目标输出会附带路径列。
+            let result = try await svn(
+                ["info", "--xml", "--"] + paths.map(svnTargetPath),
+                directory: binding.root
+            )
+            _ = try requireSuccess(result, tool: "svn")
+            let entries = try SVNXMLDocument(data: result.data).infoEntries
+            guard entries.count == paths.count else { return false }
+            var expectedURLs: [String: String] = [:]
+            for path in paths { expectedURLs[path] = try repositoryFileURL(path: path, in: binding) }
+            var confirmed = Set<String>()
+            for entry in entries {
+                guard let rawPath = entry.path, let actualURL = entry.url,
+                      let base = entry.revision, Int(base) == expected else { return false }
+                let path = relativePath(rawPath, root: binding.root)
+                guard let expectedURL = expectedURLs[path],
+                      confirmed.insert(path).inserted,
+                      sameRepositoryNodeURL(actualURL, expectedURL) else { return false }
+            }
+            return confirmed.count == paths.count
+        } catch {
+            return false
+        }
+    }
+
+    private struct SynchronizationChangedPath {
+        let path: String
+        let action: String
+        let copyFromPath: String?
+        let copyFromRevision: String?
+    }
+
+    /// 日志是修订的权威变更范围；只接受位于当前工作副本 URL 子树内的路径。
+    /// XML 中的路径已经解码，故这里绝不能再按 URL percent decode。
+    private func changedPaths(in binding: RepositoryBinding, revision: String) async throws -> [SynchronizationChangedPath] {
+        let result = try await svn(
+            ["log", "--xml", "-v", "-r", normalizedRevision(revision)],
+            directory: binding.root,
+            remoteURL: binding.remoteURL
+        )
+        let document = try SVNXMLDocument(data: result.data)
+        let prefix = try await workingCopyRepositoryPath(in: binding)
+        var paths: [SynchronizationChangedPath] = []
+        for change in document.logEntries.flatMap(\.changedPaths) {
+            // 绑定目录的祖先被复制、替换或修改时，不能只核对其中列出的文件。
+            // 反向包含检查保留目录边界，避免把相似前缀的兄弟目录当作祖先。
+            if let descendant = relativeRepositoryPath(prefix, removing: change.path), !descendant.isEmpty {
+                return []
+            }
+            // 根目录属性变更属于当前绑定范围；不能悄悄滤掉后把同一修订误判为已同步。
+            guard let path = relativeRepositoryPath(change.path, removing: prefix) else { continue }
+            guard !path.isEmpty else { return [] }
+            paths.append(SynchronizationChangedPath(path: path, action: change.action,
+                                                    copyFromPath: change.copyFromPath,
+                                                    copyFromRevision: change.copyFromRevision))
+        }
+        return paths
+    }
+
+    private func sameRepositoryNodeURL(_ actual: String, _ expected: String) -> Bool {
+        guard let actualURL = URL(string: actual), let expectedURL = URL(string: expected),
+              let actualComponents = URLComponents(url: actualURL, resolvingAgainstBaseURL: false),
+              let expectedComponents = URLComponents(url: expectedURL, resolvingAgainstBaseURL: false) else {
+            return false
+        }
+        return actualComponents.scheme?.lowercased() == expectedComponents.scheme?.lowercased()
+            && actualComponents.host?.lowercased() == expectedComponents.host?.lowercased()
+            && actualComponents.port == expectedComponents.port
+            && decodedURLPath(actualURL) == decodedURLPath(expectedURL)
+    }
+
     private func deletionLogEntry(
         target: String,
         path: String,
@@ -2822,6 +2925,7 @@ private actor SVNSessionCredentialStore {
 
 final class SVNXMLDocument: NSObject, XMLParserDelegate {
     struct InfoEntry {
+        var path: String?
         var kind: String?
         var url: String?
         var repositoryRoot: String?
@@ -2844,6 +2948,8 @@ final class SVNXMLDocument: NSObject, XMLParserDelegate {
     struct ChangedPath {
         let path: String
         let action: String
+        let copyFromPath: String?
+        let copyFromRevision: String?
     }
 
     struct LogEntry {
@@ -2863,12 +2969,16 @@ final class SVNXMLDocument: NSObject, XMLParserDelegate {
     }
 
     private(set) var infoEntry: InfoEntry?
+    private(set) var infoEntries: [InfoEntry] = []
     private(set) var statusEntries: [StatusEntry] = []
     private(set) var logEntries: [LogEntry] = []
     private(set) var listEntries: [ListEntry] = []
     private var currentStatus: StatusEntry?
+    private var currentInfo: InfoEntry?
     private var currentLog: LogEntry?
     private var currentPathAction: String?
+    private var currentPathCopyFromPath: String?
+    private var currentPathCopyFromRevision: String?
     private var currentList: ListEntry?
     private var elementStack: [String] = []
     private var text = ""
@@ -2887,7 +2997,7 @@ final class SVNXMLDocument: NSObject, XMLParserDelegate {
         text = ""
         switch elementName {
         case "entry" where elementStack.contains("info"):
-            infoEntry = InfoEntry(kind: attributeDict["kind"], revision: attributeDict["revision"])
+            currentInfo = InfoEntry(path: attributeDict["path"], kind: attributeDict["kind"], revision: attributeDict["revision"])
         case "entry" where elementStack.contains("status"):
             if let path = attributeDict["path"] { currentStatus = StatusEntry(path: path) }
         case "wc-status":
@@ -2917,6 +3027,8 @@ final class SVNXMLDocument: NSObject, XMLParserDelegate {
             )
         case "path" where currentLog != nil:
             currentPathAction = attributeDict["action"] ?? ""
+            currentPathCopyFromPath = attributeDict["copyfrom-path"]
+            currentPathCopyFromRevision = attributeDict["copyfrom-rev"]
         default:
             break
         }
@@ -2928,11 +3040,11 @@ final class SVNXMLDocument: NSObject, XMLParserDelegate {
 
     func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
         let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if elementName == "url", currentLog == nil { infoEntry?.url = value }
-        if elementName == "root", currentLog == nil { infoEntry?.repositoryRoot = value }
-        if elementName == "uuid", currentLog == nil { infoEntry?.repositoryUUID = value }
-        if elementName == "wcroot-abspath" { infoEntry?.workingCopyRoot = value }
-        if elementName == "depth", currentLog == nil { infoEntry?.depth = value }
+        if elementName == "url", currentLog == nil { currentInfo?.url = value }
+        if elementName == "root", currentLog == nil { currentInfo?.repositoryRoot = value }
+        if elementName == "uuid", currentLog == nil { currentInfo?.repositoryUUID = value }
+        if elementName == "wcroot-abspath" { currentInfo?.workingCopyRoot = value }
+        if elementName == "depth", currentLog == nil { currentInfo?.depth = value }
         if elementName == "author" {
             if currentLog != nil { currentLog?.author = value }
             else if let list = currentList {
@@ -2954,12 +3066,22 @@ final class SVNXMLDocument: NSObject, XMLParserDelegate {
                                     revision: list.revision, author: list.author, date: list.date)
         }
         if elementName == "path", let action = currentPathAction {
-            currentLog?.changedPaths.append(ChangedPath(path: value, action: action))
+            // SVN log 的 <path> 是原始节点名，允许前后空格；不能沿用 trim 后的 value。
+            currentLog?.changedPaths.append(ChangedPath(path: text, action: action,
+                                                        copyFromPath: currentPathCopyFromPath,
+                                                        copyFromRevision: currentPathCopyFromRevision))
             currentPathAction = nil
+            currentPathCopyFromPath = nil
+            currentPathCopyFromRevision = nil
         }
         if elementName == "entry", let status = currentStatus {
             statusEntries.append(status)
             currentStatus = nil
+        }
+        if elementName == "entry", let info = currentInfo {
+            infoEntries.append(info)
+            infoEntry = info
+            currentInfo = nil
         }
         if elementName == "logentry", let log = currentLog {
             logEntries.append(log)
