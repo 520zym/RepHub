@@ -440,15 +440,6 @@ public actor WorkingCopyMigrationService {
 
 private extension WorkingCopyMigrationService {
     private func prepareInitial(_ job: inout Job, progress: @escaping RepositoryOperationProgressHandler) async throws {
-        let sourceCache = job.folder.appendingPathComponent("source-cache-\(UUID().uuidString)", isDirectory: true)
-        // 缓存目录由来源适配器创建并拒绝复用；业务层只分配唯一隔离路径。
-        defer { try? FileManager.default.removeItem(at: sourceCache) }
-        await progress(RepositoryOperationProgress("正在准备来源修订会话…"))
-        let snapshotSession = try await source.makeMigrationSnapshotSession(
-            plan: job.plan.source,
-            in: sourceCache,
-            seedWorkingCopy: job.plan.workingCopy.directory
-        )
         let verifiedSession: (any RepositoryVerifiedMigrationSession)?
         if let verifiedTarget = target as? any RepositoryVerifiedMigrationTargetProvider {
             await progress(RepositoryOperationProgress("正在准备已核对 Git 对象会话…"))
@@ -463,39 +454,62 @@ private extension WorkingCopyMigrationService {
         }
         let revisions = Array(plan.source.revisions.dropFirst(job.mappings.count))
         let prefetchMux = verifiedSession != nil && prefetchEnabled ? MigrationPrefetchProgressMux(output: progress) : nil
-        let prefetcher = prefetchMux.map { OnePageMigrationSnapshotPrefetcher(session: snapshotSession, workspace: job.folder, progress: $0) }
+        // 初迁的多个来源会话各自只读复制相同的干净 SVN 基线；每条 lane 严格递增，
+        // 但最多只保留三份待消费快照。恢复后 revisions 已经 dropFirst(检查点数)，
+        // 所以首批直接从未完成的前三条开始，而不要求重新经过原计划的首条修订。
+        let useBoundedPrefetch = prefetchMux != nil && revisions.count > 1
+        let boundedPrefetcher: BoundedMigrationSnapshotPrefetcher?
+        let snapshotSession: (any RepositoryMigrationSnapshotSession)?
+        let serialSourceCache: URL?
+        if useBoundedPrefetch, let prefetchMux {
+            let source = self.source
+            let sourcePlan = plan.source
+            let seed = plan.workingCopy.directory
+            boundedPrefetcher = BoundedMigrationSnapshotPrefetcher(
+                revisions: revisions,
+                workspace: job.folder,
+                progress: prefetchMux,
+                sessionFactory: { cache in
+                    try await source.makeMigrationSnapshotSession(plan: sourcePlan, in: cache, seedWorkingCopy: seed)
+                }
+            )
+            snapshotSession = nil
+            serialSourceCache = nil
+        } else {
+            let sourceCache = job.folder.appendingPathComponent("source-cache-\(UUID().uuidString)", isDirectory: true)
+            // 缓存目录由来源适配器创建并拒绝复用；业务层只分配唯一隔离路径。
+            await progress(RepositoryOperationProgress("正在准备来源修订会话…"))
+            snapshotSession = try await source.makeMigrationSnapshotSession(
+                plan: job.plan.source,
+                in: sourceCache,
+                seedWorkingCopy: job.plan.workingCopy.directory
+            )
+            serialSourceCache = sourceCache
+            boundedPrefetcher = nil
+        }
+        defer {
+            if let serialSourceCache { try? FileManager.default.removeItem(at: serialSourceCache) }
+        }
         do {
-        for (offset, revision) in revisions.enumerated() {
+        if let boundedPrefetcher { try await boundedPrefetcher.start() }
+        for revision in revisions {
             try Task.checkCancellation()
             let index = job.mappings.count + 1
             let sourceTree: URL
-            if let prefetcher, let prefetchMux {
-                if offset > 0 {
-                    await prefetchMux.foreground(revisionProgress("正在等待预取来源修订", revision: revision, index: index, total: totalRevisions))
-                }
-                if let prefetched = try await prefetcher.consume(revision) {
-                    sourceTree = prefetched
-                    await prefetchMux.foreground(revisionProgress("正在使用后台预取来源修订", revision: revision, index: index, total: totalRevisions))
-                } else {
-                    sourceTree = job.folder.appendingPathComponent("source-\(UUID().uuidString)")
-                    let update = revisionProgress("正在准备来源修订", revision: revision, index: index, total: totalRevisions)
-                    await prefetchMux.foreground(update)
-                    try await snapshotSession.exportSnapshot(revision: revision, to: sourceTree) { update in
-                        await prefetchMux.foreground(self.revisionProgress("正在准备来源修订", revision: revision, index: index, total: totalRevisions,
-                                                                            update: update, usesSourcePhase: true))
-                    }
-                }
+            if let boundedPrefetcher, let prefetchMux {
+                // 首批会话需要复制各自隔离基线，首条同样可能等待较久；始终先给出
+                // 当前前台修订，后台 lane 的进度只附加到 detail，不能替换完成数。
+                await prefetchMux.foreground(revisionProgress("正在等待并行预取来源修订", revision: revision, index: index, total: totalRevisions))
+                sourceTree = try await boundedPrefetcher.consume(revision)
+                await prefetchMux.foreground(revisionProgress("正在使用后台预取来源修订", revision: revision, index: index, total: totalRevisions))
             } else {
                 sourceTree = job.folder.appendingPathComponent("source-\(UUID().uuidString)")
                 await progress(revisionProgress("正在准备来源修订", revision: revision, index: index, total: totalRevisions))
+                guard let snapshotSession else { throw VersionControlError.invalidData("缺少 SVN 快照来源会话。") }
                 try await snapshotSession.exportSnapshot(revision: revision, to: sourceTree) { update in
                     await progress(self.revisionProgress("正在准备来源修订", revision: revision, index: index, total: totalRevisions,
                                                          update: update, usesSourcePhase: true))
                 }
-            }
-            if let prefetcher, revisions.indices.contains(offset + 1) {
-                try Task.checkCancellation()
-                try await prefetcher.schedule(revisions[offset + 1])
             }
             try Task.checkCancellation()
             let imported = decorated(revision, plan: plan)
@@ -550,9 +564,9 @@ private extension WorkingCopyMigrationService {
             let completed = revisionProgress("已转换 SVN 修订", revision: revision, index: index, total: totalRevisions, completed: true)
             if let prefetchMux { await prefetchMux.foreground(completed) } else { await progress(completed) }
         }
-        if let prefetcher { await prefetcher.finish() }
+        if let boundedPrefetcher { await boundedPrefetcher.finish() }
         } catch {
-            if let prefetcher { await prefetcher.cancelAndDrain() }
+            if let boundedPrefetcher { await boundedPrefetcher.cancelAndDrain() }
             throw error
         }
         // 若刚好在末次提交检查点后中断，恢复时没有留下来源快照。重新导出固定末端
@@ -560,6 +574,7 @@ private extension WorkingCopyMigrationService {
         if job.leftTree == nil, let last = plan.source.revisions.last, !job.mappings.isEmpty {
             let sourceTree = job.folder.appendingPathComponent("source-\(UUID().uuidString)")
             await progress(RepositoryOperationProgress("正在重建最终 SVN 快照用于恢复核对…"))
+            guard let snapshotSession else { throw VersionControlError.invalidData("恢复核对缺少 SVN 快照来源会话。") }
             try await snapshotSession.exportSnapshot(revision: last, to: sourceTree, progress: progress)
             job.leftTree = sourceTree
         }

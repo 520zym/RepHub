@@ -15,6 +15,7 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
     let shelfStorageDirectory: URL?
     private let tlsFallback: SVNAutomaticTLSFallback
     private let commandExecutor: @Sendable ([String], URL, URL?) async throws -> CommandResult
+    private let migrationMetadataExecutor: @Sendable ([String], URL, URL?) async throws -> CommandResult
     private let credentials = SVNSessionCredentialStore()
 
     public init(runner: CommandRunner = CommandRunner(), shelfStorageDirectory: URL? = nil) {
@@ -29,6 +30,10 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
                 opensslConfiguration: configuration
             )
         }
+        self.migrationMetadataExecutor = { arguments, directory, configuration in
+            try await runner.run(executable: "svn", arguments: arguments, directory: directory,
+                                 timeout: SVNMigrationMetadataRead.timeout, opensslConfiguration: configuration)
+        }
     }
 
     init(
@@ -40,6 +45,7 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         self.shelfStorageDirectory = nil
         self.tlsFallback = tlsFallback
         self.commandExecutor = commandExecutor
+        self.migrationMetadataExecutor = commandExecutor
     }
 
     public let id: ProviderID = .svn
@@ -2424,7 +2430,7 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
                             // switch 没有共享状态。并发仅限一个只读查询与一次隔离缓存更新，
                             // 可隐藏每修订一次 info 的 RTT；随后仍必须同时成功
                             // 并以查询到的 URL 核对 switch 结果。
-                            async let expectedURL = historicalURL(at: requested)
+                            async let expectedURL = historicalURL(at: requested, progress: progress)
                             async let switched: Void = switchWorkingCopy(to: requested, progress: progress)
                             let (resolvedURL, _) = try await (expectedURL, switched)
                             try await validateWorkingCopy(at: requested, expectedURL: resolvedURL)
@@ -2437,7 +2443,7 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
                         ))
                         // checkout 与固定 peg 的 info 分别只写隔离缓存和只读远端；
                         // 同样可并行，但完成后保留 URL/UUID/精确 revision 的完整核对。
-                        async let expectedURL = historicalURL(at: requested)
+                        async let expectedURL = historicalURL(at: requested, progress: progress)
                         async let checkedOut: Void = checkoutWorkingCopy(at: requested, progress: progress)
                         let (resolvedURL, _) = try await (expectedURL, checkedOut)
                         try await validateWorkingCopy(at: requested, expectedURL: resolvedURL)
@@ -2448,7 +2454,7 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
                         "增量获取 SVN 快照…",
                         detail: "正在从 r\(lastRevision!) 切换至 r\(requested)。"
                     ))
-                    async let expectedURL = historicalURL(at: requested)
+                    async let expectedURL = historicalURL(at: requested, progress: progress)
                     async let switched: Void = switchWorkingCopy(to: requested, progress: progress)
                     let (resolvedURL, _) = try await (expectedURL, switched)
                     try await validateWorkingCopy(at: requested, expectedURL: resolvedURL)
@@ -2472,6 +2478,9 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
                 ))
             } catch {
                 invalidated = true
+                if case VersionControlError.timedOut(let tool) = error, tool == "svn" || tool == "svnversion" {
+                    throw VersionControlError.timedOut("\(tool) 准备或核对 \(revision.id) 快照")
+                }
                 throw error
             }
         }
@@ -2527,7 +2536,7 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
                 await reporter.finish()
             } catch {
                 await reporter.finish()
-                throw normalizedSnapshotError(error, revision: revision)
+                throw normalizedSnapshotError(error, revision: revision, operation: "首次检出")
             }
         }
 
@@ -2551,7 +2560,7 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
                 await reporter.finish()
             } catch {
                 await reporter.finish()
-                throw normalizedSnapshotError(error, revision: revision)
+                throw normalizedSnapshotError(error, revision: revision, operation: "增量获取")
             }
         }
 
@@ -2636,27 +2645,39 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
 
         /// 对复制/改名节点，固定 URL 在较早修订可能解析为其历史祖先 URL。先以同一 peg
         /// 查询实际节点 URL，再核对本地 switch 结果，不能把“当前 URL”硬套给旧修订。
-        private func historicalURL(at revision: Int) async throws -> String {
+        private func historicalURL(at revision: Int, progress: @escaping RepositoryOperationProgressHandler) async throws -> String {
             do {
-                let result = try await provider.runRemoteWrite(
-                    ["--non-interactive", "--no-auth-cache", "info", "--xml", "-r", String(revision), provider.migrationTarget(address, pegRevision: String(anchor))],
-                    remoteURL: address,
-                    tlsMode: try requiredTLSMode(),
-                    timeout: 20
-                )
+                let arguments = ["--non-interactive", "--no-auth-cache", "info", "--xml", "-r", String(revision), provider.migrationTarget(address, pegRevision: String(anchor))]
+                let mode = try requiredTLSMode()
+                let result = try await SVNMigrationMetadataRead.run(revision: revision, progress: progress) {
+                    // 保持固定 TLS 模式和认证；只读 info 可重试，绝不重放 switch/checkout。
+                    if await self.provider.credentials.credential(for: self.address) != nil {
+                        return try await self.provider.runRemoteWrite(arguments, remoteURL: self.address, tlsMode: mode,
+                                                                     timeout: SVNMigrationMetadataRead.timeout)
+                    }
+                    let directory = FileManager.default.temporaryDirectory
+                    switch mode {
+                    case .modern:
+                        return try await self.provider.migrationMetadataExecutor(arguments, directory, nil)
+                    case .legacyCompatible:
+                        return try await SVNTLSConfiguration.withLegacyCompatibleConfiguration { configuration in
+                            try await self.provider.migrationMetadataExecutor(arguments, directory, configuration)
+                        }
+                    }
+                }
                 _ = try requireSuccess(result, tool: "svn")
                 guard let raw = try SVNXMLDocument(data: result.data).infoEntry?.url else {
                     throw VersionControlError.invalidData("无法核对 SVN r\(revision) 的历史节点 URL。")
                 }
                 return try provider.normalizedRemoteAddress(raw)
             } catch {
-                throw normalizedSnapshotError(error, revision: revision)
+                throw normalizedSnapshotError(error, revision: revision, operation: "查询历史节点")
             }
         }
 
         private func validateWorkingCopy(at expectedRevision: Int, expectedURL: String) async throws {
             try Task.checkCancellation()
-            let info = try await provider.svn(["info", "--xml", "--depth", "empty"], directory: workingCopy)
+            let info = try await localVerificationCommand("svn", ["--non-interactive", "--no-auth-cache", "info", "--xml", "--depth", "empty"], revision: expectedRevision, phase: "节点核验")
             guard let entry = try SVNXMLDocument(data: info.data).infoEntry,
                   entry.kind == "dir",
                   let url = entry.url,
@@ -2674,14 +2695,14 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
             } else {
                 repositoryUUID = uuid
             }
-            let versionResult = try await provider.runner.run(executable: "svnversion", arguments: [], directory: workingCopy)
+            let versionResult = try await localVerificationCommand("svnversion", [], revision: expectedRevision, phase: "版本核验")
             _ = try requireSuccess(versionResult, tool: "svnversion")
             let version = try provider.parseWorkingCopyVersion(versionResult.output, path: nil)
             guard version.minimum == expectedRevision, version.maximum == expectedRevision,
                   !version.flags.contains("M"), !version.flags.contains("S"), !version.flags.contains("P") else {
                 throw VersionControlError.invalidRepository("SVN 迁移缓存未处于精确 r\(expectedRevision) 的干净完整状态（\(version.description)）。")
             }
-            let status = try await provider.svn(["status", "--xml", "--no-ignore", "--ignore-externals"], directory: workingCopy)
+            let status = try await localVerificationCommand("svn", ["--non-interactive", "--no-auth-cache", "status", "--xml", "--no-ignore", "--ignore-externals"], revision: expectedRevision, phase: "状态核验")
             let entries = try SVNXMLDocument(data: status.data).statusEntries
             let dirty = entries.filter { entry in
                 entry.item != "normal" || !["normal", "none", ""].contains(entry.properties) || entry.treeConflicted
@@ -2698,7 +2719,20 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
             return tlsMode
         }
 
-        private func normalizedSnapshotError(_ error: Error, revision: Int) -> Error {
+        private func localVerificationCommand(_ tool: String, _ arguments: [String], revision: Int, phase: String) async throws -> CommandResult {
+            do {
+                // 完整状态核验可能遍历大型目录。保留所有校验，避免沿用普通查询的 20 秒上限。
+                let result = try await provider.runner.run(executable: tool, arguments: arguments, directory: workingCopy, timeout: 120)
+                return try requireSuccess(result, tool: tool)
+            } catch VersionControlError.timedOut {
+                throw VersionControlError.timedOut("SVN r\(revision) 本地\(phase)")
+            }
+        }
+
+        private func normalizedSnapshotError(_ error: Error, revision: Int, operation: String) -> Error {
+            if case VersionControlError.timedOut = error {
+                return VersionControlError.timedOut("SVN r\(revision) \(operation)")
+            }
             if provider.isMissingSVNPath(error) {
                 return VersionControlError.invalidData("SVN r\(revision) 无法从固定来源路径导出；该目录可能在此修订尚不存在、已删除，或需要无法解析的复制/改名祖先。请改用快照模式或调整迁移范围。")
             }
