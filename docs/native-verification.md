@@ -424,3 +424,7 @@ swift test --filter 'Inspection|ConflictEditing|Shelf|GitPartialCommit|Repositor
 后台迁移入口、来源写保护、256 MiB Git blob 流式校验、工作副本初迁持久检查点已完成针对性验证，去重 76 项通过。真实 SVN/Git 验证仅在临时夹具中运行。实窗自动化访问未获许可，因此尚未完成实窗交互/截图验收。详见[本轮验证记录](verification/migration-background/README.md)。
 
 本轮最终 Release 打包及 `codesign --verify --deep --strict build/RepHub.app` 通过；收尾模型改动后 13 项迁移界面状态测试复验通过，不重复计数。构建日志 `/tmp/rephub-background-release-final.log`。
+
+## 2026-10-16：目录历史与 SVN 截止版本
+
+实际迁移预览入口发现目录最后变更修订可能早于工作副本 BASE。校验已改为历史修订不超过固定锚点，不要求两者相等；后续源端检查以最后实际迁入的目录修订检测倒退。13 项工作副本服务测试通过（`/tmp/rephub-anchor-validation-tests.log`），包含早于锚点的预览及检查点恢复、越界拒绝、无新目录提交和真实倒退。测试仅使用临时夹具。

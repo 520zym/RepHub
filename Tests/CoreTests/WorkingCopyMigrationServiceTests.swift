@@ -80,6 +80,45 @@ struct WorkingCopyMigrationServiceTests {
         #expect(preview.mappings.map(\.source.id) == ["r9"])
     }
 
+    @Test("目录历史早于固定 BASE 时仍可预览并从检查点恢复")
+    func allowsHistoryEndingBeforeFixedAnchorAndResumesCheckpoint() async throws {
+        let root = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        // SVN 修订号属于整个仓库。这个目录在 r8 后未再修改，但工作副本 BASE 已固定在 r9。
+        let revisions = [MigrationRevision(id: "r8", author: "svn-user", date: .distantPast, message: "last directory change")]
+        let source = WorkingCopySourceFixture(root: root, revisions: revisions)
+        let first = WorkingCopyMigrationService(source: source, target: WorkingCopyTargetFixture())
+        let plan = try await first.plan(at: root, remoteURL: "https://example.test/project.git", branch: "main",
+                                         mode: .history, action: .initial, progress: { _ in })
+
+        #expect(plan.workingCopy.baseRevision == "r9")
+        #expect(plan.source.anchor == "r9")
+        #expect(plan.source.revisions.map(\.id) == ["r8"])
+
+        let preview = try await first.prepare(plan, progress: { _ in })
+        #expect(preview.mappings.map(\.source.id) == ["r8"])
+        let folder = try #require(await first.partialDirectory(for: plan.id))
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        let restoredService = WorkingCopyMigrationService(source: source, target: WorkingCopyTargetFixture())
+        let restored = try await restoredService.resume(from: folder.appendingPathComponent("checkpoint.json"))
+        let restoredPreview = try await restoredService.prepare(restored, progress: { _ in })
+        #expect(restoredPreview.mappings.map(\.source.id) == ["r8"])
+    }
+
+    @Test("目录历史不能超过固定 BASE")
+    func rejectsHistoryAfterFixedAnchor() async throws {
+        let root = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let revisions = [MigrationRevision(id: "r10", author: "svn-user", date: .distantPast, message: "after base")]
+        let source = WorkingCopySourceFixture(root: root, revisions: revisions)
+        let service = WorkingCopyMigrationService(source: source, target: WorkingCopyTargetFixture())
+        let plan = try await service.plan(at: root, remoteURL: "https://example.test/project.git", branch: "main",
+                                          mode: .history, action: .initial, progress: { _ in })
+
+        await #expect(throws: VersionControlError.self) {
+            try await service.prepare(plan, progress: { _ in })
+        }
+    }
+
     @Test("初迁失败后只从检查点后的修订继续，不重复已核对提交")
     func retriesInitialMigrationFromVerifiedCheckpoint() async throws {
         let root = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: root) }
@@ -170,6 +209,29 @@ struct WorkingCopyMigrationServiceTests {
         guard case let .update(update) = result else { Issue.record("expected source update"); return }
         #expect(update.migratedRevision == "r9")
         #expect(update.latestRevision == "r12")
+    }
+
+    @Test("全仓库截止版本晚于目录末端时，目录历史停在末端仍为最新")
+    func reportsCurrentWhenLatestMatchesLastImportedDirectoryRevision() async throws {
+        let root = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let git = root.appendingPathComponent(".git", isDirectory: true)
+        try FileManager.default.createDirectory(at: git, withIntermediateDirectories: true)
+        let revision = MigrationRevision(id: "r9", author: "a", date: .now, message: "last directory change")
+        let mapping = MigrationMapping(source: revision, author: MigrationAuthor(name: "a", email: "a@example.test"), targetCommit: String(repeating: "a", count: 40))
+        // r10 是迁移时固定的全仓库 BASE；所选目录的最后一次变更仍是 r9。
+        let record = WorkingCopyMigrationRecord(sourceURL: "https://example.test/svn/project", repositoryUUID: "uuid",
+                                                startRevision: "r9", lastRevision: "r10", remoteURL: "https://example.test/git",
+                                                branch: "main", mappings: [mapping], cutoverRevision: "r10")
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(record).write(to: git.appendingPathComponent("rephub-svn-migration.json"))
+
+        let service = WorkingCopyMigrationService(
+            source: WorkingCopySourceFixture(root: root, latestRevision: "r9"),
+            target: WorkingCopyTargetFixture()
+        )
+        let result = try await service.checkForSourceUpdates(at: root)
+        guard case let .current(migratedRevision, _) = result else { Issue.record("expected current source history"); return }
+        #expect(migratedRevision == "r10")
     }
 
     @Test("源端修订倒退不会被误报为已同步")

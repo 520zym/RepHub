@@ -181,7 +181,12 @@ public actor WorkingCopyMigrationService {
         guard let after = try readRecord(at: root), sameRecord(before, after) else {
             throw VersionControlError.invalidData("检查期间迁移记录已变化，请重新检查。")
         }
-        if latestNumber < migratedNumber {
+        // 记录的 lastRevision 是全仓库截止版本；目录的最后变更可能更早。
+        // 上面已验证该截止版本仍存在，倒退检测以实际迁入的目录提交为下界。
+        guard let importedNumber = before.mappings.last.flatMap({ revisionNumber($0.source.id) }) else {
+            throw VersionControlError.invalidData("迁移记录缺少可比较的末端目录修订。")
+        }
+        if latestNumber < importedNumber {
             throw VersionControlError.invalidData("源 SVN 最新修订早于已迁移修订，无法确认来源历史连续性。")
         }
         if latestNumber > migratedNumber {
@@ -742,8 +747,11 @@ private extension WorkingCopyMigrationService {
             }
             previous = value
         }
-        guard plan.source.revisions.last?.id == plan.source.anchor else {
-            throw VersionControlError.invalidData("迁移计划的末端修订与固定锚点不一致。")
+        // SVN 修订号属于整个仓库；所选目录在固定 BASE 之前可能已经停止变化。
+        // 日志末端只需不晚于固定锚点，不能为相等而伪造该目录没有发生的提交。
+        guard let anchor = revisionNumber(plan.source.anchor), let lastRevision = previous,
+              lastRevision <= anchor else {
+            throw VersionControlError.invalidData("迁移计划的末端修订超出固定锚点。")
         }
         if plan.action == .initial {
             guard plan.previousRecord == nil, plan.expectedGitTip == nil,
