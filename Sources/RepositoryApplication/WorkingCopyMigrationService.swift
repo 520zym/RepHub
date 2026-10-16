@@ -8,6 +8,7 @@ public actor WorkingCopyMigrationService {
     private let source: any RepositoryWorkingCopyMigrationSourceProvider
     private let target: any RepositoryWorkingCopyMigrationTargetProvider
     private let prefetchEnabled: Bool
+    private let writeGate: RepositoryWriteGate
     private var busy = false
     private var jobs: [UUID: Job] = [:]
 
@@ -80,14 +81,16 @@ public actor WorkingCopyMigrationService {
     }
 
     public init(source: any RepositoryWorkingCopyMigrationSourceProvider,
-                target: any RepositoryWorkingCopyMigrationTargetProvider) {
-        self.init(source: source, target: target, prefetchEnabled: true)
+                target: any RepositoryWorkingCopyMigrationTargetProvider,
+                writeGate: RepositoryWriteGate = RepositoryWriteGate()) {
+        self.init(source: source, target: target, prefetchEnabled: true, writeGate: writeGate)
     }
 
     init(source: any RepositoryWorkingCopyMigrationSourceProvider,
          target: any RepositoryWorkingCopyMigrationTargetProvider,
-         prefetchEnabled: Bool) {
-        self.source = source; self.target = target; self.prefetchEnabled = prefetchEnabled
+         prefetchEnabled: Bool,
+         writeGate: RepositoryWriteGate = RepositoryWriteGate()) {
+        self.source = source; self.target = target; self.prefetchEnabled = prefetchEnabled; self.writeGate = writeGate
     }
 
     public func partialDirectory(for planID: UUID) -> URL? { jobs[planID]?.folder }
@@ -367,6 +370,13 @@ public actor WorkingCopyMigrationService {
 
     public func applyAndPublish(_ preview: WorkingCopyMigrationPreview,
                                 progress: @escaping RepositoryOperationProgressHandler) async throws -> WorkingCopyMigrationResult {
+        try await writeGate.withExclusiveAccess { [self] in
+            try await self.applyAndPublishUnlocked(preview, progress: progress)
+        }
+    }
+
+    private func applyAndPublishUnlocked(_ preview: WorkingCopyMigrationPreview,
+                                         progress: @escaping RepositoryOperationProgressHandler) async throws -> WorkingCopyMigrationResult {
         try begin(); defer { busy = false }
         guard var job = jobs[preview.id], job.complete, same(job.plan, preview.plan), preview.tip == job.mappings.last?.targetCommit,
               !preview.tip.isEmpty else { throw VersionControlError.invalidData("迁移预览已失效，请重新生成。") }

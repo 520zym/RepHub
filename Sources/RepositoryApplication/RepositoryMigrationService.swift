@@ -7,6 +7,7 @@ public actor RepositoryMigrationService {
     private let sources: [any RepositoryMigrationSourceProvider]
     private let targets: [any RepositoryMigrationTargetProvider]
     private let prefetchEnabled: Bool
+    private let writeGate: RepositoryWriteGate
     private var busy = false
     private var jobs: [UUID: Job] = [:]
 
@@ -93,13 +94,15 @@ public actor RepositoryMigrationService {
         }
     }
 
-    public init(sources: [any RepositoryMigrationSourceProvider], targets: [any RepositoryMigrationTargetProvider]) {
-        self.init(sources: sources, targets: targets, prefetchEnabled: true)
+    public init(sources: [any RepositoryMigrationSourceProvider], targets: [any RepositoryMigrationTargetProvider],
+                writeGate: RepositoryWriteGate = RepositoryWriteGate()) {
+        self.init(sources: sources, targets: targets, prefetchEnabled: true, writeGate: writeGate)
     }
 
     init(sources: [any RepositoryMigrationSourceProvider], targets: [any RepositoryMigrationTargetProvider],
-         prefetchEnabled: Bool) {
-        self.sources = sources; self.targets = targets; self.prefetchEnabled = prefetchEnabled
+         prefetchEnabled: Bool,
+         writeGate: RepositoryWriteGate = RepositoryWriteGate()) {
+        self.sources = sources; self.targets = targets; self.prefetchEnabled = prefetchEnabled; self.writeGate = writeGate
     }
 
     public func browseSource(providerID: ProviderID, location: RemoteRepositoryLocation) async throws -> RemoteDirectoryListing {
@@ -307,10 +310,7 @@ public actor RepositoryMigrationService {
             try Task.checkCancellation()
             await progress(RepositoryOperationProgress("正在核对最终隔离 Git 预览…", fractionCompleted: 1))
             try await verify(job, target: target)
-            _ = try validateDestination(plan.destination)
-            // moveItem 无覆盖；本地目标在耗时转换期间被创建也必须失败。
-            try FileManager.default.moveItem(at: job.repository, to: plan.destination)
-            job.repository = plan.destination
+            job.repository = try await moveVerifiedPreviewRepository(job.repository, to: plan.destination)
             job.complete = true
             jobs[plan.id] = job
             try saveReport(job, to: reportURL(job), verified: true)
@@ -342,6 +342,12 @@ public actor RepositoryMigrationService {
     }
 
     public func publish(_ preview: MigrationPreview, progress: @escaping RepositoryOperationProgressHandler) async throws -> MigrationPublicationResult {
+        try await writeGate.withExclusiveAccess { [self] in
+            try await self.publishUnlocked(preview, progress: progress)
+        }
+    }
+
+    private func publishUnlocked(_ preview: MigrationPreview, progress: @escaping RepositoryOperationProgressHandler) async throws -> MigrationPublicationResult {
         try begin(); defer { busy = false }
         guard let job = jobs[preview.id], job.complete, preview.tip == job.mappings.last?.targetCommit,
               preview.canPublish, samePlan(job.plan, preview.plan) else {
@@ -433,6 +439,21 @@ public actor RepositoryMigrationService {
     private func begin() throws {
         guard !busy else { throw VersionControlError.unsupported("另一项迁移操作正在执行，请等待结束。") }
         busy = true
+    }
+
+    /// 隔离预览可以并发生成；只有把已核对的结果落到用户指定的最终目录时才占用写门禁。
+    /// 目标存在性检查必须和 moveItem 位于同一临界区，防止另一窗口在检查后创建路径。
+    private func moveVerifiedPreviewRepository(_ repository: URL, to destination: URL) async throws -> URL {
+        try await writeGate.withExclusiveAccess { [self] in
+            try await self.moveVerifiedPreviewRepositoryUnlocked(repository, to: destination)
+        }
+    }
+
+    private func moveVerifiedPreviewRepositoryUnlocked(_ repository: URL, to destination: URL) throws -> URL {
+        let destination = try validateDestination(destination)
+        // moveItem 无覆盖；本地目标在耗时转换期间被创建也必须失败。
+        try FileManager.default.moveItem(at: repository, to: destination)
+        return destination
     }
     private func sourceProvider(_ id: ProviderID) throws -> any RepositoryMigrationSourceProvider {
         guard let value = sources.first(where: { $0.id == id }) else { throw VersionControlError.unsupported("尚未实现此来源的迁移。") }

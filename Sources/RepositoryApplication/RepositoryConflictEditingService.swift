@@ -35,6 +35,14 @@ public extension RepositoryService {
     func resolveContentConflict(_ request: RepositoryConflictResolutionRequest,
                                 bindingID: String,
                                 in workspace: Workspace) async throws -> WorkspaceConflictResolutionResult {
+        try await writeGate.withExclusiveAccess { [self] in
+            try await self.resolveContentConflictUnlocked(request, bindingID: bindingID, in: workspace)
+        }
+    }
+
+    private func resolveContentConflictUnlocked(_ request: RepositoryConflictResolutionRequest,
+                                                bindingID: String,
+                                                in workspace: Workspace) async throws -> WorkspaceConflictResolutionResult {
         guard !isPerformingOperation else {
             throw VersionControlError.unsupported("已有仓库操作正在执行，请等待完成或取消后的状态核对结束。")
         }

@@ -5,8 +5,12 @@ import DesignSystem
 /// 菜单和工作区顶部使用同一份最近记录，不引入全局仓库侧栏。
 public struct RecentRepositoriesMenu: View {
     @Bindable private var model: WorkspaceModel
+    private let onOpenInNewWindow: ((URL) -> Void)?
 
-    public init(model: WorkspaceModel) { self.model = model }
+    public init(model: WorkspaceModel, onOpenInNewWindow: ((URL) -> Void)? = nil) {
+        self.model = model
+        self.onOpenInNewWindow = onOpenInNewWindow
+    }
 
     public var body: some View {
         Menu("最近打开") {
@@ -18,6 +22,16 @@ public struct RecentRepositoriesMenu: View {
                         model.openRecentRepository(repository)
                     }
                     .help(repository.path)
+                }
+                if let onOpenInNewWindow {
+                    Menu("在新窗口打开") {
+                        ForEach(model.recentRepositories.entries) { repository in
+                            Button("\(repository.name) — \(repository.displayPath)") {
+                                onOpenInNewWindow(URL(fileURLWithPath: repository.path))
+                            }
+                            .help(repository.path)
+                        }
+                    }
                 }
                 Divider()
                 Button("清空最近记录", action: model.recentRepositories.clear)
@@ -32,6 +46,7 @@ struct RecentRepositoriesView: View {
     let palette: AppPalette
     let open: (RecentRepository) -> Void
     var maximumHeight: CGFloat = 264
+    var openInNewWindow: ((URL) -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -46,7 +61,10 @@ struct RecentRepositoriesView: View {
                 LazyVStack(spacing: 4) {
                     ForEach(store.entries) { repository in
                         RecentRepositoryRow(repository: repository, palette: palette,
-                                            open: { open(repository) }, remove: { store.remove(repository) })
+                                            open: { open(repository) }, remove: { store.remove(repository) },
+                                            openInNewWindow: openInNewWindow.map { action in
+                                                { action(URL(fileURLWithPath: repository.path)) }
+                                            })
                     }
                 }
             }
@@ -60,6 +78,7 @@ private struct RecentRepositoryRow: View {
     let palette: AppPalette
     let open: () -> Void
     let remove: () -> Void
+    let openInNewWindow: (() -> Void)?
     @State private var isHovering = false
 
     var body: some View {
@@ -98,6 +117,11 @@ private struct RecentRepositoryRow: View {
         .background(isHovering ? palette.selection.opacity(0.65) : palette.sidebar.opacity(0.48),
                     in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .onHover { isHovering = $0 }
-        .contextMenu { Button("从最近记录中移除", action: remove) }
+        .contextMenu {
+            Button("打开仓库", action: open)
+            if let openInNewWindow { Button("在新窗口打开", action: openInNewWindow) }
+            Divider()
+            Button("从最近记录中移除", action: remove)
+        }
     }
 }

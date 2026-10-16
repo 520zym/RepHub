@@ -6,6 +6,7 @@ import VersionControlCore
 public struct WorkspaceView: View {
     @Bindable private var model: WorkspaceModel
     @Bindable private var appearance: AppearanceStore
+    private let onOpenInNewWindow: ((URL?) -> Void)?
     @Environment(\.colorScheme) private var systemColorScheme
     @State private var section: WorkspaceSection = .workingCopy
     @State private var showsCommitInspector = true
@@ -18,9 +19,11 @@ public struct WorkspaceView: View {
     @State private var startsCommitWithAI = false
     @State private var conflictToOpen: String?
 
-    public init(model: WorkspaceModel, appearance: AppearanceStore) {
+    public init(model: WorkspaceModel, appearance: AppearanceStore,
+                onOpenInNewWindow: ((URL?) -> Void)? = nil) {
         self.model = model
         self.appearance = appearance
+        self.onOpenInNewWindow = onOpenInNewWindow
     }
 
     public var body: some View {
@@ -109,7 +112,11 @@ public struct WorkspaceView: View {
                 openLocalFolder: model.chooseFolder,
                 openAcquiredFolder: model.open,
                 recentRepositories: model.recentRepositories,
-                openRecentRepository: model.openRecentRepository
+                openRecentRepository: model.openRecentRepository,
+                openInNewWindow: onOpenInNewWindow.map { action in { directory in
+                    model.dismissRepositoryAcquisition()
+                    action(directory)
+                } }
             )
         }
         .sheet(isPresented: $model.showsRepositoryManagement, onDismiss: {
@@ -231,7 +238,11 @@ public struct WorkspaceView: View {
             HStack(spacing: 12) {
                 Menu {
                     Button("打开仓库…", action: model.showRepositoryAcquisition)
-                    RecentRepositoriesMenu(model: model)
+                    if let onOpenInNewWindow {
+                        Button("在新窗口打开仓库…") { onOpenInNewWindow(nil) }
+                    }
+                    RecentRepositoriesMenu(model: model,
+                        onOpenInNewWindow: onOpenInNewWindow.map { action in { action($0) } })
                     if let workspace = model.workspace {
                         Divider()
                         if workspace.isUnmanaged {
@@ -588,7 +599,8 @@ public struct WorkspaceView: View {
             .fixedSize(horizontal: false, vertical: true)
             if !model.recentRepositories.entries.isEmpty {
                 RecentRepositoriesView(store: model.recentRepositories, palette: palette,
-                                       open: model.openRecentRepository, maximumHeight: 236)
+                                       open: model.openRecentRepository, maximumHeight: 236,
+                                       openInNewWindow: onOpenInNewWindow.map { action in { action($0) } })
                     .frame(width: 560)
             }
         }

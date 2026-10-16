@@ -35,8 +35,12 @@ public struct BindingSnapshot: Sendable {
 /// Orchestrates provider contracts only. No Git/SVN implementation dependency is allowed in this module.
 public actor RepositoryService {
     let providers: [any VersionControlProvider]
+    let writeGate: RepositoryWriteGate
     var isPerformingOperation = false
-    public init(providers: [any VersionControlProvider]) { self.providers = providers }
+    public init(providers: [any VersionControlProvider], writeGate: RepositoryWriteGate = RepositoryWriteGate()) {
+        self.providers = providers
+        self.writeGate = writeGate
+    }
 
     public func acquisitionOptions() -> [RepositoryAcquisitionOption] {
         providers.compactMap { ($0 as? any RepositoryAcquisitionProvider)?.acquisitionOption }
@@ -61,6 +65,16 @@ public actor RepositoryService {
     public func acquire(providerID: ProviderID, location: RemoteRepositoryLocation,
                         destinationParent: URL, directoryName: String,
                         progress: @escaping RepositoryOperationProgressHandler) async throws -> RepositoryAcquisitionResult {
+        try await writeGate.withExclusiveAccess { [self] in
+            try await self.acquireUnlocked(providerID: providerID, location: location,
+                                           destinationParent: destinationParent, directoryName: directoryName,
+                                           progress: progress)
+        }
+    }
+
+    private func acquireUnlocked(providerID: ProviderID, location: RemoteRepositoryLocation,
+                                 destinationParent: URL, directoryName: String,
+                                 progress: @escaping RepositoryOperationProgressHandler) async throws -> RepositoryAcquisitionResult {
         guard !isPerformingOperation else {
             throw VersionControlError.unsupported("已有仓库操作正在执行，请等待完成或取消。")
         }
@@ -136,6 +150,13 @@ public actor RepositoryService {
     /// 在任何写入前重新检测全部来源。初始化只能发生在未受管且没有检测故障的目录。
     public func initialize(_ request: RepositorySetupRequest,
                            progress: @escaping RepositoryOperationProgressHandler) async throws -> RepositorySetupResult {
+        try await writeGate.withExclusiveAccess { [self] in
+            try await self.initializeUnlocked(request, progress: progress)
+        }
+    }
+
+    private func initializeUnlocked(_ request: RepositorySetupRequest,
+                                    progress: @escaping RepositoryOperationProgressHandler) async throws -> RepositorySetupResult {
         guard !isPerformingOperation else {
             throw VersionControlError.unsupported("已有仓库操作正在执行，请等待完成或取消后的状态核对结束。")
         }
@@ -440,6 +461,13 @@ public actor RepositoryService {
     /// 先复核全部目标，再依次执行 Git、本次其余来源；单个结果不能代表整个批次。
     public func commit(_ requests: [RepositoryCommitRequest], in workspace: Workspace,
                        progress: @escaping RepositoryCommitProgressHandler) async throws -> WorkspaceCommitResult {
+        try await writeGate.withExclusiveAccess { [self] in
+            try await self.commitUnlocked(requests, in: workspace, progress: progress)
+        }
+    }
+
+    private func commitUnlocked(_ requests: [RepositoryCommitRequest], in workspace: Workspace,
+                                progress: @escaping RepositoryCommitProgressHandler) async throws -> WorkspaceCommitResult {
         guard !isPerformingOperation else { throw VersionControlError.unsupported("已有仓库操作正在执行，请等待完成。") }
         guard !requests.isEmpty, Set(requests.map(\.bindingID)).count == requests.count else {
             throw VersionControlError.invalidRepository("请选择至少一个提交目标，且每个来源只提交一次。")
@@ -593,6 +621,13 @@ public actor RepositoryService {
     /// 管理写操作在执行前复核能力、绑定与状态令牌，完成或取消后均独立刷新全部关联工作副本。
     public func manage(_ request: RepositoryManagementRequest, bindingID: String, in workspace: Workspace,
                        progress: @escaping RepositoryOperationProgressHandler) async throws -> WorkspaceManagementResult {
+        try await writeGate.withExclusiveAccess { [self] in
+            try await self.manageUnlocked(request, bindingID: bindingID, in: workspace, progress: progress)
+        }
+    }
+
+    private func manageUnlocked(_ request: RepositoryManagementRequest, bindingID: String, in workspace: Workspace,
+                                progress: @escaping RepositoryOperationProgressHandler) async throws -> WorkspaceManagementResult {
         guard !isPerformingOperation else {
             throw VersionControlError.unsupported("已有仓库操作正在执行，请等待完成或取消后的状态核对结束。")
         }
@@ -770,6 +805,13 @@ public actor RepositoryService {
     /// 同一服务实例串行写入；只执行一个已识别的目标，完成后刷新全部绑定。
     public func perform(_ operation: RepositoryOperationKind, bindingID: String, in workspace: Workspace,
                         progress: @escaping RepositoryOperationProgressHandler) async throws -> WorkspaceOperationResult {
+        try await writeGate.withExclusiveAccess { [self] in
+            try await self.performUnlocked(operation, bindingID: bindingID, in: workspace, progress: progress)
+        }
+    }
+
+    private func performUnlocked(_ operation: RepositoryOperationKind, bindingID: String, in workspace: Workspace,
+                                 progress: @escaping RepositoryOperationProgressHandler) async throws -> WorkspaceOperationResult {
         guard !isPerformingOperation else {
             throw VersionControlError.unsupported("已有仓库操作正在执行，请等待完成或取消后的状态核对结束。")
         }

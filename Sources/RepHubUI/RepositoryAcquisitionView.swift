@@ -12,6 +12,7 @@ struct RepositoryAcquisitionView: View {
     let openAcquiredFolder: (URL) -> Void
     let recentRepositories: RecentRepositoryStore
     let openRecentRepository: (RecentRepository) -> Void
+    var openInNewWindow: ((URL) -> Void)? = nil
 
     @State private var source: Source = .local
 
@@ -79,7 +80,8 @@ struct RepositoryAcquisitionView: View {
                 Spacer()
             }
             if !recentRepositories.entries.isEmpty {
-                RecentRepositoriesView(store: recentRepositories, palette: palette, open: openRecentRepository)
+                RecentRepositoriesView(store: recentRepositories, palette: palette, open: openRecentRepository,
+                                       openInNewWindow: openInNewWindow)
                     .padding(.top, 8)
                     .disabled(model.isBusy)
             }

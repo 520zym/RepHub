@@ -19,6 +19,13 @@ public extension RepositoryService {
     /// 使用与更新、普通提交相同的全局操作锁。适配器仍须在写入前自行复核 source/index 状态。
     func commitPartial(_ request: RepositoryPartialCommitRequest, in binding: RepositoryBinding,
                        progress: @escaping RepositoryOperationProgressHandler) async throws -> RepositoryCommitResult {
+        try await writeGate.withExclusiveAccess { [self] in
+            try await self.commitPartialUnlocked(request, in: binding, progress: progress)
+        }
+    }
+
+    private func commitPartialUnlocked(_ request: RepositoryPartialCommitRequest, in binding: RepositoryBinding,
+                                       progress: @escaping RepositoryOperationProgressHandler) async throws -> RepositoryCommitResult {
         guard !isPerformingOperation else { throw VersionControlError.unsupported("已有仓库操作正在执行，请等待完成或取消后的状态核对结束。") }
         // actor 在 await 时可重入，必须先占用全局写操作锁，再做任何适配器探测。
         isPerformingOperation = true

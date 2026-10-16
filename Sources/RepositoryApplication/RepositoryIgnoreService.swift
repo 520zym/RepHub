@@ -18,6 +18,13 @@ public extension RepositoryService {
     /// 忽略规则会修改工作副本元数据，因此与其他写操作共享服务锁；不会创建版本提交。
     func applyIgnore(_ request: RepositoryIgnoreRequest, in binding: RepositoryBinding,
                      progress: @escaping RepositoryOperationProgressHandler) async throws -> RepositoryIgnoreResult {
+        try await writeGate.withExclusiveAccess { [self] in
+            try await self.applyIgnoreUnlocked(request, in: binding, progress: progress)
+        }
+    }
+
+    private func applyIgnoreUnlocked(_ request: RepositoryIgnoreRequest, in binding: RepositoryBinding,
+                                     progress: @escaping RepositoryOperationProgressHandler) async throws -> RepositoryIgnoreResult {
         guard !isPerformingOperation else { throw VersionControlError.unsupported("已有仓库操作正在执行，请等待完成或取消后的状态核对结束。") }
         // actor 在 await 时可重入，必须先占用全局写操作锁，再做任何适配器探测。
         isPerformingOperation = true

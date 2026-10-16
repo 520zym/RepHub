@@ -28,6 +28,14 @@ public extension RepositoryService {
 
     func createShelf(in binding: RepositoryBinding, name: String, includeUntracked: Bool,
                      mode: RepositoryShelfMode, expectedStateToken: String) async throws -> RepositoryShelfRecord {
+        try await writeGate.withExclusiveAccess { [self] in
+            try await self.createShelfUnlocked(in: binding, name: name, includeUntracked: includeUntracked,
+                                               mode: mode, expectedStateToken: expectedStateToken)
+        }
+    }
+
+    private func createShelfUnlocked(in binding: RepositoryBinding, name: String, includeUntracked: Bool,
+                                     mode: RepositoryShelfMode, expectedStateToken: String) async throws -> RepositoryShelfRecord {
         try validateShelfName(name)
         guard !isPerformingOperation else { throw VersionControlError.unsupported("已有仓库操作正在执行，请稍后再试。") }
         guard let adapter = try provider(for: binding) as? any RepositoryShelfProvider else {
@@ -48,6 +56,12 @@ public extension RepositoryService {
     }
 
     func restoreShelf(in binding: RepositoryBinding, record: RepositoryShelfRecord) async throws -> RepositoryShelfRestoreResult {
+        try await writeGate.withExclusiveAccess { [self] in
+            try await self.restoreShelfUnlocked(in: binding, record: record)
+        }
+    }
+
+    private func restoreShelfUnlocked(in binding: RepositoryBinding, record: RepositoryShelfRecord) async throws -> RepositoryShelfRestoreResult {
         guard record.providerID == binding.providerID else { throw VersionControlError.invalidRepository("搁置记录与当前仓库类型不一致。") }
         guard !isPerformingOperation else { throw VersionControlError.unsupported("已有仓库操作正在执行，请稍后再试。") }
         guard let adapter = try provider(for: binding) as? any RepositoryShelfProvider else {
@@ -63,6 +77,12 @@ public extension RepositoryService {
     }
 
     func deleteShelf(in binding: RepositoryBinding, record: RepositoryShelfRecord) async throws {
+        try await writeGate.withExclusiveAccess { [self] in
+            try await self.deleteShelfUnlocked(in: binding, record: record)
+        }
+    }
+
+    private func deleteShelfUnlocked(in binding: RepositoryBinding, record: RepositoryShelfRecord) async throws {
         guard record.providerID == binding.providerID else { throw VersionControlError.invalidRepository("搁置记录与当前仓库类型不一致。") }
         guard !isPerformingOperation else { throw VersionControlError.unsupported("已有仓库操作正在执行，请稍后再试。") }
         guard let adapter = try provider(for: binding) as? any RepositoryShelfProvider else {

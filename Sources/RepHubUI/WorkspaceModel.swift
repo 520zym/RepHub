@@ -467,6 +467,20 @@ public final class WorkspaceModel {
         }
     }
 
+    /// 关闭一个原生窗口只终止该窗口的读取和监控；写入任务由窗口关闭保护拦截。
+    public func closeWindow() {
+        guard !isOperating else { return }
+        toolRequest = nil
+        aiReview?.cancel()
+        repositoryCommit.ai?.cancel()
+        repositoryAcquisition.cancel()
+        repositoryAcquisition.endSession()
+        repositoryMigration?.dismiss()
+        workingCopyMigration?.dismiss()
+        hasBackgroundMigration = false
+        closeWorkspace()
+    }
+
     public func closeWorkspace() {
         guard !isInteractionLocked else { return }
         cancelReading()

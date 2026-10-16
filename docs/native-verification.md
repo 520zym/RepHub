@@ -436,3 +436,14 @@ swift test --filter 'Inspection|ConflictEditing|Shelf|GitPartialCommit|Repositor
 针对性测试共 31 项通过：迁移编排 13、真实临时 SVN/Git 工作副本集成 5、SVN 快照会话 5、只读查询重试 4、并行预取 4。初轮取消测试因 `/var` 与 `/private/var` 别名字符串比较失败，修正为解析符号链接后比较；最终 9 项相关测试复验通过。日志为 `/tmp/rephub-parallel-migration-tests.log` 与 `/tmp/rephub-parallel-migration-retest.log`，不是全量回归。覆盖独立缓存并行、单缓存不重入、乱序完成按序消费、取消等待、未来修订失败、已消费目录保留及来源原工作副本不变。
 
 本轮用户明确授权了实际指定仓库迁移，原生实窗已验证收起到后台、主页面切换与点击进行中标记恢复。实际转换曾在第 64 条后报告 SVN 超时，检查点保留；此处记录测试与交互结果，不代表远端发布已经完成。
+
+
+## 2026-10-16：多窗口仓库工作区
+
+`WindowGroup` 按唯一请求创建独立工作区模型；菜单通过当前窗口焦点路由。共享主题、AI 配置、作者通讯录、最近记录及业务服务，关闭窗口取消本窗读取与监控；进行中的仓库操作阻止关闭，退出时遍历全部窗口。跨服务写门禁覆盖版本控制写入、迁移应用／发布及新目录迁移的最终落盘；隔离转换不占用整段写锁。
+
+定向测试合计 **64 项去重通过**：首轮 63 项涵盖工作区隔离、关闭后的迟到响应、写入中拒绝关闭、跨服务互斥、取消释放、获取／提交／管理／迁移编排；补充最终目录落盘保护后 9 项复验，其中 1 项新增。日志 `/tmp/rephub-multiwindow-tests.log`、`/tmp/rephub-multiwindow-gate-retest.log`。不是全量回归。
+
+原生界面使用独立应用标识 `com.zym.RepHub.multiWindowQA`，仅打开 `RepHub-MultiWindow-QA-qzff9foh` 下的“窗口甲”和“窗口乙”两个临时 Git 仓库。已验证：⌘O 当前窗口打开、⇧⌘O 新窗口直接显示打开面板、⌘N 空白新窗口、最近记录右键在新窗口打开（同目录也新建窗口）、窗口菜单按仓库名切换、独立提交草稿及历史 TAB、菜单关闭当前仓库不影响另一个窗口、⌘W 只关闭副窗口。没有执行测试提交／推送，没有打开或修改正式 SVN 仓库。一次关闭后自动化连接短暂失去窗口；进程采样无死锁，重新连接后原窗口和草稿均存在。
+
+Release 产物为 `build/RepHub.app`，最终打包日志 `/tmp/rephub-multiwindow-release-final.log`。窗口交互在相同 UI 代码的独立 Debug 应用中验收，Release 另做启动与签名检查。
