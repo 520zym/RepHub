@@ -16,7 +16,6 @@ public struct WorkspaceView: View {
     @State private var showsOperationSheet = false
     @State private var showsCommitSheet = false
     @State private var startsCommitWithAI = false
-    @State private var migrationResultToOpen: URL?
     @State private var conflictToOpen: String?
 
     public init(model: WorkspaceModel, appearance: AppearanceStore) {
@@ -141,27 +140,15 @@ public struct WorkspaceView: View {
                 model.open(result.directory)
             })
         }
-        .sheet(isPresented: $model.showsRepositoryMigration, onDismiss: {
-            model.repositoryMigration?.dismiss()
-            model.workingCopyMigration?.dismiss()
-            if let directory = migrationResultToOpen {
-                migrationResultToOpen = nil
-                model.open(directory)
-            } else {
-                model.refresh()
-            }
-        }) {
+        .sheet(isPresented: migrationSheetBinding, onDismiss: model.hideRepositoryMigration) {
             if let migration = model.repositoryMigration {
-                RepositoryMigrationView(model: migration, workingCopyModel: model.workingCopyMigration, startsInWorkingCopy: model.migrationStartsInWorkingCopy, palette: palette, dismiss: {
-                    migration.dismiss()
-                    model.workingCopyMigration?.dismiss()
-                    model.showsRepositoryMigration = false
-                }, openResult: { result in
-                    migrationResultToOpen = result
-                    migration.dismiss()
-                    model.workingCopyMigration?.dismiss()
-                    model.showsRepositoryMigration = false
-                })
+                RepositoryMigrationView(model: migration, workingCopyModel: model.workingCopyMigration,
+                    presentationMode: Binding(get: { model.migrationPresentationMode }, set: { model.migrationPresentationMode = $0 }),
+                    palette: palette, dismiss: model.dismissRepositoryMigration,
+                    hideToBackground: model.hideRepositoryMigration, openResult: { result in
+                        model.dismissRepositoryMigration()
+                        model.open(result)
+                    })
             }
         }
         .sheet(isPresented: $model.showsAIReview) {
@@ -207,7 +194,7 @@ public struct WorkspaceView: View {
                     WorkspaceCommitInspector(palette: palette, bindings: commitBindings,
                         message: unifiedCommitMessage, targets: Binding(get: { effectiveCommitTargets }, set: { commitTargets = $0 }), selectedCount: selectedCommitCount,
                         blockedReason: commitBlockedReason, aiAvailable: model.repositoryCommit.ai != nil,
-                        isLocked: model.isInteractionLocked, collapse: { showsCommitInspector = false },
+                        isLocked: model.isWorkspaceMutationLocked, collapse: { showsCommitInspector = false },
                         prepare: { prepareSelectedCommit() }, prepareAI: { prepareSelectedCommit(withAI: true) })
                         .clipShape(RoundedRectangle(cornerRadius: 9)).padding(.leading, 5)
                 }
@@ -233,6 +220,7 @@ public struct WorkspaceView: View {
             Spacer(minLength: 0)
             Button("解决冲突", action: resolveCurrentConflict)
                 .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary))
+                .disabled(model.isWorkspaceMutationLocked)
         }
         .padding(.horizontal, 16).padding(.vertical, 10)
         .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
@@ -247,11 +235,11 @@ public struct WorkspaceView: View {
                     if let workspace = model.workspace {
                         Divider()
                         if workspace.isUnmanaged {
-                            Button("初始化版本控制…", action: model.prepareSetup)
+                            Button("初始化版本控制…", action: model.prepareSetup).disabled(model.isWorkspaceMutationLocked)
                         } else {
-                            Button("管理当前仓库…", action: model.prepareManagement)
+                            Button("管理当前仓库…", action: model.prepareManagement).disabled(model.isWorkspaceMutationLocked)
                             Button("全历史搜索…", action: model.showFullHistorySearch)
-                            Button("搁置与恢复改动…", action: model.showShelves)
+                            Button("搁置与恢复改动…", action: model.showShelves).disabled(model.isWorkspaceMutationLocked)
                             if model.repositoryMigration != nil {
                                 Button("迁移仓库…", action: model.showRepositoryMigration)
                             }
@@ -330,6 +318,23 @@ public struct WorkspaceView: View {
         .sharedBackgroundVisibility(.hidden)
         ToolbarItem(placement: .primaryAction) {
             HStack(spacing: 6) {
+                if model.hasBackgroundMigration {
+                    Button(action: model.restoreRepositoryMigration) {
+                        HStack(spacing: 5) {
+                            if model.isMigrationBusy {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Image(systemName: migrationBadgeSymbol)
+                                    .font(.system(size: 11, weight: .medium))
+                            }
+                            Text(migrationBadgeTitle).lineLimit(1)
+                        }
+                    }
+                    .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
+                    .help("\(migrationBadgeStatus)\n\n点击恢复迁移窗口。隔离转换期间，来源目录的更新、推送、管理和提交会暂时受到保护。")
+                    .accessibilityLabel("恢复后台迁移")
+                    .disabled(!model.canRestoreRepositoryMigration)
+                }
                 if model.isLoading { ProgressView().controlSize(.small) }
                 Button(action: model.refresh) { Label("刷新", systemImage: "arrow.clockwise").labelStyle(.iconOnly) }
                     .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
@@ -340,12 +345,12 @@ public struct WorkspaceView: View {
                 }
                 .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary, compact: true))
                 .accessibilityLabel("更新工作区")
-                .disabled(model.workspace?.bindings.contains(where: { model.supports(.fetch, for: $0) || model.supports(.update, for: $0) }) != true || model.isInteractionLocked)
+                .disabled(model.workspace?.bindings.contains(where: { model.supports(.fetch, for: $0) || model.supports(.update, for: $0) }) != true || model.isWorkspaceMutationLocked)
                 .help("获取远端或更新一个版本控制来源")
                 if model.selectedBinding?.capabilities.contains(.push) == true {
                     Button(action: model.prepareManagement) { Label("推送", systemImage: "arrow.up.to.line") }
                         .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
-                        .disabled(model.isInteractionLocked)
+                        .disabled(model.isWorkspaceMutationLocked)
                         .help("查看远端与目标分支，确认后推送")
                 }
                 Button { model.prepareManagement() } label: {
@@ -353,14 +358,14 @@ public struct WorkspaceView: View {
                 }
                 .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
                 .accessibilityLabel("管理仓库")
-                .disabled(model.selectedBinding == nil || model.isInteractionLocked)
+                .disabled(model.selectedBinding == nil || model.isWorkspaceMutationLocked)
                 .help("推送、分支、暂存、冲突与版本比较")
                 if section == .workingCopy && !showsCommitInspector {
                     Button { showsCommitInspector = true } label: {
                         Label("准备提交", systemImage: "sidebar.right")
                     }
                     .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary, compact: true))
-                    .disabled(model.isInteractionLocked)
+                    .disabled(model.isWorkspaceMutationLocked)
                 }
                 Button { model.showAIReview(revision: section == .history ? model.selectedRevisionID : nil) } label: { Label("AI 审查", systemImage: "sparkles").labelStyle(.titleAndIcon) }
                     .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
@@ -374,6 +379,14 @@ public struct WorkspaceView: View {
 
     private var commitBindings: [RepositoryBinding] {
         (model.workspace?.bindings ?? []).filter { $0.capabilities.contains(.commit) }
+    }
+
+    /// 系统关闭 sheet 时会先把绑定置为 false；在 setter 内先收起，才能保留完成或失败的迁移提示。
+    private var migrationSheetBinding: Binding<Bool> {
+        Binding(get: { model.showsRepositoryMigration }, set: { presented in
+            if presented { model.showsRepositoryMigration = true }
+            else { model.hideRepositoryMigration() }
+        })
     }
 
     private var effectiveCommitTargets: Set<String> {
@@ -405,6 +418,43 @@ public struct WorkspaceView: View {
 
     private var currentConflicts: [FileChange] {
         model.snapshot?.changes.filter { $0.kind == .conflicted } ?? []
+    }
+
+    private var migrationBadgeTitle: String {
+        if model.isMigrationBusy, let progress = activeMigrationProgress {
+            return "迁移 \(progress.completedRevisions)/\(progress.totalRevisions)"
+        }
+        if model.isMigrationBusy { return "迁移进行中" }
+        if repositoryMigrationFailure != nil { return "迁移需要处理" }
+        if model.workingCopyMigration?.stage == .finished || model.repositoryMigration?.stage == .published {
+            return "迁移已完成"
+        }
+        return "迁移已就绪"
+    }
+
+    private var migrationBadgeSymbol: String {
+        repositoryMigrationFailure == nil ? "checkmark.circle" : "exclamationmark.circle"
+    }
+
+    private var migrationBadgeStatus: String {
+        if let working = model.workingCopyMigration, working.isBusy {
+            return working.transferProgress.phase.isEmpty ? "正在准备当前工作副本迁移…" : working.transferProgress.phase
+        }
+        if let migration = model.repositoryMigration, migration.isBusy {
+            return migration.transferProgress.phase.isEmpty ? "正在准备仓库迁移…" : migration.transferProgress.phase
+        }
+        if let error = repositoryMigrationFailure { return error }
+        return "迁移已暂停在可继续查看的状态。"
+    }
+
+    private var activeMigrationProgress: RepositoryMigrationProgress? {
+        if let working = model.workingCopyMigration, working.isBusy { return working.transferProgress.migrationProgress }
+        if let migration = model.repositoryMigration, migration.isBusy { return migration.transferProgress.migrationProgress }
+        return nil
+    }
+
+    private var repositoryMigrationFailure: String? {
+        model.workingCopyMigration?.errorMessage ?? model.repositoryMigration?.errorMessage
     }
 
     private var commitBlockedReason: String? {
@@ -531,7 +581,7 @@ public struct WorkspaceView: View {
                 HStack(spacing: 10) {
                     Button("打开仓库…", action: model.showRepositoryAcquisition).buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
                     if model.workspace?.isUnmanaged == true {
-                        Button("初始化版本控制…", action: model.prepareSetup).buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary))
+                        Button("初始化版本控制…", action: model.prepareSetup).disabled(model.isWorkspaceMutationLocked).buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary))
                     }
                 }
             }

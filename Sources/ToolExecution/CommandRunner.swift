@@ -13,6 +13,18 @@ public struct CommandResult: Sendable {
     }
 }
 
+/// 命令把 stdout 写入受控文件后的结果。内容不会重新读回内存。
+public struct CommandFileResult: Sendable {
+    public let errorData: Data
+    public let exitCode: Int32
+    public let standardOutputBytes: UInt64
+    public var error: String { String(decoding: errorData, as: UTF8.self) }
+
+    public init(errorData: Data = Data(), exitCode: Int32, standardOutputBytes: UInt64) {
+        self.errorData = errorData; self.exitCode = exitCode; self.standardOutputBytes = standardOutputBytes
+    }
+}
+
 /// 一行由外部工具输出的文本。进度工具常以回车覆盖同一行，因此 `\r` 也会作为分隔符。
 public struct CommandOutputLine: Sendable, Equatable {
     public enum Stream: Sendable, Equatable { case stdout, stderr }
@@ -29,6 +41,16 @@ public struct CommandOutputLine: Sendable, Equatable {
 public typealias CommandOutputHandler = @Sendable ([CommandOutputLine]) async -> Void
 
 @discardableResult public func requireSuccess(_ result: CommandResult, tool: String) throws -> CommandResult {
+    guard result.exitCode == 0 else {
+        let detail = result.error.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"([A-Za-z][A-Za-z0-9+.-]*://)[^\s/@]+@"#, with: "$1***@", options: .regularExpression)
+            .replacingOccurrences(of: #"(?i)([?&](?:access_token|token|api_key|password)=)[^\s&#]+"#, with: "$1***", options: .regularExpression)
+        throw VersionControlError.executionFailed("\(tool)（退出码 \(result.exitCode)）：\(detail.isEmpty ? "操作未完成" : String(detail.prefix(2400)))")
+    }
+    return result
+}
+
+@discardableResult public func requireSuccess(_ result: CommandFileResult, tool: String) throws -> CommandFileResult {
     guard result.exitCode == 0 else {
         let detail = result.error.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: #"([A-Za-z][A-Za-z0-9+.-]*://)[^\s/@]+@"#, with: "$1***@", options: .regularExpression)
@@ -119,6 +141,63 @@ public struct CommandRunner: Sendable {
             throw error
         }
     }
+
+    /// 将可能很大的 stdout 直接写到新建的私有文件，避免常规 `run` 的内存读取和 16 MiB
+    /// 输出上限。调用者必须给出不存在的本地路径和明确的磁盘预算；stderr 仍受常规上限保护。
+    public func runWritingStandardOutput(
+        executable: String,
+        arguments: [String],
+        to outputURL: URL,
+        maximumStandardOutputBytes: UInt64,
+        directory: URL? = nil,
+        timeout: TimeInterval = 20,
+        opensslConfiguration: URL? = nil,
+        standardInput: Data? = nil,
+        maximumStandardInputBytes: Int = 4 * 1024,
+        gitIndexFile: URL? = nil
+    ) async throws -> CommandFileResult {
+        if let gitIndexFile, !gitIndexFile.isFileURL || gitIndexFile.path.contains("\0") {
+            throw VersionControlError.invalidRepository("临时 Git 索引必须是有效的本地文件路径。")
+        }
+        guard outputURL.isFileURL, !outputURL.path.contains("\0"), maximumStandardOutputBytes > 0 else {
+            throw VersionControlError.invalidRepository("命令流式输出目标或大小上限无效。")
+        }
+        let output = outputURL.standardizedFileURL
+        guard !FileManager.default.fileExists(atPath: output.path),
+              FileManager.default.fileExists(atPath: output.deletingLastPathComponent().path),
+              (try output.deletingLastPathComponent().resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])).isDirectory == true,
+              (try output.deletingLastPathComponent().resourceValues(forKeys: [.isSymbolicLinkKey])).isSymbolicLink != true else {
+            throw VersionControlError.invalidRepository("命令流式输出目标必须位于已存在的非链接目录且不能覆盖文件。")
+        }
+        guard let executablePath = ToolLocator.find(executable) else { throw VersionControlError.toolUnavailable(executable) }
+        let descriptor = Darwin.open(output.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else {
+            throw VersionControlError.invalidRepository("无法以排他方式建立命令流式输出文件。")
+        }
+        defer { _ = Darwin.close(descriptor) }
+        let control = ProcessControl()
+        do {
+            let result = try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                return try await Task.detached(priority: .userInitiated) {
+                    try control.executeFile(
+                        executable: executablePath, arguments: arguments, directory: directory,
+                        timeout: timeout, opensslConfiguration: opensslConfiguration,
+                        standardInput: standardInput, maximumStandardInputBytes: maximumStandardInputBytes,
+                        gitIndexFile: gitIndexFile, isolatedHome: isolatedHome, outputSink: nil,
+                        standardOutputURL: output, standardOutputFileDescriptor: descriptor,
+                        maximumStandardOutputBytes: maximumStandardOutputBytes
+                    )
+                }.value
+            } onCancel: { control.cancel() }
+            if result.exitCode != 0 { try? FileManager.default.removeItem(at: output) }
+            return CommandFileResult(errorData: result.errorData, exitCode: result.exitCode,
+                                     standardOutputBytes: result.standardOutputBytes)
+        } catch {
+            try? FileManager.default.removeItem(at: output)
+            throw error
+        }
+    }
 }
 
 /// 将同步的子进程读取循环与异步 UI 回调解耦。执行线程只把小批输出放入
@@ -163,20 +242,62 @@ private final class ProcessControl: @unchecked Sendable {
         maximumStandardInputBytes: Int,
         gitIndexFile: URL?,
         isolatedHome: URL?,
-        outputSink: (@Sendable ([CommandOutputLine]) -> Void)?
+        outputSink: (@Sendable ([CommandOutputLine]) -> Void)?,
+        standardOutputURL: URL? = nil,
+        standardOutputFileDescriptor: Int32? = nil,
+        maximumStandardOutputBytes: UInt64? = nil
     ) throws -> CommandResult {
+        let result = try executeFile(
+            executable: executable, arguments: arguments, directory: directory, timeout: timeout,
+            opensslConfiguration: opensslConfiguration, standardInput: standardInput,
+            maximumStandardInputBytes: maximumStandardInputBytes, gitIndexFile: gitIndexFile,
+            isolatedHome: isolatedHome, outputSink: outputSink, standardOutputURL: standardOutputURL,
+            standardOutputFileDescriptor: standardOutputFileDescriptor,
+            maximumStandardOutputBytes: maximumStandardOutputBytes
+        )
+        return CommandResult(data: result.data, errorData: result.errorData, exitCode: result.exitCode)
+    }
+
+    func executeFile(
+        executable: String,
+        arguments: [String],
+        directory: URL?,
+        timeout: TimeInterval,
+        opensslConfiguration: URL?,
+        standardInput: Data?,
+        maximumStandardInputBytes: Int,
+        gitIndexFile: URL?,
+        isolatedHome: URL?,
+        outputSink: (@Sendable ([CommandOutputLine]) -> Void)?,
+        standardOutputURL: URL?,
+        standardOutputFileDescriptor: Int32?,
+        maximumStandardOutputBytes: UInt64?
+    ) throws -> (data: Data, errorData: Data, exitCode: Int32, standardOutputBytes: UInt64) {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("rephub-command-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: folder) }
-        let outURL = folder.appendingPathComponent("stdout"), errURL = folder.appendingPathComponent("stderr")
-        guard FileManager.default.createFile(atPath: outURL.path, contents: nil, attributes: [.posixPermissions: 0o600]),
+        let outURL = standardOutputURL ?? folder.appendingPathComponent("stdout")
+        let errURL = folder.appendingPathComponent("stderr")
+        guard (standardOutputURL != nil || FileManager.default.createFile(atPath: outURL.path, contents: nil, attributes: [.posixPermissions: 0o600])),
               FileManager.default.createFile(atPath: errURL.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
             throw VersionControlError.executionFailed("无法建立临时读取缓冲区。")
         }
-        let out = try FileHandle(forWritingTo: outURL), err = try FileHandle(forWritingTo: errURL)
-        defer { try? out.close(); try? err.close() }
+        guard standardOutputURL == nil || standardOutputFileDescriptor != nil else {
+            throw VersionControlError.invalidRepository("命令流式输出文件未安全建立。")
+        }
+        let out: FileHandle
+        if let standardOutputFileDescriptor {
+            out = FileHandle(fileDescriptor: standardOutputFileDescriptor, closeOnDealloc: false)
+        } else {
+            out = try FileHandle(forWritingTo: outURL)
+        }
+        let errorHandle = try FileHandle(forWritingTo: errURL)
+        defer {
+            if standardOutputFileDescriptor == nil { try? out.close() }
+            try? errorHandle.close()
+        }
         // 没有用户可见的回调时，不创建额外文件句柄或解析行；普通 status/diff 命令保持原开销。
-        let outputReader = outputSink == nil ? nil : try StreamingOutputReader(url: outURL, stream: .stdout)
+        let outputReader = outputSink == nil || standardOutputURL != nil ? nil : try StreamingOutputReader(url: outURL, stream: .stdout)
         let errorReader = outputSink == nil ? nil : try StreamingOutputReader(url: errURL, stream: .stderr)
         defer { outputReader?.close(); errorReader?.close() }
         let task = Process()
@@ -187,7 +308,7 @@ private final class ProcessControl: @unchecked Sendable {
         // 以非阻塞方式泵入，避免启动前填满管道而死锁。
         var inputPipe = try standardInput.map { try StandardInputPipe($0, maximumInputSize: maximumStandardInputBytes) }
         task.standardInput = inputPipe?.readHandle ?? FileHandle.nullDevice
-        task.standardOutput = out; task.standardError = err
+        task.standardOutput = out; task.standardError = errorHandle
         let inherited = ProcessInfo.processInfo.environment
         let allowedKeys = ["HOME", "PATH", "TMPDIR", "USER", "LOGNAME", "SSH_AUTH_SOCK", "SSH_AGENT_PID", "LANG", "http_proxy", "https_proxy", "all_proxy", "no_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"]
         var env = inherited.filter { allowedKeys.contains($0.key) }
@@ -230,7 +351,10 @@ private final class ProcessControl: @unchecked Sendable {
         var lastOutputDelivery = ProcessInfo.processInfo.systemUptime
 
         func outputExceedsLimit() -> Bool {
-            fileSize(outURL) + fileSize(errURL) > outputLimit
+            if let maximumStandardOutputBytes {
+                return fileSize(outURL) > maximumStandardOutputBytes || fileSize(errURL) > outputLimit
+            }
+            return fileSize(outURL) + fileSize(errURL) > outputLimit
         }
 
         /// 返回当前快照下两个读取器是否都已读到末尾。运行中每轮最多读 256 KiB；
@@ -296,8 +420,10 @@ private final class ProcessControl: @unchecked Sendable {
         }
         if let failure { throw failure }
         if isCancelled { throw CancellationError() }
-        guard fileSize(outURL) + fileSize(errURL) <= outputLimit else { throw VersionControlError.outputTooLarge }
-        return CommandResult(data: try Data(contentsOf: outURL), errorData: try Data(contentsOf: errURL), exitCode: task.terminationStatus)
+        guard !outputExceedsLimit() else { throw VersionControlError.outputTooLarge }
+        let data = standardOutputURL == nil ? try Data(contentsOf: outURL) : Data()
+        return (data: data, errorData: try Data(contentsOf: errURL), exitCode: task.terminationStatus,
+                standardOutputBytes: fileSize(outURL))
     }
 
     private func fileSize(_ url: URL) -> UInt64 {

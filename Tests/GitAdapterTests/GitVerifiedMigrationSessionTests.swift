@@ -100,6 +100,41 @@ struct GitVerifiedMigrationSessionTests {
         #expect(!FileManager.default.fileExists(atPath: fixture.root.appendingPathComponent("escape").path))
     }
 
+    @Test("已核对会话流式校验 256 MiB 文件并可导出")
+    func verifiesAndExportsLargeBlobBeyondInMemoryLimit() async throws {
+        let fixture = try await LocalRepositoryFixture.create()
+        defer { try? fixture.remove() }
+        let source = fixture.root.appendingPathComponent("verified-large-source")
+        let repository = fixture.root.appendingPathComponent("verified-large-target")
+        let exported = fixture.root.appendingPathComponent("verified-large-export")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        let block = Data(repeating: 0x3C, count: 1024 * 1024)
+        let path = source.appendingPathComponent("large.bin")
+        #expect(FileManager.default.createFile(atPath: path.path, contents: nil))
+        let writer = try FileHandle(forWritingTo: path)
+        var expectedHash = SHA256()
+        for _ in 0..<256 { try writer.write(contentsOf: block); expectedHash.update(data: block) }
+        try writer.close()
+        let digest = expectedHash.finalize().map { String(format: "%02x", $0) }.joined()
+        let size: UInt64 = 256 * 1024 * 1024
+        let manifest = [MigrationFileEntry(path: "large.bin", kind: .file, digest: digest, size: size)]
+        let provider = GitMigrationTargetProvider(runner: fixture.runner)
+        try await provider.initializeMigration(at: repository, branch: "main")
+        let session = try await provider.makeVerifiedMigrationSession(at: repository)
+        let tip = try await session.appendVerifiedSnapshot(from: source, files: manifest,
+                                                           revision: revision(1), author: author, progress: { _ in })
+        try await provider.exportMigrationTree(at: repository, revision: tip, to: exported)
+        let reader = try FileHandle(forReadingFrom: exported.appendingPathComponent("large.bin"))
+        defer { try? reader.close() }
+        var actualHash = SHA256()
+        var actualSize: UInt64 = 0
+        while let chunk = try reader.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+            actualHash.update(data: chunk); actualSize += UInt64(chunk.count)
+        }
+        #expect(actualSize == size)
+        #expect(actualHash.finalize().map { String(format: "%02x", $0) }.joined() == digest)
+    }
+
     private func revision(_ number: Int) -> MigrationRevision {
         MigrationRevision(id: "r\(number)", author: "fixture", date: Date(timeIntervalSince1970: Double(1_700_000_000 + number)), message: "revision \(number)")
     }

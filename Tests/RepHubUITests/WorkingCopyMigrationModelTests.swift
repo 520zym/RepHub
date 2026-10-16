@@ -70,8 +70,8 @@ struct WorkingCopyMigrationModelTests {
         #expect(!workspace.isOperating)
     }
 
-    @Test("转换失败后用新隔离作业重试并保留上次位置")
-    func failedPreviewCanStartANewJob() async throws {
+    @Test("转换失败后保留同一隔离作业，以便断点续跑")
+    func failedPreviewRetainsTheSameJobForResume() async throws {
         let suite = "RepHub.AuthorRetryTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -93,14 +93,14 @@ struct WorkingCopyMigrationModelTests {
         let firstFolder = try #require(model.preservedDirectory)
         defer { try? FileManager.default.removeItem(at: firstFolder) }
         #expect(model.stage == .prepared)
-        #expect(model.plan?.id != firstPlan.id)
+        #expect(model.plan?.id == firstPlan.id)
         #expect(model.plan?.authors == firstPlan.authors)
         #expect(firstFolder.lastPathComponent.contains(firstPlan.id.uuidString))
         model.preparePreview()
         for _ in 0..<100 where model.isBusy { try await Task.sleep(for: .milliseconds(10)) }
         let secondFolder = try #require(model.preservedDirectory)
         defer { try? FileManager.default.removeItem(at: secondFolder) }
-        #expect(secondFolder != firstFolder)
+        #expect(secondFolder == firstFolder)
         #expect(model.errorMessage?.contains("fixture preparation failed") == true)
     }
 

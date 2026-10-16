@@ -7,9 +7,9 @@ struct WorkingCopyMigrationView: View {
     @Bindable var model: WorkingCopyMigrationModel
     let palette: AppPalette
     let dismiss: () -> Void
+    /// 收起仅隐藏 sheet，当前工作副本迁移继续在隔离目录中执行。
+    let hideToBackground: () -> Void
     let completed: (URL) -> Void
-    @State private var tab: Tab = .overview
-    private enum Tab: Hashable { case overview, files, history }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -24,15 +24,25 @@ struct WorkingCopyMigrationView: View {
             footer
         }
         .frame(minWidth: 760, idealWidth: 930, minHeight: 580, idealHeight: 710)
-        .background(palette.background).foregroundStyle(palette.text).interactiveDismissDisabled(model.isBusy)
+        .background(palette.background).foregroundStyle(palette.text)
     }
     private var header: some View { HStack(spacing: 11) {
         Image(systemName: "folder.badge.gearshape").font(.system(size: 17, weight: .medium)).foregroundStyle(palette.accent).frame(width: 33, height: 33).background(palette.selection.opacity(0.7), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         VStack(alignment: .leading, spacing: 2) { Text("当前工作副本迁移").font(.system(size: 16, weight: .semibold)); Text(subtitle).font(.system(size: 11)).foregroundStyle(palette.secondaryText) }
         Spacer()
-        if !model.isBusy { Button(action: dismiss) { Image(systemName: "xmark").font(.system(size: 11, weight: .semibold)) }.buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true)) }
+        if model.isBusy || hasRetainableState {
+            Button(model.isBusy ? "后台运行" : "收起", action: hideToBackground)
+                .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
+                .help(model.isBusy ? "收起窗口，迁移会继续在后台运行。" : "收起窗口，保留这份迁移计划或预览以便稍后继续查看。")
+        }
+        if !model.isBusy {
+            Button(action: dismiss) { Image(systemName: "xmark").font(.system(size: 11, weight: .semibold)) }.buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
+                .accessibilityLabel("关闭迁移窗口")
+                .help("结束本次迁移查看，保留已生成的暂存文件。")
+        }
     }.padding(.horizontal, 22).padding(.vertical, 17).background(palette.surface) }
     private var subtitle: String { switch model.stage { case .form: model.action == .supplement ? "补迁只检查 Git 工作区干净；SVN 本地状态不要求干净" : "首次迁移会检查 SVN 工作副本干净，再在隔离目录准备 Git 预览"; case .planning: "正在核对 SVN 截至版本和 Git 目标"; case .prepared: "迁移计划已生成，可调整作者映射"; case .converting: "正在生成隔离预览，不会修改当前工作副本"; case .preview: "预览已就绪，确认后才写入当前目录并发布"; case .applying: "正在应用 .git 到当前目录并发布"; case .finished: "当前目录已成为 Git 与 SVN 共管工作副本" } }
+    private var hasRetainableState: Bool { model.plan != nil || model.preview != nil || model.preservedDirectory != nil || model.result != nil || model.errorMessage != nil }
     private var form: some View { ScrollView { VStack(alignment: .leading, spacing: 17) {
         card("本地 SVN 工作副本", "externaldrive") { HStack(spacing: 10) { Text(model.directory?.path ?? "请选择本地 SVN 工作副本").font(.system(size: 12)).foregroundStyle(model.directory == nil ? palette.secondaryText : palette.text).lineLimit(1).truncationMode(.middle).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10).frame(height: 31).background(palette.secondaryText.opacity(0.055), in: RoundedRectangle(cornerRadius: 7, style: .continuous)); Button(model.isInspectingRecord ? "正在识别…" : "选择…", action: model.chooseDirectory).buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary, compact: true)).disabled(model.isBusy) }
             Text("首次迁移会检查 SVN 工作副本干净；补迁仅检查 Git 工作区干净，SVN 可保留由 Git 演进带来的本地差异。迁移过程不会更新或提交 SVN。") .font(.system(size: 11)).foregroundStyle(palette.secondaryText) }
@@ -89,7 +99,7 @@ struct WorkingCopyMigrationView: View {
             }.padding(22)
         }
     }
-    private var preview: some View { VStack(spacing: 0) { WorkbenchSegmentedPicker(title: "转换预览", selection: $tab, options: [.init(.overview, "概览"), .init(.files, "文件"), .init(.history, "历史")], palette: palette).frame(width: 285).padding(.vertical, 13); Divider().opacity(0.2); switch tab { case .overview: overview; case .files: files; case .history: history } } }
+    private var preview: some View { VStack(spacing: 0) { WorkbenchSegmentedPicker(title: "转换预览", selection: $model.previewTab, options: [.init(.overview, "概览"), .init(.files, "文件"), .init(.history, "历史")], palette: palette).frame(width: 285).padding(.vertical, 13); Divider().opacity(0.2); switch model.previewTab { case .overview: overview; case .files: files; case .history: history } } }
     private var overview: some View { ScrollView { VStack(alignment: .leading, spacing: 16) { if let preview = model.preview { HStack(spacing: 12) { metricCard("本次新增", "\(currentMappings(preview: preview).count) 条"); metricCard("文件核对", "\(preview.files.count) 项"); metricCard("方式", preview.plan.action.title) }; card("来源 → 当前工作副本", "arrow.right.circle") { VStack(spacing: 7) { row("SVN 来源", preview.plan.workingCopy.sourceURL); row("仓库 UUID", preview.plan.workingCopy.repositoryUUID); row("本地 BASE", preview.plan.workingCopy.baseRevision); row("Git 目标", preview.plan.remoteURL); row("目标分支", preview.plan.branch); if preview.plan.source.mode == .history { row("历史范围", historyScopeDescription(preview.plan.source.includeCopyHistory, action: preview.plan.action)) } } }; if let previous = preview.plan.previousRecord { card("已迁移锚点", "arrow.triangle.branch") { VStack(spacing: 7) { row("开始修订", previous.startRevision); row("接管节点", previous.cutoverRevision); row("上次已迁", previous.lastRevision); row("本次截至", preview.plan.source.anchor) } } } else { card("首次接管锚点", "arrow.triangle.branch") { VStack(spacing: 7) { row("开始修订", preview.plan.source.revisions.first?.id ?? "—"); row("本地 BASE", preview.plan.workingCopy.baseRevision); row("接管节点", preview.plan.workingCopy.baseRevision); row("本次截至", preview.plan.source.anchor) } } }; if !preview.warnings.isEmpty { warnings(preview.warnings) }; Text("隔离预览：\(preview.repository.path)").font(.system(size: 11, design: .monospaced)).foregroundStyle(palette.secondaryText).textSelection(.enabled) } }.padding(22) } }
     private var files: some View { HStack(spacing: 0) { VStack(alignment: .leading, spacing: 8) { TextField("筛选文件…", text: $model.fileSearch).textFieldStyle(.roundedBorder); if model.action == .supplement { Text("标记表示本次补迁带来的内容变化；其他 Git 文件保持原样。") .font(.system(size: 10)).foregroundStyle(palette.secondaryText) }; WorkingFileTree(files: filteredFiles, expanded: model.expandedDirectories, selected: model.selectedFilePath, palette: palette, allowsDifferences: model.action == .supplement, toggle: model.toggleDirectory, select: model.loadFile) }.padding(12).frame(minWidth: 250, idealWidth: 320, maxWidth: 380).background(palette.sidebar.opacity(0.5)); Divider().opacity(0.2); fileContent.frame(maxWidth: .infinity, maxHeight: .infinity) } }
     private var fileContent: some View { Group { if let item = model.filePreview { VStack(spacing: 0) { if item.isBinary { Label("二进制文件 · 仅比较摘要", systemImage: "doc.badge.gearshape").font(.system(size: 12, weight: .semibold)).foregroundStyle(palette.secondaryText).frame(maxWidth: .infinity, alignment: .leading).padding(10).background(palette.sidebar.opacity(0.5)) }; HStack(spacing: 0) { column(model.action == .supplement ? "当前 Git" : "SVN 来源", item.sourceText); Divider().opacity(0.2); column("转换结果", item.targetText) } } } else if model.selectedFilePath != nil { ProgressView("正在读取文件预览…") } else { ContentUnavailableView("选择一个文件", systemImage: "doc.text.magnifyingglass", description: Text("查看当前内容和转换结果。")) } } }
@@ -106,15 +116,25 @@ struct WorkingCopyMigrationView: View {
                     }
                 }.font(.system(size: 11)).foregroundStyle(result.publication.state == .published ? palette.accent : palette.secondaryText).lineLimit(2)
             } else {
-                Text(model.preview == nil ? "预览完成前不会向当前目录或目标远端写入内容。" : "确认后会将已核对的 Git 结果应用到当前目录，并发布到目标远端；关闭窗口后需重新生成预览。")
+                Text(model.preview == nil ? (model.isResumingFromCheckpoint ? "已恢复检查点；生成预览会从已核对的迁移进度继续。" : "预览完成前不会向当前目录或目标远端写入内容。") : "确认后应用到当前目录并发布；收起窗口可保留预览，稍后继续查看。")
                     .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
             }
             Spacer()
             if model.preview == nil, let folder = model.preservedDirectory { Button("查看暂存位置", action: model.revealPreservedDirectory).buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet)).help(folder.path) }
             if let result = model.result { Button("打开当前目录") { completed(result.directory) }.buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary)).disabled(model.isBusy) }
             if model.preview != nil { Button(model.result?.publication.state == .published ? "已发布" : (model.result == nil ? "应用到当前目录并发布" : "重试发布"), action: model.applyAndPublish).buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary)).disabled(model.isBusy || model.result?.publication.state == .published) }
-            else if model.plan != nil { Button("生成转换预览", action: model.preparePreview).buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary)).disabled(model.isBusy) }
-            else { Button("只读预检", action: model.makePlan).buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary)).disabled(model.isBusy) }
+            else if model.plan != nil {
+                if model.errorMessage != nil && !model.isBusy {
+                    Button("重新预检") { model.invalidatePlan(); model.makePlan() }
+                        .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet))
+                }
+                Button(model.isResumingFromCheckpoint ? "继续生成预览" : "生成转换预览", action: model.preparePreview)
+                    .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary)).disabled(model.isBusy)
+            }
+            else {
+                Button("继续已有迁移…", action: model.resumeExistingMigration).buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary)).disabled(model.isBusy)
+                Button("只读预检", action: model.makePlan).buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary)).disabled(model.isBusy)
+            }
         }.padding(.horizontal, 22).padding(.vertical, 14).background(palette.surface)
     }
     private var remoteBinding: Binding<String> { Binding(get: { model.remoteURL }, set: { model.remoteURL = $0; model.invalidatePlan() }) }

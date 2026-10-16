@@ -8,41 +8,42 @@ struct RepositoryMigrationView: View {
     let workingCopyModel: WorkingCopyMigrationModel?
     let palette: AppPalette
     let dismiss: () -> Void
+    /// 收起仅隐藏 sheet，迁移模型和其 Task 继续由工作区持有。
+    let hideToBackground: () -> Void
     let openResult: (URL) -> Void
-    @State private var previewTab: PreviewTab = .overview
-    @State private var route: Route = .newDirectory
-
-    private enum PreviewTab: Hashable { case overview, files, history }
-    private enum Route: Hashable { case newDirectory, workingCopy }
+    @Binding private var presentationMode: WorkspaceModel.MigrationPresentationMode
 
     init(model: RepositoryMigrationModel, workingCopyModel: WorkingCopyMigrationModel? = nil,
-         startsInWorkingCopy: Bool = false, palette: AppPalette, dismiss: @escaping () -> Void, openResult: @escaping (URL) -> Void) {
+         presentationMode: Binding<WorkspaceModel.MigrationPresentationMode>, palette: AppPalette,
+         dismiss: @escaping () -> Void, hideToBackground: @escaping () -> Void,
+         openResult: @escaping (URL) -> Void) {
         self._model = Bindable(wrappedValue: model)
         self.workingCopyModel = workingCopyModel
-        self._route = State(initialValue: startsInWorkingCopy ? .workingCopy : .newDirectory)
+        self._presentationMode = presentationMode
         self.palette = palette
         self.dismiss = dismiss
+        self.hideToBackground = hideToBackground
         self.openResult = openResult
     }
 
     var body: some View {
         VStack(spacing: 0) {
             if let workingCopyModel {
-                WorkbenchSegmentedPicker(title: "迁移路径", selection: $route,
+                WorkbenchSegmentedPicker(title: "迁移路径", selection: $presentationMode,
                                          options: [.init(.newDirectory, "新目录迁移"), .init(.workingCopy, "当前工作副本")], palette: palette)
                     .frame(width: 310).padding(.vertical, 10)
                     .disabled(model.isBusy || workingCopyModel.isBusy)
                 Divider().opacity(0.2)
             }
-            if route == .workingCopy, let workingCopyModel {
-                WorkingCopyMigrationView(model: workingCopyModel, palette: palette, dismiss: dismiss, completed: openResult)
+            if presentationMode == .workingCopy, let workingCopyModel {
+                WorkingCopyMigrationView(model: workingCopyModel, palette: palette, dismiss: dismiss,
+                                         hideToBackground: hideToBackground, completed: openResult)
             } else {
                 newDirectoryContent
             }
         }
         .background(palette.background)
         .foregroundStyle(palette.text)
-        .interactiveDismissDisabled(model.isBusy || workingCopyModel?.isBusy == true)
     }
 
     private var newDirectoryContent: some View {
@@ -71,10 +72,16 @@ struct RepositoryMigrationView: View {
                 Text(headerSubtitle).font(.system(size: 11)).foregroundStyle(palette.secondaryText)
             }
             Spacer()
+            if model.isBusy || hasRetainableState {
+                Button(model.isBusy ? "后台运行" : "收起", action: hideToBackground)
+                    .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
+                    .help(model.isBusy ? "收起窗口，迁移会继续在后台运行。" : "收起窗口，保留这份迁移计划或预览以便稍后继续查看。")
+            }
             if !model.isBusy {
                 Button(action: dismiss) { Image(systemName: "xmark").font(.system(size: 11, weight: .semibold)) }
                     .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet, compact: true))
                     .accessibilityLabel("关闭迁移窗口")
+                    .help("结束本次迁移查看，保留已生成的暂存文件。")
             }
         }
         .padding(.horizontal, 22).padding(.vertical, 17).background(palette.surface)
@@ -90,6 +97,10 @@ struct RepositoryMigrationView: View {
         case .publishing: "正在明确发布到目标 Git 远端"
         case .published: "目标 Git 已发布；原 SVN 仓库保持不变"
         }
+    }
+
+    private var hasRetainableState: Bool {
+        model.plan != nil || model.preview != nil || model.preservedDirectory != nil || model.errorMessage != nil
     }
 
     private var planningContent: some View {
@@ -223,7 +234,7 @@ struct RepositoryMigrationView: View {
 
     private var previewContent: some View {
         VStack(spacing: 0) {
-            WorkbenchSegmentedPicker(title: "转换预览", selection: $previewTab,
+            WorkbenchSegmentedPicker(title: "转换预览", selection: $model.previewTab,
                                      options: [.init(.overview, "概览"), .init(.files, "文件"), .init(.history, "历史")], palette: palette)
                 .frame(width: 285).padding(.vertical, 13)
             if let result = model.publication {
@@ -234,7 +245,7 @@ struct RepositoryMigrationView: View {
                     .background(palette.sidebar).padding(.horizontal, 22).padding(.bottom, 10)
             }
             Divider().opacity(0.2)
-            switch previewTab {
+            switch model.previewTab {
             case .overview: overview
             case .files: filePreviewContent
             case .history: historyPreviewContent
@@ -362,7 +373,7 @@ struct RepositoryMigrationView: View {
             if let preview = model.preview {
                 Button("返回调整", action: model.returnToPlan)
                     .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary)).disabled(model.isBusy)
-                Button("保留并关闭", action: dismiss).buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet)).help("本地转换结果不会被删除。").disabled(model.isBusy)
+                Button("收起到后台", action: hideToBackground).buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet)).help("保留本地转换结果，稍后可从顶部迁移标记恢复。").disabled(model.isBusy)
                 Button("打开结果") { openResult(preview.repository) }.buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary)).disabled(model.isBusy)
                 Button(model.stage == .published ? "已发布" : "发布到 Git") { model.publish() }.buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary)).disabled(!preview.canPublish || model.isBusy || model.stage == .published)
             } else if model.plan != nil {

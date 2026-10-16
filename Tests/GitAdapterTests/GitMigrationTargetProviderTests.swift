@@ -145,16 +145,16 @@ struct GitMigrationTargetProviderTests {
         #expect(try FileManager.default.destinationOfSymbolicLink(atPath: exported.appendingPathComponent("linked-file").path) == "group-0/file-0.bin")
     }
 
-    @Test("接近读取上限的 blob 保持旧单对象导出能力")
-    func exportsLargeBlobWithoutBatchProtocolOverhead() async throws {
+    @Test("超过 16 MiB 的 blob 以受限磁盘流导出")
+    func streamsLargeBlobBeyondInMemoryOutputLimit() async throws {
         let fixture = try await LocalRepositoryFixture.create()
         defer { try? fixture.remove() }
         let snapshot = fixture.root.appendingPathComponent("large-source", isDirectory: true)
         let preview = fixture.root.appendingPathComponent("large-preview", isDirectory: true)
         let exported = fixture.root.appendingPathComponent("large-export", isDirectory: true)
         try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
-        let contents = Data(repeating: 0xA5, count: 15 * 1024 * 1024 + 1)
-        try contents.write(to: snapshot.appendingPathComponent("near-limit.bin"))
+        let contents = Data(repeating: 0xA5, count: 17 * 1024 * 1024 + 1)
+        try contents.write(to: snapshot.appendingPathComponent("beyond-16m.bin"))
         let provider = GitMigrationTargetProvider(runner: fixture.runner)
         try await provider.initializeMigration(at: preview, branch: "main")
         let tip = try await provider.appendMigrationSnapshot(
@@ -165,7 +165,7 @@ struct GitMigrationTargetProviderTests {
             progress: { _ in }
         )
         try await provider.exportMigrationTree(at: preview, revision: tip, to: exported)
-        #expect(try Data(contentsOf: exported.appendingPathComponent("near-limit.bin")) == contents)
+        #expect(try Data(contentsOf: exported.appendingPathComponent("beyond-16m.bin")) == contents)
     }
 
     @Test(".git 指向其他仓库时拒绝迁移核对")

@@ -417,3 +417,10 @@ swift test --filter 'Inspection|ConflictEditing|Shelf|GitPartialCommit|Repositor
 最终 `scripts/build-app.sh debug` 和 `codesign --verify --deep --strict build/RepHub.app` 通过，日志 `/tmp/rephub-workflow-package.log`。产物为 `build/RepHub.app`；不代表其他路径下的已安装副本已替换。
 
 最后复核补充修复了多绑定提交草稿：预检内 Git/SVN 各自填写的说明在关闭后分别保留；在右侧统一草稿中主动编辑才覆盖各目标。避免显式关闭和 sheet 的 onDismiss 二次回调清空已保存草稿。新增恢复测试后，`swift test --filter RepositoryCommitModelTests` **12/12 通过**，本轮合计 61 项不同测试（11 项为重复回归，不重复累计）。重新打包签名，并在最终 QA 应用中分别填写 Git/SVN 不同说明，关闭后再次进入，确认两份说明仍各自保留；随后取消并退出，没有执行提交。
+
+
+## 2026-10-16：迁移后台运行、大文件与初迁恢复
+
+后台迁移入口、来源写保护、256 MiB Git blob 流式校验、工作副本初迁持久检查点已完成针对性验证，去重 76 项通过。真实 SVN/Git 验证仅在临时夹具中运行。实窗自动化访问未获许可，因此尚未完成实窗交互/截图验收。详见[本轮验证记录](verification/migration-background/README.md)。
+
+本轮最终 Release 打包及 `codesign --verify --deep --strict build/RepHub.app` 通过；收尾模型改动后 13 项迁移界面状态测试复验通过，不重复计数。构建日志 `/tmp/rephub-background-release-final.log`。

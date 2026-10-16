@@ -10,8 +10,11 @@ import VersionControlCore
 @Observable
 public final class RepositoryMigrationModel {
     public enum Stage: Equatable { case form, planning, prepared, converting, preview, publishing, published }
+    public enum PreviewTab: Hashable { case overview, files, history }
 
     public private(set) var stage: Stage = .form
+    /// 迁移 sheet 收起再恢复时，继续停留在用户正在查看的预览页。
+    public var previewTab: PreviewTab = .overview
     public var sourceURL = ""
     public var username = ""
     public var password = ""
@@ -69,7 +72,7 @@ public final class RepositoryMigrationModel {
         guard !isBusy else { return }
         requestID += 1
         task?.cancel(); previewTask?.cancel()
-        stage = .form; sourceURL = ""; username = ""; password = ""; targetURL = ""; branch = "main"
+        stage = .form; previewTab = .overview; sourceURL = ""; username = ""; password = ""; targetURL = ""; branch = "main"
         destinationParent = nil; directoryName = "migrated-repository"; mode = .history; includeCopyHistory = false
         listings = [:]; rootListingURL = nil; expandedURLs = []; selectedSourceURL = nil
         plan = nil; preview = nil; filePreview = nil; selectedFilePath = nil; expandedFileDirectories = []; selectedCommit = nil; historyPatch = nil

@@ -54,6 +54,57 @@ struct WorkingCopyMigrationServiceTests {
         #expect(messages.contains("本地整理 SVN 快照… · r9"))
     }
 
+    @Test("新版工作副本迁移检查点可在新服务实例中恢复同一固定计划")
+    func resumesDurableInitialCheckpoint() async throws {
+        let root = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let source = WorkingCopySourceFixture(root: root)
+        let first = WorkingCopyMigrationService(source: source, target: WorkingCopyTargetFixture())
+        let plan = try await first.plan(at: root, remoteURL: "https://example.test/project.git", branch: "main",
+                                         mode: .history, action: .initial, progress: { _ in })
+        _ = try await first.prepare(plan, progress: { _ in })
+        let folder = try #require(await first.partialDirectory(for: plan.id))
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let checkpoint = folder.appendingPathComponent("checkpoint.json")
+        #expect(FileManager.default.fileExists(atPath: checkpoint.path))
+
+        let restoredService = WorkingCopyMigrationService(source: source, target: WorkingCopyTargetFixture())
+        // macOS 的 temporaryDirectory 通常报告 /var，而底层对象实际位于 /private/var。
+        // 两个等价绝对路径都应通过容器校验，不能因解析真实路径而误判为移动过检查点。
+        let checkpointAlias = checkpoint.path.hasPrefix("/var/")
+            ? URL(fileURLWithPath: "/private" + checkpoint.path)
+            : checkpoint
+        let restored = try await restoredService.resume(from: checkpointAlias)
+        #expect(restored.id == plan.id)
+        #expect(restored.source.revisions == plan.source.revisions)
+        let preview = try await restoredService.prepare(restored, progress: { _ in })
+        #expect(preview.mappings.map(\.source.id) == ["r9"])
+    }
+
+    @Test("初迁失败后只从检查点后的修订继续，不重复已核对提交")
+    func retriesInitialMigrationFromVerifiedCheckpoint() async throws {
+        let root = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+        let revisions = [
+            MigrationRevision(id: "r8", author: "svn-user", date: .distantPast, message: "first"),
+            MigrationRevision(id: "r9", author: "svn-user", date: .now, message: "second")
+        ]
+        let source = WorkingCopySourceFixture(root: root, revisions: revisions)
+        let target = WorkingCopyTargetFixture(failingRevision: "r9")
+        let service = WorkingCopyMigrationService(source: source, target: target)
+        let plan = try await service.plan(at: root, remoteURL: "https://example.test/project.git", branch: "main",
+                                         mode: .history, action: .initial, progress: { _ in })
+        await #expect(throws: Error.self) { try await service.prepare(plan, progress: { _ in }) }
+        let folder = try #require(await service.partialDirectory(for: plan.id))
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let checkpoint = try decoder.decode(WorkingCopyCheckpointProbe.self,
+                                            from: Data(contentsOf: folder.appendingPathComponent("checkpoint.json")))
+        #expect(checkpoint.mappings.map(\.source.id) == ["r8"])
+
+        let preview = try await service.prepare(plan, progress: { _ in })
+        #expect(preview.mappings.map(\.source.id) == ["r8", "r9"])
+        #expect(await target.appendedRevisions == ["r8", "r9", "r9"])
+    }
+
     @Test("迁移记录中的地址凭据和重复映射被拒绝")
     func rejectsUnsafeRecord() async throws {
         let root = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: root) }
@@ -151,16 +202,21 @@ private actor ProgressCollector {
     func append(_ update: RepositoryOperationProgress) { messages.append(update.message) }
 }
 
+private struct WorkingCopyCheckpointProbe: Decodable {
+    let mappings: [MigrationMapping]
+}
+
 private struct WorkingCopySourceFixture: RepositoryWorkingCopyMigrationSourceProvider, VersionControlProvider {
     let id = ProviderID(rawValue: "working-copy-source-fixture")
     let root: URL
     var latestRevision: String? = nil
     var sessionStats: WorkingCopySessionStats? = nil
+    var revisions: [MigrationRevision] = [MigrationRevision(id: "r9", author: "svn-user", date: .distantPast, message: "change")]
     var displayName: String { "SVN fixture" }
     func planMigration(from location: RemoteRepositoryLocation, mode: MigrationMode, progress: @escaping RepositoryOperationProgressHandler) async throws -> MigrationSourcePlan { try await planWorkingCopyHistory(from: location, mode: mode, through: "r9", after: nil, progress: progress) }
     func inspectMigrationWorkingCopy(at directory: URL, requireClean: Bool) async throws -> MigrationWorkingCopyInfo { MigrationWorkingCopyInfo(directory: root, sourceURL: "https://example.test/svn/project", repositoryUUID: "uuid", baseRevision: "r9") }
     func planWorkingCopyHistory(from location: RemoteRepositoryLocation, mode: MigrationMode, through revision: String?, after previousRevision: String?, progress: @escaping RepositoryOperationProgressHandler) async throws -> MigrationSourcePlan {
-        MigrationSourcePlan(providerID: id, location: location, anchor: "r9", mode: mode, revisions: [MigrationRevision(id: "r9", author: "svn-user", date: .distantPast, message: "change")])
+        MigrationSourcePlan(providerID: id, location: location, anchor: "r9", mode: mode, revisions: revisions)
     }
     func verifyWorkingCopyMigrationSource(_ location: RemoteRepositoryLocation, repositoryUUID: String, revision: String) async throws {}
     func exportMigrationSnapshot(plan: MigrationSourcePlan, revision: MigrationRevision, to directory: URL, progress: @escaping RepositoryOperationProgressHandler) async throws {}
@@ -196,9 +252,17 @@ private actor WorkingCopySessionStats {
 
 private actor WorkingCopyTargetFixture: RepositoryWorkingCopyMigrationTargetProvider {
     nonisolated let id: ProviderID = .git
+    private let failingRevision: String?
+    private var failed = false
+    private(set) var appendedRevisions: [String] = []
+    init(failingRevision: String? = nil) { self.failingRevision = failingRevision }
     func checkMigrationTarget(remoteURL: String, branch: String) async throws {}
     func initializeMigration(at directory: URL, branch: String) async throws {}
-    func appendMigrationSnapshot(from snapshot: URL, revision: MigrationRevision, author: MigrationAuthor, to directory: URL, progress: @escaping RepositoryOperationProgressHandler) async throws -> String { String(repeating: "a", count: 40) }
+    func appendMigrationSnapshot(from snapshot: URL, revision: MigrationRevision, author: MigrationAuthor, to directory: URL, progress: @escaping RepositoryOperationProgressHandler) async throws -> String {
+        appendedRevisions.append(revision.id)
+        if revision.id == failingRevision, !failed { failed = true; throw VersionControlError.executionFailed("fixture failure") }
+        return String(repeating: revision.id == "r8" ? "a" : "b", count: 40)
+    }
     func verifyMigration(at directory: URL, expectedTip: String, branch: String) async throws {}
     func verifyMigrationCheckpoint(at directory: URL, expectedTip: String?, branch: String) async throws {}
     func exportMigrationTree(at directory: URL, revision: String, to destination: URL) async throws {

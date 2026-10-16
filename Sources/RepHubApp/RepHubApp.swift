@@ -59,30 +59,30 @@ struct RepHubApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("打开仓库…", action: workspace.showRepositoryAcquisition)
                     .keyboardShortcut("o")
-                    .disabled(workspace.isOperating)
+                    .disabled(workspace.isInteractionLocked)
                 RecentRepositoriesMenu(model: workspace)
             }
             CommandMenu("项目") {
                 Button("打开仓库…", action: workspace.showRepositoryAcquisition)
-                    .disabled(workspace.isOperating)
+                    .disabled(workspace.isInteractionLocked)
                 RecentRepositoriesMenu(model: workspace)
                 Divider()
                 Button("刷新仓库", action: workspace.refresh)
                     .keyboardShortcut("r")
-                    .disabled(workspace.workspace == nil || workspace.isLoading || workspace.isOperating)
+                    .disabled(workspace.workspace == nil || workspace.isLoading || workspace.isInteractionLocked)
                 Button("仓库操作与版本比较…", action: workspace.prepareManagement)
-                    .disabled(workspace.selectedBinding == nil || workspace.isOperating)
+                    .disabled(workspace.selectedBinding == nil || workspace.isWorkspaceMutationLocked)
                 Button("关联工作副本…", action: workspace.chooseLinkedFolder)
-                    .disabled(workspace.workspace?.bindings.isEmpty != false || workspace.isOperating)
+                    .disabled(workspace.workspace?.bindings.isEmpty != false || workspace.isInteractionLocked)
                 Button("全历史搜索…", action: workspace.showFullHistorySearch)
                     .disabled(workspace.workspace == nil || workspace.isInteractionLocked)
                 Button("搁置与恢复改动…", action: workspace.showShelves)
-                    .disabled(workspace.workspace == nil || workspace.isInteractionLocked)
+                    .disabled(workspace.workspace == nil || workspace.isWorkspaceMutationLocked)
                 Button("迁移仓库…", action: workspace.showRepositoryMigration)
-                    .disabled(workspace.isOperating)
+                    .disabled(workspace.isInteractionLocked)
                 Divider()
                 Button("关闭仓库", action: workspace.closeWorkspace)
-                    .disabled(workspace.workspace == nil || workspace.isOperating)
+                    .disabled(workspace.workspace == nil || workspace.isInteractionLocked)
             }
         }
 

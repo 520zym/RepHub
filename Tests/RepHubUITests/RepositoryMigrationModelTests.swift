@@ -6,7 +6,7 @@ import RepositoryApplication
 @Suite("迁移界面状态")
 @MainActor
 struct RepositoryMigrationModelTests {
-    @Test("迁移预检纳入工作区锁定和退出取消保护")
+    @Test("迁移预检保留退出取消保护但不阻断工作区阅读")
     func migrationParticipatesInWorkspaceOperationGuard() async throws {
         let workspace = WorkspaceModel(service: RepositoryService(providers: []),
                                        migrationService: RepositoryMigrationService(sources: [], targets: []))
@@ -17,7 +17,7 @@ struct RepositoryMigrationModelTests {
         model.directoryName = "migration-guard-\(UUID().uuidString)"
         model.makePlan()
         #expect(workspace.isOperating)
-        #expect(workspace.isInteractionLocked)
+        #expect(!workspace.isInteractionLocked)
         workspace.cancelOperation()
         #expect(model.isCancelling)
         for _ in 0..<100 where model.isBusy { try await Task.sleep(for: .milliseconds(10)) }

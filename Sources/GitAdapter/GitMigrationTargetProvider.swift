@@ -488,13 +488,13 @@ public final class GitMigrationTargetProvider: RepositoryMigrationTargetProvider
                 result[entry.path] = written
                 verification.append((written, declared))
             }
-            try await verifyGitBlobs(verification)
+            try await verifyGitBlobs(verification, revisionID: revisionID)
             return result
         }
 
         /// 按受限批次读取首次出现的 blob。不能逐文件启动 cat-file：大型历史的首轮
         /// 仍可能有数千个变化文件；只有超过批次上限的单 blob 才单独读取。
-        private func verifyGitBlobs(_ candidates: [(objectID: String, entry: MigrationFileEntry)]) async throws {
+        private func verifyGitBlobs(_ candidates: [(objectID: String, entry: MigrationFileEntry)], revisionID: String) async throws {
             var unique: [String: MigrationFileEntry] = [:]
             for candidate in candidates where verifiedObjectDigests[candidate.objectID] != candidate.entry.digest {
                 if let previous = unique[candidate.objectID], previous.digest != candidate.entry.digest || previous.size != candidate.entry.size {
@@ -511,13 +511,10 @@ public final class GitMigrationTargetProvider: RepositoryMigrationTargetProvider
             while start < entries.count {
                 try Task.checkCancellation()
                 let firstSize = sizes[start]
-                guard firstSize <= GitMigrationTargetProvider.maxExportBlobBytes else {
-                    throw VersionControlError.unsupported("迁移提交含有超过本地安全读取上限的单个文件，无法完成对象内容核对。")
-                }
                 if firstSize > GitMigrationTargetProvider.catFileBatchOutputBytes {
                     let entry = entries[start]
-                    let blob = try await provider.readSingleExportBlob(entry, in: repository)
-                    try verifyBlob(blob, objectID: entry.objectID, expected: try requiredManifest(for: entry.objectID, in: unique))
+                    let expected = try requiredManifest(for: entry.objectID, in: unique)
+                    try await verifyLargeBlob(entry, expected: expected, revisionID: revisionID)
                     start += 1
                     continue
                 }
@@ -526,9 +523,6 @@ public final class GitMigrationTargetProvider: RepositoryMigrationTargetProvider
                 var queryBytes = 0
                 while end < entries.count, end - start < GitMigrationTargetProvider.catFileBatchCount {
                     let size = sizes[end]
-                    guard size <= GitMigrationTargetProvider.maxExportBlobBytes else {
-                        throw VersionControlError.unsupported("迁移提交含有超过本地安全读取上限的单个文件，无法完成对象内容核对。")
-                    }
                     let querySize = entries[end].objectID.utf8.count + 1
                     let responseSize = querySize + 26 + size + 1
                     if end > start,
@@ -567,6 +561,19 @@ public final class GitMigrationTargetProvider: RepositoryMigrationTargetProvider
                 throw VersionControlError.invalidData("Git 写入的 blob 与来源字节摘要不一致。")
             }
             verifiedObjectDigests[objectID] = expected.digest
+        }
+
+        private func verifyLargeBlob(_ entry: GitMigrationTargetProvider.ExportTreeEntry,
+                                     expected: MigrationFileEntry, revisionID: String) async throws {
+            let temporary = repository.appendingPathComponent(".git/rephub-verify-\(UUID().uuidString)")
+            defer { try? provider.fileManager.removeItem(at: temporary) }
+            let bytes = try await provider.streamBlob(entry, in: repository, revision: revisionID,
+                                                      path: expected.path, expectedSize: expected.size, to: temporary)
+            let actual = try sha256(of: temporary)
+            guard bytes == expected.size, actual.size == expected.size, actual.digest == expected.digest else {
+                throw VersionControlError.invalidData("Git blob 内容校验失败：\(expected.path)（\(expected.size) 字节，修订 \(revisionID)）。")
+            }
+            verifiedObjectDigests[entry.objectID] = expected.digest
         }
 
         private func sha256(of url: URL) throws -> (digest: String, size: UInt64) {
@@ -864,9 +871,6 @@ private extension GitMigrationTargetProvider {
     static let hashObjectBatchArgumentBytes = 64 * 1024
     static let catFileBatchQueryBytes = 512 * 1024
     static let catFileBatchCount = 256
-    /// CommandRunner 会把 stdout 与 stderr 一起限制为 16 MiB。接近该上限的 blob
-    /// 不能带 batch 协议头读取，而是沿用旧的单对象读取，保持原有能力边界。
-    static let maxExportBlobBytes = 16 * 1024 * 1024
     static let catFileBatchOutputBytes = 12 * 1024 * 1024
 
     func git(_ arguments: [String], in directory: URL? = nil, timeout: TimeInterval = 30, remote: Bool = false, standardInput: Data? = nil, maximumStandardInputBytes: Int = 4 * 1024) async throws -> CommandResult {
@@ -875,6 +879,15 @@ private extension GitMigrationTargetProvider {
         guard fileManager.fileExists(atPath: localHome.path) else { throw VersionControlError.executionFailed("无法建立 Git 迁移隔离配置目录。") }
         let selectedRunner = remote ? runner : localRunner
         return try await selectedRunner.run(executable: "git", arguments: safeguards + (remote ? protocols : []) + arguments, directory: directory, timeout: timeout, standardInput: standardInput, maximumStandardInputBytes: maximumStandardInputBytes)
+    }
+
+    func gitWritingStandardOutput(_ arguments: [String], in directory: URL, to output: URL,
+                                  maximumBytes: UInt64, timeout: TimeInterval = 180) async throws -> CommandFileResult {
+        let safeguards = ["--no-optional-locks", "-c", "core.pager=cat", "-c", "core.quotepath=false", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "submodule.recurse=false"]
+        guard fileManager.fileExists(atPath: localHome.path) else { throw VersionControlError.executionFailed("无法建立 Git 迁移隔离配置目录。") }
+        return try await localRunner.runWritingStandardOutput(executable: "git", arguments: safeguards + arguments,
+                                                              to: output, maximumStandardOutputBytes: maximumBytes,
+                                                              directory: directory, timeout: timeout)
     }
 
     func validatedRemote(_ value: String) throws -> String {
@@ -1055,14 +1068,11 @@ private extension GitMigrationTargetProvider {
         while start < entries.count {
             try Task.checkCancellation()
             let firstSize = sizes[start]
-            guard firstSize <= Self.maxExportBlobBytes else {
-                throw VersionControlError.unsupported("迁移提交含有超过本地安全读取上限的单个文件，无法完成对象树预览校验。")
-            }
             if firstSize > Self.catFileBatchOutputBytes {
                 let entry = entries[start]
                 await progress(RepositoryOperationProgress("正在核对 \(revision.prefix(12)) 的 Git 大文件（\(start + 1) / \(entries.count)）…"))
-                let blob = try await readSingleExportBlob(entry, in: repository)
-                try materializeExportBlob(blob, for: entry, under: destination)
+                try await materializeLargeExportBlob(entry, expectedSize: UInt64(firstSize), in: repository,
+                                                     revision: revision, under: destination)
                 start += 1
                 continue
             }
@@ -1071,9 +1081,6 @@ private extension GitMigrationTargetProvider {
             var queryBytes = 0
             while end < entries.count, end - start < Self.catFileBatchCount {
                 let size = sizes[end]
-                guard size <= Self.maxExportBlobBytes else {
-                    throw VersionControlError.unsupported("迁移提交含有超过本地安全读取上限的单个文件，无法完成对象树预览校验。")
-                }
                 let querySize = entries[end].objectID.utf8.count + 1
                 // <oid> blob <size>\\n + 内容 + 内容后的换行。这里按最大位数预留，
                 // 防止许多空 blob 绕过字节上限。
@@ -1129,11 +1136,47 @@ private extension GitMigrationTargetProvider {
         }
     }
 
-    func readSingleExportBlob(_ entry: ExportTreeEntry, in repository: URL) async throws -> Data {
+    /// 对超过批量内存预算的常规文件，把 Git stdout 排他写入目的目录旁的临时文件；
+    /// 子进程结束后才原子移动到最终路径，因此取消、截断或对象读取失败不会留下半文件。
+    func materializeLargeExportBlob(_ entry: ExportTreeEntry, expectedSize: UInt64, in repository: URL,
+                                    revision: String, under destination: URL) async throws {
+        guard entry.mode == "100644" || entry.mode == "100755" else {
+            throw VersionControlError.invalidData("Git 大对象不是常规文件：\(entry.path)（修订 \(revision)）。")
+        }
+        let output = try validatedExportPath(entry.path, under: destination)
+        try fileManager.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let temporary = output.deletingLastPathComponent().appendingPathComponent(".rephub-git-blob-\(UUID().uuidString)")
+        defer { try? fileManager.removeItem(at: temporary) }
+        let bytes = try await streamBlob(entry, in: repository, revision: revision, path: entry.path,
+                                         expectedSize: expectedSize, to: temporary)
+        guard bytes == expectedSize else {
+            throw VersionControlError.invalidData("Git 大文件长度不一致：\(entry.path)（期望 \(expectedSize) 字节，实际 \(bytes) 字节，修订 \(revision)）。")
+        }
+        guard !fileManager.fileExists(atPath: output.path) else {
+            throw VersionControlError.invalidData("Git 导出路径已存在，拒绝覆盖：\(entry.path)（修订 \(revision)）。")
+        }
+        try fileManager.moveItem(at: temporary, to: output)
+        if entry.mode == "100755" { try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: output.path) }
+    }
+
+    /// Git 对象本身由 Git 校验；此处再精确限制尺寸并让调用方对临时文件作流式 SHA-256。
+    func streamBlob(_ entry: ExportTreeEntry, in repository: URL, revision: String, path: String,
+                    expectedSize: UInt64, to output: URL) async throws -> UInt64 {
         do {
-            return try requireSuccess(try await git(["cat-file", "blob", entry.objectID], in: repository, timeout: 180), tool: "git").data
+            let result = try requireSuccess(try await gitWritingStandardOutput(
+                ["cat-file", "blob", entry.objectID], in: repository, to: output,
+                maximumBytes: expectedSize, timeout: 600
+            ), tool: "git")
+            guard result.standardOutputBytes == expectedSize else {
+                throw VersionControlError.invalidData("Git 对象输出长度不一致：\(path)（期望 \(expectedSize) 字节，实际 \(result.standardOutputBytes) 字节，修订 \(revision)）。")
+            }
+            return result.standardOutputBytes
+        } catch is CancellationError {
+            throw CancellationError()
         } catch VersionControlError.outputTooLarge {
-            throw VersionControlError.unsupported("迁移提交含有超过本地安全读取上限的单个文件，无法完成对象树预览校验。")
+            throw VersionControlError.invalidData("Git 对象输出超过预期长度：\(path)（\(expectedSize) 字节，修订 \(revision)）。")
+        } catch {
+            throw VersionControlError.executionFailed("读取 Git 大文件失败：\(path)（\(expectedSize) 字节，修订 \(revision)）：\(error.localizedDescription)")
         }
     }
 

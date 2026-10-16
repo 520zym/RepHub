@@ -46,6 +46,16 @@ struct WorkingCopyMigrationIntegrationTests {
         #expect(initialFile.sourceText == "r3 from svn\n")
         _ = try await service.historyPatch(initialPreview, commit: try #require(initialPreview.mappings.last).targetCommit)
 
+        // 新服务实例从磁盘检查点恢复，真实 Git trailer 与 SVN/Git 树均需重新核对。
+        let restoredService = self.service(for: fixture)
+        let checkpoint = initialPreview.repository.deletingLastPathComponent().appendingPathComponent("checkpoint.json")
+        let restoredPlan = try await restoredService.resume(from: checkpoint)
+        let restoredPreview = try await restoredService.prepare(restoredPlan, progress: { _ in })
+        #expect(restoredPlan.id == initialPlan.id)
+        #expect(restoredPreview.tip == initialPreview.tip)
+        #expect(restoredPreview.mappings.count == initialPreview.mappings.count)
+        #expect(restoredPreview.files.allSatisfy { $0.state != .different })
+
         let initialResult = try await service.applyAndPublish(initialPreview, progress: { _ in })
         #expect(initialResult.publication.state == .published)
         #expect(FileManager.default.fileExists(atPath: fixture.svnReader.appendingPathComponent(".git").path))

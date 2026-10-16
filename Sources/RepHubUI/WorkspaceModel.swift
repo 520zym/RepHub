@@ -63,7 +63,11 @@ public final class WorkspaceModel {
     public let repositoryMigration: RepositoryMigrationModel?
     public let workingCopyMigration: WorkingCopyMigrationModel?
     public let migrationMonitor: MigrationUpdateMonitor?
-    public private(set) var migrationStartsInWorkingCopy = false
+    public enum MigrationPresentationMode: Hashable { case newDirectory, workingCopy }
+    public var migrationPresentationMode: MigrationPresentationMode = .newDirectory
+    public var migrationStartsInWorkingCopy: Bool { migrationPresentationMode == .workingCopy }
+    /// 收起只改变呈现；模型、任务及完成/错误结果仍由工作台持有。
+    public private(set) var hasBackgroundMigration = false
     public var showsRepositoryManagement = false
     public var showsRepositorySetup = false
     public var showsRepositoryMigration = false
@@ -152,12 +156,36 @@ public final class WorkspaceModel {
     /// 版本控制写操作期间，所有会改变所选工作区或读取范围的入口均应保持锁定。
     public var isOperationInProgress: Bool { operationKind != nil && operationResult == nil }
     /// 供应用退出保护使用；操作后的状态核对同样属于进行中状态。
-    public var isOperating: Bool {
+    private var isForegroundOperating: Bool {
         isOperationInProgress || repositoryAcquisition.isAcquiring || repositoryCommit.isBusy
-            || repositoryManagement.isBusy || repositorySetup.isBusy || repositoryMigration?.isBusy == true
-            || workingCopyMigration?.isBusy == true || toolIsBusy
+            || repositoryManagement.isBusy || repositorySetup.isBusy || toolIsBusy
     }
-    public var isInteractionLocked: Bool { isOperating || toolRequest != nil }
+    public var isMigrationBusy: Bool { repositoryMigration?.isBusy == true || workingCopyMigration?.isBusy == true }
+    public var canRestoreRepositoryMigration: Bool { !isForegroundOperating && toolRequest == nil }
+    public var isOperating: Bool { isForegroundOperating || isMigrationBusy }
+    public var isInteractionLocked: Bool {
+        isForegroundOperating || toolRequest != nil || workingCopyMigration?.stage == .applying
+    }
+    /// 隔离转换不锁住阅读与仓库切换；来源工作副本及其父子目录仍避免并发写入。
+    public var isWorkspaceMutationLocked: Bool {
+        isInteractionLocked || (workspace.map {
+            isMigrationProtecting($0.directory) || $0.bindings.contains { isMigrationProtecting($0.root) }
+        } ?? false)
+    }
+    public func isMigrationProtecting(_ directory: URL) -> Bool {
+        var protected: [URL] = []
+        if let migration = workingCopyMigration, migration.stage != .finished,
+           migration.isBusy || migration.plan != nil,
+           let root = migration.plan?.workingCopy.directory ?? migration.directory { protected.append(root) }
+        if let migration = repositoryMigration, migration.stage != .published,
+           migration.isBusy || migration.plan != nil,
+           let destination = migration.plan?.destination ?? migration.destination { protected.append(destination) }
+        let path = directory.standardizedFileURL.resolvingSymlinksInPath().pathComponents
+        return protected.contains {
+            let other = $0.standardizedFileURL.resolvingSymlinksInPath().pathComponents
+            return path.starts(with: other) || other.starts(with: path)
+        }
+    }
     /// SVN 可能只报告未跟踪目录；浏览其中的文件时也保留未跟踪语义。
     public var isUntrackedFilePreview: Bool {
         guard filePreview != nil, selectedRevisionID == nil, let selectedPath else { return false }
@@ -179,6 +207,7 @@ public final class WorkspaceModel {
 
     private func showTool(_ kind: WorkspaceToolRequest.Kind, path: String? = nil) {
         guard !isInteractionLocked, let binding = selectedBinding else { return }
+        guard kind == .inspection || !isMigrationProtecting(binding.root) else { return }
         cancelReading()
         cancelHistoryPage()
         toolRequest = WorkspaceToolRequest(kind: kind, binding: binding, path: path)
@@ -278,7 +307,7 @@ public final class WorkspaceModel {
     public func prepareCommit(initialTargets: Set<String>, initialMessage: String,
                               initialPathsByBinding: [String: Set<String>]? = nil,
                               initialMessages: [String: String]? = nil) {
-        guard !isInteractionLocked, let workspace, !workspace.isUnmanaged else { return }
+        guard !isWorkspaceMutationLocked, let workspace, !workspace.isUnmanaged else { return }
         cancelHistoryPage()
         repositoryCommit.prepare(in: workspace, initialTargets: initialTargets, initialMessage: initialMessage,
                                  initialPathsByBinding: initialPathsByBinding, initialMessages: initialMessages)
@@ -293,7 +322,7 @@ public final class WorkspaceModel {
     }
 
     private func prepareManagement(comparing revision: Revision?) {
-        guard !isInteractionLocked, let workspace, let binding = selectedBinding else { return }
+        guard !isWorkspaceMutationLocked, let workspace, let binding = selectedBinding else { return }
         cancelReading()
         cancelHistoryPage()
         let comparisonSeed = revision.map { revision in
@@ -314,14 +343,15 @@ public final class WorkspaceModel {
     }
 
     public func prepareSetup() {
-        guard !isInteractionLocked, let workspace, workspace.isUnmanaged else { return }
+        guard !isWorkspaceMutationLocked, let workspace, workspace.isUnmanaged else { return }
         repositorySetup.prepare(directory: workspace.directory)
         showsRepositorySetup = true
     }
 
     public func showRepositoryMigration() {
+        if hasBackgroundMigration || isMigrationBusy { restoreRepositoryMigration(); return }
         guard !isInteractionLocked, let migration = repositoryMigration else { return }
-        migrationStartsInWorkingCopy = false
+        migrationPresentationMode = .newDirectory
         migration.reset()
         workingCopyMigration?.reset()
         if let svn = workspace?.bindings.first(where: { $0.providerID == .svn }), let remote = svn.remoteURL {
@@ -332,11 +362,39 @@ public final class WorkspaceModel {
     }
 
     public func showMigrationSupplement(_ notice: MigrationSourceUpdate) {
+        if hasBackgroundMigration || isMigrationBusy { restoreRepositoryMigration(); return }
         guard !isInteractionLocked, let migration = repositoryMigration, let workingCopyMigration else { return }
         migration.reset()
-        migrationStartsInWorkingCopy = true
+        migrationPresentationMode = .workingCopy
         workingCopyMigration.prefill(directory: notice.directory)
         showsRepositoryMigration = true
+    }
+
+    public func hideRepositoryMigration() {
+        // 明确结束后系统也会触发 sheet onDismiss，不能重新留下空任务标记。
+        if showsRepositoryMigration || isMigrationBusy || repositoryMigration?.plan != nil
+            || workingCopyMigration?.plan != nil || repositoryMigration?.errorMessage != nil
+            || workingCopyMigration?.errorMessage != nil {
+            hasBackgroundMigration = true
+        }
+        showsRepositoryMigration = false
+    }
+
+    public func restoreRepositoryMigration() {
+        guard repositoryMigration != nil, canRestoreRepositoryMigration else { return }
+        showsRepositoryMigration = true
+    }
+
+    public func dismissRepositoryMigration() {
+        guard !isMigrationBusy else { hideRepositoryMigration(); return }
+        let appliedDirectory = workingCopyMigration?.result?.directory
+        showsRepositoryMigration = false
+        hasBackgroundMigration = false
+        repositoryMigration?.dismiss()
+        workingCopyMigration?.dismiss()
+        if let appliedDirectory, workspace?.directory == appliedDirectory {
+            refreshWorkspace(allBindings: true)
+        }
     }
 
     public func applyManagementResponse(_ response: WorkspaceManagementResult) {
@@ -940,6 +998,7 @@ public final class WorkspaceModel {
     /// 单次写操作只针对一个绑定。服务层负责串行化以及结束后的全部绑定刷新。
     public func performOperation(_ kind: RepositoryOperationKind, on binding: RepositoryBinding) {
         guard !isInteractionLocked,
+              !isMigrationProtecting(binding.root),
               workspace != nil,
               supports(kind, for: binding) else { return }
 

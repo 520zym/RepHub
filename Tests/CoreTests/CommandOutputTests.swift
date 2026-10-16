@@ -88,6 +88,52 @@ struct CommandOutputTests {
         #expect(lines.contains(CommandOutputLine(stream: .stdout, text: "started")))
     }
 
+    @Test("大 stdout 可受限写入文件而不进入常规 16 MiB 内存结果")
+    func writesLargeStandardOutputToBoundedFile() async throws {
+        let folder = temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let output = folder.appendingPathComponent("large-output")
+        let expected: UInt64 = 17 * 1024 * 1024 + 19
+        let result = try await CommandRunner().runWritingStandardOutput(
+            executable: "/bin/sh",
+            arguments: ["-c", "yes x | head -c \(expected)"],
+            to: output,
+            maximumStandardOutputBytes: expected,
+            timeout: 5
+        )
+        #expect(result.exitCode == 0)
+        #expect(result.standardOutputBytes == expected)
+        #expect((try FileManager.default.attributesOfItem(atPath: output.path)[.size] as? NSNumber)?.uint64Value == expected)
+    }
+
+    @Test("流式 stdout 的非零退出与取消都会移除本次临时文件")
+    func removesPartialStreamingOutputOnFailureOrCancellation() async throws {
+        let folder = temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let failed = folder.appendingPathComponent("failed-output")
+        let failedResult = try await CommandRunner().runWritingStandardOutput(
+            executable: "/bin/sh", arguments: ["-c", "printf partial; exit 9"],
+            to: failed, maximumStandardOutputBytes: 1024, timeout: 2
+        )
+        #expect(failedResult.exitCode == 9)
+        #expect(!FileManager.default.fileExists(atPath: failed.path))
+
+        let cancelled = folder.appendingPathComponent("cancelled-output")
+        let task = Task {
+            try await CommandRunner().runWritingStandardOutput(
+                executable: "/bin/sh", arguments: ["-c", "printf partial; sleep 5"],
+                to: cancelled, maximumStandardOutputBytes: 1024, timeout: 8
+            )
+        }
+        try await Task.sleep(for: .milliseconds(80))
+        task.cancel()
+        do {
+            _ = try await task.value
+            Issue.record("取消后不应返回流式输出结果")
+        } catch is CancellationError { }
+        #expect(!FileManager.default.fileExists(atPath: cancelled.path))
+    }
+
     private func temporaryFolder() -> URL {
         let folder = FileManager.default.temporaryDirectory
             .appendingPathComponent("RepHub-CommandOutputTests-\(UUID().uuidString)", isDirectory: true)

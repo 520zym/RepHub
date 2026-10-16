@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import Observation
 import RepositoryApplication
+import UniformTypeIdentifiers
 import VersionControlCore
 
 /// 将现有干净 SVN 工作副本转为 Git+SVN 共管目录；所有变更先在服务层暂存目录预览。
@@ -9,7 +10,10 @@ import VersionControlCore
 @Observable
 public final class WorkingCopyMigrationModel {
     public enum Stage: Equatable { case form, planning, prepared, converting, preview, applying, finished }
+    public enum PreviewTab: Hashable { case overview, files, history }
     public private(set) var stage: Stage = .form
+    /// 迁移 sheet 收起再恢复时，继续停留在用户正在查看的预览页。
+    public var previewTab: PreviewTab = .overview
     public var directory: URL?
     public var remoteURL = ""
     public var branch = "main"
@@ -28,6 +32,8 @@ public final class WorkingCopyMigrationModel {
     public var fileSearch = ""
     public private(set) var errorMessage: String?
     public private(set) var preservedDirectory: URL?
+    /// 当前计划来自检查点，或失败时已保留检查点；继续之前仍由服务重新核验。
+    public private(set) var isResumingFromCheckpoint = false
     public private(set) var result: WorkingCopyMigrationResult?
     public private(set) var isCancelling = false
     public private(set) var isInspectingRecord = false
@@ -49,8 +55,8 @@ public final class WorkingCopyMigrationModel {
     public func reset() {
         guard !isBusy else { return }
         requestID += 1; task?.cancel(); previewTask?.cancel()
-        stage = .form; directory = nil; remoteURL = ""; branch = "main"; mode = .history; includeCopyHistory = false; action = .initial
-        record = nil; plan = nil; clearPreview(); errorMessage = nil; preservedDirectory = nil; result = nil; transferProgress.clear()
+        stage = .form; previewTab = .overview; directory = nil; remoteURL = ""; branch = "main"; mode = .history; includeCopyHistory = false; action = .initial
+        record = nil; plan = nil; clearPreview(); errorMessage = nil; preservedDirectory = nil; isResumingFromCheckpoint = false; result = nil; transferProgress.clear()
     }
     public func dismiss() { guard !isBusy else { return }; reset() }
     public func prefill(directory: URL) { guard !isBusy else { return }; selectDirectory(directory.standardizedFileURL) }
@@ -62,7 +68,7 @@ public final class WorkingCopyMigrationModel {
         guard panel.runModal() == .OK, let selected = panel.url else { return }
         selectDirectory(selected.standardizedFileURL)
     }
-    public func invalidatePlan() { guard !isBusy else { return }; plan = nil; clearPreview(); result = nil; errorMessage = nil; if stage != .form { stage = .form } }
+    public func invalidatePlan() { guard !isBusy else { return }; isResumingFromCheckpoint = false; plan = nil; clearPreview(); result = nil; errorMessage = nil; if stage != .form { stage = .form } }
     public func setAction(_ value: WorkingCopyMigrationAction) { guard !isBusy else { return }; action = value; invalidatePlan() }
     public func updateAuthor(_ source: String, name: String, email: String) {
         guard let plan, !isBusy else { return }
@@ -70,7 +76,7 @@ public final class WorkingCopyMigrationModel {
         self.plan = WorkingCopyMigrationPlan(action: plan.action, workingCopy: plan.workingCopy, source: plan.source,
             remoteURL: plan.remoteURL, branch: plan.branch, expectedGitTip: plan.expectedGitTip,
             previousRecord: plan.previousRecord, authors: authors)
-        clearPreview(); preservedDirectory = nil; stage = .prepared
+        clearPreview(); preservedDirectory = nil; isResumingFromCheckpoint = false; stage = .prepared
     }
     public func toggleDirectory(_ path: String) { if expandedDirectories.contains(path) { expandedDirectories.remove(path) } else { expandedDirectories.insert(path) } }
     public func revealPreservedDirectory() { if let preservedDirectory { NSWorkspace.shared.activateFileViewerSelecting([preservedDirectory]) } }
@@ -88,7 +94,7 @@ public final class WorkingCopyMigrationModel {
         } receive: { model, plan in
             var resolvedPlan = plan
             resolvedPlan.authors = model.authorDirectory.resolve(authors: plan.authors, sourceURL: plan.source.location.url)
-            model.plan = resolvedPlan; model.stage = .prepared; model.transferProgress.finish("迁移计划已生成")
+            model.plan = resolvedPlan; model.isResumingFromCheckpoint = false; model.stage = .prepared; model.transferProgress.finish("迁移计划已生成")
         }
     }
     public func preparePreview() {
@@ -96,8 +102,36 @@ public final class WorkingCopyMigrationModel {
         do { try authorDirectory.save(authors: plan.authors, sourceURL: plan.source.location.url) }
         catch { errorMessage = "无法保存作者映射：\(error.localizedDescription)"; return }
         let handler = progressHandler
-        start(.converting, message: "正在在隔离目录准备工作副本转换预览…") { [service] in try await service.prepare(plan, progress: handler) } receive: { model, preview in
-            model.preview = preview; model.stage = .preview; model.transferProgress.finish("转换预览已就绪")
+        let isResuming = isResumingFromCheckpoint
+        start(.converting, message: isResuming ? "正在从检查点继续生成工作副本转换预览…" : "正在在隔离目录准备工作副本转换预览…") { [service] in try await service.prepare(plan, progress: handler) } receive: { model, preview in
+            model.preview = preview; model.isResumingFromCheckpoint = false; model.stage = .preview; model.transferProgress.finish("转换预览已就绪")
+        }
+    }
+    /// 工作副本迁移只接受服务层写出的新版 checkpoint；不会从 SVN/Git 历史反推范围或凭据。
+    public func resumeExistingMigration() {
+        guard !isBusy else { return }
+        let panel = NSOpenPanel()
+        panel.title = "继续当前工作副本迁移"
+        panel.message = "选择 RepHub 保留目录中的 checkpoint.json。只支持首次迁移的新版检查点；不会读取或保存 SVN 凭据。"
+        panel.canChooseFiles = true; panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.json]
+        guard panel.runModal() == .OK, let checkpoint = panel.url else { return }
+        plan = nil; clearPreview(); result = nil; errorMessage = nil; preservedDirectory = nil; isResumingFromCheckpoint = false
+        start(.planning, message: "正在校验工作副本迁移检查点…") { [service] in
+            try await service.resume(from: checkpoint)
+        } receive: { model, restored in
+            model.directory = restored.workingCopy.directory
+            model.remoteURL = restored.remoteURL
+            model.branch = restored.branch
+            model.mode = restored.source.mode
+            model.includeCopyHistory = restored.source.includeCopyHistory
+            model.action = restored.action
+            model.record = restored.previousRecord
+            model.plan = restored
+            model.preservedDirectory = checkpoint.deletingLastPathComponent().standardizedFileURL
+            model.isResumingFromCheckpoint = true
+            model.stage = .prepared
+            model.transferProgress.finish("已恢复检查点，可继续生成预览")
         }
     }
     public func loadFile(_ path: String) {
@@ -121,22 +155,13 @@ public final class WorkingCopyMigrationModel {
     private var progressHandler: RepositoryOperationProgressHandler { { [weak self] update in await MainActor.run { self?.transferProgress.consume(update) } } }
     private func selectDirectory(_ directory: URL) {
         requestID += 1; task?.cancel(); previewTask?.cancel()
-        self.directory = directory; record = nil; plan = nil; clearPreview(); result = nil; errorMessage = nil; preservedDirectory = nil; stage = .form
+        self.directory = directory; record = nil; plan = nil; clearPreview(); result = nil; errorMessage = nil; preservedDirectory = nil; isResumingFromCheckpoint = false; stage = .form
         inspectRecord()
     }
     private func inspectRecord() {
         guard let directory else { return }; requestID += 1; let token = requestID; errorMessage = nil; isInspectingRecord = true
         task = Task { [weak self, service] in do { let record = try await service.readRecord(at: directory); guard let self, self.requestID == token else { return }; self.record = record; if let record { self.remoteURL = record.remoteURL; self.branch = record.branch; self.action = .supplement } else { self.action = .initial }; self.isInspectingRecord = false } catch { guard let self, self.requestID == token else { return }; self.record = nil; self.isInspectingRecord = false; self.errorMessage = "无法读取迁移记录：\(error.localizedDescription)" } }
     }
-    /// 工作副本模式没有未完成作业的断点恢复；重试必须使用新的隔离目录，
-    /// 不能再次拿同一未完成 job 当成已验证预览。
-    private func renewPlanForRetry() {
-        guard preview == nil, let plan else { return }
-        self.plan = WorkingCopyMigrationPlan(action: plan.action, workingCopy: plan.workingCopy, source: plan.source,
-            remoteURL: plan.remoteURL, branch: plan.branch, expectedGitTip: plan.expectedGitTip,
-            previousRecord: plan.previousRecord, authors: plan.authors)
-    }
-
     private func start<T: Sendable>(_ stage: Stage, message: String,
                                     work: @escaping @Sendable () async throws -> T,
                                     receive: @escaping @MainActor (WorkingCopyMigrationModel, T) -> Void) {
@@ -151,12 +176,16 @@ public final class WorkingCopyMigrationModel {
             } catch {
                 guard let self, self.requestID == token else { return }
                 if let plan = self.plan { self.preservedDirectory = await self.service.partialDirectory(for: plan.id) }
-                if stage == .converting { self.renewPlanForRetry() }
+                if stage == .converting {
+                    self.isResumingFromCheckpoint = self.action == .initial && self.preservedDirectory.map {
+                        FileManager.default.fileExists(atPath: $0.appendingPathComponent("checkpoint.json").path)
+                    } == true
+                }
                 self.isCancelling = false
                 self.stage = self.preview != nil ? .preview : (self.plan == nil ? .form : .prepared)
                 if error is CancellationError {
                     self.errorMessage = stage == .converting
-                        ? "已取消；暂存目录已保留，可重新从头生成预览。"
+                        ? (self.isResumingFromCheckpoint ? "已取消；检查点已保留，继续前会重新核验。" : "已取消；暂存目录已保留，尚无可继续的初迁检查点，请重新预检。")
                         : "操作已取消。"
                     self.transferProgress.finish("已取消")
                 } else {

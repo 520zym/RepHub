@@ -114,7 +114,7 @@ struct RepositoryOperationView: View {
                     if let binding = selectedBinding { model.performOperation(selectedKind, on: binding) }
                 }
                 .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
-                .disabled(selectedBinding == nil || !supportedKinds.contains(selectedKind))
+                .disabled(selectedBinding == nil || !supportedKinds.contains(selectedKind) || model.isWorkspaceMutationLocked)
             }
         }
         .padding(22)
