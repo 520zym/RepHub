@@ -25,6 +25,11 @@ struct WorkingCopyMigrationView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(palette.background).foregroundStyle(palette.text)
+        .sheet(isPresented: $model.isShowingResumePicker) {
+            MigrationResumePicker(title: "继续当前工作副本迁移", records: model.resumeRecords, palette: palette,
+                                  resume: model.resume, remove: model.removeResumeRecord,
+                                  choose: model.chooseResumeCheckpoint, dismiss: model.dismissResumePicker)
+        }
     }
     private var header: some View { HStack(spacing: 11) {
         Image(systemName: "folder.badge.gearshape").font(.system(size: 17, weight: .medium)).foregroundStyle(palette.accent).frame(width: 33, height: 33).background(palette.selection.opacity(0.7), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -94,16 +99,18 @@ struct WorkingCopyMigrationView: View {
                     showsFileRecords: model.stage != .planning)
                 Text(model.stage == .planning
                      ? "依次核对本地工作副本、Git 目标和 SVN 历史。预检仅读取状态，可以随时取消。"
-                     : "保留历史会逐个修订转换并核对内容，所需时间取决于历史数量与文件规模。预览确认前不会覆盖当前工作副本。")
+                     : (model.stage == .applying
+                        ? "正在应用本地 Git 并发布到目标远端；上传完成后还会核对远端分支。取消发布会保留已应用的本地 Git，之后可继续推送。"
+                        : "保留历史会逐个修订转换并核对内容，所需时间取决于历史数量与文件规模。预览确认前不会覆盖当前工作副本。"))
                     .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
             }.padding(22)
         }
     }
     private var preview: some View { VStack(spacing: 0) { WorkbenchSegmentedPicker(title: "转换预览", selection: $model.previewTab, options: [.init(.overview, "概览"), .init(.files, "文件"), .init(.history, "历史")], palette: palette).frame(width: 285).padding(.vertical, 13); Divider().opacity(0.2); switch model.previewTab { case .overview: overview; case .files: files; case .history: history } } }
-    private var overview: some View { ScrollView { VStack(alignment: .leading, spacing: 16) { if let preview = model.preview { HStack(spacing: 12) { metricCard("本次新增", "\(currentMappings(preview: preview).count) 条"); metricCard("文件核对", "\(preview.files.count) 项"); metricCard("方式", preview.plan.action.title) }; card("来源 → 当前工作副本", "arrow.right.circle") { VStack(spacing: 7) { row("SVN 来源", preview.plan.workingCopy.sourceURL); row("仓库 UUID", preview.plan.workingCopy.repositoryUUID); row("本地 BASE", preview.plan.workingCopy.baseRevision); row("Git 目标", preview.plan.remoteURL); row("目标分支", preview.plan.branch); if preview.plan.source.mode == .history { row("历史范围", historyScopeDescription(preview.plan.source.includeCopyHistory, action: preview.plan.action)) } } }; if let previous = preview.plan.previousRecord { card("已迁移锚点", "arrow.triangle.branch") { VStack(spacing: 7) { row("开始修订", previous.startRevision); row("接管节点", previous.cutoverRevision); row("上次已迁", previous.lastRevision); row("本次截至", preview.plan.source.anchor) } } } else { card("首次接管锚点", "arrow.triangle.branch") { VStack(spacing: 7) { row("开始修订", preview.plan.source.revisions.first?.id ?? "—"); row("本地 BASE", preview.plan.workingCopy.baseRevision); row("接管节点", preview.plan.workingCopy.baseRevision); row("本次截至", preview.plan.source.anchor) } } }; if !preview.warnings.isEmpty { warnings(preview.warnings) }; Text("隔离预览：\(preview.repository.path)").font(.system(size: 11, design: .monospaced)).foregroundStyle(palette.secondaryText).textSelection(.enabled) } }.padding(22) } }
+    private var overview: some View { ScrollView { VStack(alignment: .leading, spacing: 16) { if let preview = model.preview { HStack(spacing: 12) { metricCard("本次新增", "\(currentMappings(preview: preview).count) 条"); metricCard("文件核对", "\(preview.files.count) 项"); metricCard("方式", preview.plan.action.title) }; card("来源 → 当前工作副本", "arrow.right.circle") { VStack(spacing: 7) { row("SVN 来源", preview.plan.workingCopy.sourceURL); row("仓库 UUID", preview.plan.workingCopy.repositoryUUID); row(preview.plan.action == .initial ? "初始 BASE" : "本地 BASE", preview.plan.workingCopy.baseRevision); row("Git 目标", preview.plan.remoteURL); row("目标分支", preview.plan.branch); if preview.plan.source.mode == .history { row("历史范围", historyScopeDescription(preview.plan.source.includeCopyHistory, action: preview.plan.action)) } } }; if let previous = preview.plan.previousRecord { card("已迁移锚点", "arrow.triangle.branch") { VStack(spacing: 7) { row("开始修订", previous.startRevision); row("接管节点", previous.cutoverRevision); row("上次已迁", previous.lastRevision); row("本次截至", preview.plan.source.anchor); row("末次提交", preview.mappings.last?.source.id ?? "—") } } } else { card("首次接管锚点", "arrow.triangle.branch") { VStack(spacing: 7) { row("开始修订", preview.plan.source.revisions.first?.id ?? "—"); row("初始 BASE", preview.plan.workingCopy.baseRevision); row("接管节点", preview.plan.workingCopy.baseRevision); row("本次截至", preview.plan.source.anchor); row("末次提交", preview.mappings.last?.source.id ?? "—") } } }; if !preview.warnings.isEmpty { warnings(preview.warnings) }; Text("隔离预览：\(preview.repository.path)").font(.system(size: 11, design: .monospaced)).foregroundStyle(palette.secondaryText).textSelection(.enabled) } }.padding(22) } }
     private var files: some View { HStack(spacing: 0) { VStack(alignment: .leading, spacing: 8) { TextField("筛选文件…", text: $model.fileSearch).textFieldStyle(.roundedBorder); if model.action == .supplement { Text("标记表示本次补迁带来的内容变化；其他 Git 文件保持原样。") .font(.system(size: 10)).foregroundStyle(palette.secondaryText) }; WorkingFileTree(files: filteredFiles, expanded: model.expandedDirectories, selected: model.selectedFilePath, palette: palette, allowsDifferences: model.action == .supplement, toggle: model.toggleDirectory, select: model.loadFile) }.padding(12).frame(minWidth: 250, idealWidth: 320, maxWidth: 380).background(palette.sidebar.opacity(0.5)); Divider().opacity(0.2); fileContent.frame(maxWidth: .infinity, maxHeight: .infinity) } }
     private var fileContent: some View { Group { if let item = model.filePreview { VStack(spacing: 0) { if item.isBinary { Label("二进制文件 · 仅比较摘要", systemImage: "doc.badge.gearshape").font(.system(size: 12, weight: .semibold)).foregroundStyle(palette.secondaryText).frame(maxWidth: .infinity, alignment: .leading).padding(10).background(palette.sidebar.opacity(0.5)) }; HStack(spacing: 0) { column(model.action == .supplement ? "当前 Git" : "SVN 来源", item.sourceText); Divider().opacity(0.2); column("转换结果", item.targetText) } } } else if model.selectedFilePath != nil { ProgressView("正在读取文件预览…") } else { ContentUnavailableView("选择一个文件", systemImage: "doc.text.magnifyingglass", description: Text("查看当前内容和转换结果。")) } } }
-    private var history: some View { HStack(spacing: 0) { List(model.preview.map { currentMappings(preview: $0) } ?? [], selection: Binding(get: { model.selectedCommit }, set: { if let value = $0 { model.loadHistoryPatch(value) } })) { item in VStack(alignment: .leading, spacing: 3) { Text(item.source.message).font(.system(size: 12, weight: .medium)).lineLimit(3); Text("\(item.author.name) <\(item.author.email)>").font(.system(size: 10)).foregroundStyle(palette.secondaryText).lineLimit(1); HStack { Text(item.source.id); Text("→"); Text(String(item.targetCommit.prefix(12))); Spacer(); Text(item.source.date.formatted(date: .abbreviated, time: .shortened)) }.font(.system(size: 10, design: .monospaced)).foregroundStyle(palette.secondaryText) }.padding(.vertical, 3).tag(item.targetCommit) }.listStyle(.sidebar).frame(minWidth: 300, idealWidth: 390, maxWidth: 460).background(palette.sidebar.opacity(0.5)); Divider().opacity(0.2); Group { if let patch = model.historyPatch { WorkingPatchPreview(text: patch.text, palette: palette) } else if model.selectedCommit != nil { ProgressView("正在读取提交差异…") } else { ContentUnavailableView("选择一条提交", systemImage: "clock.arrow.circlepath", description: Text("查看本次新增提交的转换后差异。")) } }.frame(maxWidth: .infinity, maxHeight: .infinity) } }
+    private var history: some View { HStack(spacing: 0) { List(model.preview.map { currentMappings(preview: $0) } ?? [], selection: Binding(get: { model.selectedCommit }, set: { if let value = $0 { model.loadHistoryPatch(value) } })) { item in VStack(alignment: .leading, spacing: 3) { Text(item.source.message).font(.system(size: 12, weight: .medium)).lineLimit(3); Text("\(item.author.name) <\(item.author.email)>").font(.system(size: 10)).foregroundStyle(palette.secondaryText).lineLimit(1); HStack { Text(item.source.id); Text("→"); Text(String(item.targetCommit.prefix(12))); Spacer(); Text(item.source.date.formatted(date: .abbreviated, time: .shortened)) }.font(.system(size: 10, design: .monospaced)).foregroundStyle(palette.secondaryText) }.padding(.vertical, 3).tag(item.targetCommit) }.listStyle(.sidebar).frame(minWidth: 300, idealWidth: 390, maxWidth: 460).background(palette.sidebar.opacity(0.5)); Divider().opacity(0.2); Group { if let patch = model.historyPatch { MigrationPatchPreview(patch: patch, palette: palette) } else if model.selectedCommit != nil { ProgressView("正在读取提交差异…") } else { ContentUnavailableView("选择一条提交", systemImage: "clock.arrow.circlepath", description: Text("查看本次新增提交的转换后差异。")) } }.frame(maxWidth: .infinity, maxHeight: .infinity) } }
     private var footer: some View {
         HStack(spacing: 10) {
             if let error = model.errorMessage {
@@ -112,17 +119,30 @@ struct WorkingCopyMigrationView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Label(result.publication.message, systemImage: result.publication.state == .published ? "checkmark.circle" : "exclamationmark.circle")
                     if result.publication.state != .published {
-                        Text("本地 Git 已应用并保留本次目标远端。可在此重试；关闭后可打开当前目录，使用“管理当前仓库”的 Git 推送继续发布。")
+                        Text("本地 Git 已应用并保留本次目标远端。可在此重试；关闭后可打开当前目录，从“仓库 → 推送…”继续发布。")
                     }
                 }.font(.system(size: 11)).foregroundStyle(result.publication.state == .published ? palette.accent : palette.secondaryText).lineLimit(2)
             } else {
-                Text(model.preview == nil ? (model.isResumingFromCheckpoint ? "已恢复检查点；生成预览会从已核对的迁移进度继续。" : "预览完成前不会向当前目录或目标远端写入内容。") : "确认后应用到当前目录并发布；收起窗口可保留预览，稍后继续查看。")
+                Text(model.preview?.applicationIssue ?? (model.preview == nil ? (model.isResumingFromCheckpoint ? "已恢复检查点；生成预览会从已核对的迁移进度继续。" : "预览完成前不会向当前目录或目标远端写入内容。") : "确认后应用到当前目录并发布；收起窗口可保留预览，稍后继续查看。"))
                     .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
             }
             Spacer()
             if model.preview == nil, let folder = model.preservedDirectory { Button("查看暂存位置", action: model.revealPreservedDirectory).buttonStyle(WorkbenchButtonStyle(palette: palette, role: .quiet)).help(folder.path) }
             if let result = model.result { Button("打开当前目录") { completed(result.directory) }.buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary)).disabled(model.isBusy) }
-            if model.preview != nil { Button(model.result?.publication.state == .published ? "已发布" : (model.result == nil ? "应用到当前目录并发布" : "重试发布"), action: model.applyAndPublish).buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary)).disabled(model.isBusy || model.result?.publication.state == .published) }
+            if model.preview != nil {
+                if model.action == .initial, model.mode == .history, model.result == nil {
+                    Button("检查并补入后续提交", action: model.checkAndContinueSourceUpdates)
+                        .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary)).disabled(model.isBusy)
+                        .help("保留已经完成的 Git 提交，只追加当前 SVN 工作副本版本内的后续提交。")
+                } else if model.preview?.applicationIssue != nil {
+                    Button("重新核对当前目录", action: model.preparePreview)
+                        .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary)).disabled(model.isBusy)
+                }
+                Button(model.result?.publication.state == .published ? "已发布" : (model.result == nil ? "应用到当前目录并发布" : "重试发布"), action: model.applyAndPublish)
+                    .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .primary))
+                    .disabled(model.isBusy || model.result?.publication.state == .published || model.preview?.applicationIssue != nil)
+                    .help(model.preview?.applicationIssue ?? "确认后应用到当前目录并发布")
+            }
             else if model.plan != nil {
                 if model.errorMessage != nil && !model.isBusy {
                     Button("重新预检") { model.invalidatePlan(); model.makePlan() }
@@ -176,77 +196,4 @@ private struct WorkingFileTree: View {
     }
     private func row(_ node: Node) -> some View { HStack(spacing: 4) { if node.directory { Button { toggle(node.path) } label: { Image(systemName: expanded.contains(node.path) ? "chevron.down" : "chevron.right").font(.system(size: 9)).frame(width: 13, height: 23).contentShape(.interaction, Rectangle()) }.buttonStyle(.plain) } else { Color.clear.frame(width: 13, height: 23) }; Button { if !node.directory { select(node.path) } } label: { HStack(spacing: 6) { Image(systemName: node.directory ? "folder" : "doc").foregroundStyle(node.directory ? palette.accent : palette.secondaryText); Text(node.name).lineLimit(1).truncationMode(.middle); Spacer(); if let item = node.item { indicator(item.state) } }.font(.system(size: 11, weight: selected == node.path ? .semibold : .regular)).frame(maxWidth: .infinity, alignment: .leading).frame(height: 23).contentShape(.interaction, Rectangle()) }.buttonStyle(.plain) }.padding(.leading, CGFloat(node.depth) * 15).padding(.trailing, 5).background(selected == node.path ? palette.selection.opacity(0.68) : .clear, in: RoundedRectangle(cornerRadius: 5, style: .continuous)) }
     private func indicator(_ state: MigrationFileComparison.State) -> some View { Group { switch state { case .identical: Image(systemName: "checkmark.circle.fill").foregroundStyle(palette.accent); case .omittedDirectory: Image(systemName: "minus.circle").foregroundStyle(palette.secondaryText).help("Git 不记录空目录，本地目录会保留。"); case .different: Image(systemName: allowsDifferences ? "arrow.left.arrow.right.circle" : "exclamationmark.circle.fill").foregroundStyle(allowsDifferences ? palette.secondaryText : palette.removed) } }.font(.system(size: 10)) }
-}
-private struct WorkingPatchPreview: View {
-    let palette: AppPalette
-    private let lines: [PatchDisplayLine]
-    private let lineNumberWidth: CGFloat
-
-    init(text: String, palette: AppPalette) {
-        self.palette = palette
-        let parsedLines = PatchLineParser.parse(text)
-        lines = parsedLines
-        let digits = parsedLines.reduce(1) { current, line in
-            max(current, String(max(line.oldLine ?? 0, line.newLine ?? 0)).count)
-        }
-        lineNumberWidth = CGFloat(max(3, digits)) * 7 + 10
-    }
-
-    var body: some View {
-        ScrollView([.horizontal, .vertical]) {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 0) {
-                    lineNumberLabel("旧")
-                    lineNumberLabel("新")
-                    Text("内容")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(palette.secondaryText)
-                        .padding(.leading, 7)
-                    Spacer(minLength: 12)
-                }
-                .frame(height: 23)
-                .background(palette.sidebar.opacity(0.5))
-
-                ForEach(lines.indices, id: \.self) { index in
-                    let line = lines[index]
-                    HStack(spacing: 0) {
-                        lineNumber(line.oldLine)
-                        lineNumber(line.newLine)
-                        Text(line.text.isEmpty ? " " : line.text)
-                            .font(.system(size: 11, design: .monospaced))
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: true, vertical: false)
-                            .padding(.leading, 7)
-                        Spacer(minLength: 12)
-                    }
-                    .frame(minHeight: 21, alignment: .leading)
-                    .background(color(line.text))
-                }
-            }
-            .padding(.vertical, 12)
-        }
-    }
-
-    private func lineNumberLabel(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 10, weight: .medium))
-            .foregroundStyle(palette.secondaryText)
-            .frame(width: lineNumberWidth, alignment: .trailing)
-            .padding(.trailing, 7)
-    }
-
-    private func lineNumber(_ value: Int?) -> some View {
-        Text(value.map(String.init) ?? "")
-            .font(.system(size: 11, design: .monospaced))
-            .foregroundStyle(palette.secondaryText)
-            .frame(width: lineNumberWidth, alignment: .trailing)
-            .padding(.trailing, 7)
-    }
-
-    private func color(_ line: String) -> Color {
-        if line.hasPrefix("+") && !line.hasPrefix("+++") { return palette.accent.opacity(0.14) }
-        if line.hasPrefix("-") && !line.hasPrefix("---") { return palette.removed.opacity(0.14) }
-        if line.hasPrefix("@@") { return palette.selection.opacity(0.55) }
-        return .clear
-    }
 }

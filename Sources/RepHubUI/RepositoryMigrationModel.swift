@@ -44,15 +44,20 @@ public final class RepositoryMigrationModel {
     public private(set) var preservedDirectory: URL?
     public let transferProgress = TransferProgressState()
     public let authorDirectory: MigrationAuthorDirectoryStore
+    public private(set) var resumeRecords: [MigrationResumeStore.Record] = []
+    public var isShowingResumePicker = false
     public var fileSearch = ""
 
     private let service: RepositoryMigrationService
+    private let resumeStore: MigrationResumeStore
     private var task: Task<Void, Never>?
     private var previewTask: Task<Void, Never>?
     private var requestID = 0
 
-    public init(service: RepositoryMigrationService, authorDirectory: MigrationAuthorDirectoryStore = .init()) {
-        self.service = service; self.authorDirectory = authorDirectory
+    public init(service: RepositoryMigrationService, authorDirectory: MigrationAuthorDirectoryStore = .init(),
+                resumeStore: MigrationResumeStore = .shared) {
+        self.service = service; self.authorDirectory = authorDirectory; self.resumeStore = resumeStore
+        refreshResumeRecords()
     }
     isolated deinit { task?.cancel(); previewTask?.cancel() }
 
@@ -78,6 +83,7 @@ public final class RepositoryMigrationModel {
         plan = nil; preview = nil; filePreview = nil; selectedFilePath = nil; expandedFileDirectories = []; selectedCommit = nil; historyPatch = nil
         errorMessage = nil; publication = nil; transferProgress.clear()
         preservedDirectory = nil
+        isShowingResumePicker = false; refreshResumeRecords()
     }
 
     public func prefillSource(url: String) {
@@ -171,18 +177,33 @@ public final class RepositoryMigrationModel {
         }
     }
 
-    /// checkpoint 只记录转换检查点，不保存口令；恢复时使用本窗口本次填写的凭据。
+    /// 打开本机受限索引中的未完成作业；实际恢复仍交给服务层重新核验。
     public func resumeExistingMigration() {
         guard !isBusy else { return }
+        refreshResumeRecords(); isShowingResumePicker = true
+    }
+    public func dismissResumePicker() { guard !isBusy else { return }; isShowingResumePicker = false }
+    public func refreshResumeRecords() {
+        resumeRecords = resumeStore.records(kind: .repository,
+                                            searchRoots: [destinationParent, preservedDirectory?.deletingLastPathComponent()].compactMap { $0 })
+    }
+    /// 仅从列表移除索引，不删除保留目录或检查点。
+    public func removeResumeRecord(_ record: MigrationResumeStore.Record) { resumeStore.remove(id: record.id, kind: .repository); refreshResumeRecords() }
+    public func chooseResumeCheckpoint() {
+        guard !isBusy else { return }
         let panel = NSOpenPanel()
-        panel.title = "继续已有迁移"
-        panel.message = "选择 RepHub 保留目录中的 checkpoint.json。首次转换尚未建立检查点时只能重新预检。"
-        panel.canChooseFiles = true; panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = [.json]
-        guard panel.runModal() == .OK, let checkpoint = panel.url else { return }
+        panel.title = "选择迁移保留目录或检查点"
+        panel.message = "可选择 .RepHub-migration-… 保留目录，或其中的 checkpoint.json。已显示隐藏文件；不会读取 SVN 凭据。"
+        panel.canChooseFiles = true; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false; panel.showsHiddenFiles = true
+        panel.directoryURL = preservedDirectory ?? resumeRecords.first?.checkpointURL.deletingLastPathComponent() ?? destinationParent
+        guard panel.runModal() == .OK, let selected = panel.url else { return }
+        resume(from: MigrationResumeStore.checkpointURL(for: selected))
+    }
+    public func resume(from record: MigrationResumeStore.Record) { resume(from: record.checkpointURL) }
+    private func resume(from checkpoint: URL) {
         let credentials = username.isEmpty && password.isEmpty ? nil : RepositoryCredentials(username: username, password: password)
         requestID += 1; let token = requestID
-        stage = .planning; isCancelling = false; errorMessage = nil; transferProgress.begin("正在读取迁移检查点…")
+        stage = .planning; isCancelling = false; errorMessage = nil; isShowingResumePicker = false; transferProgress.begin("正在读取迁移检查点…")
         task = Task { [weak self, service] in
             do {
                 let restored = try await service.resume(from: checkpoint, credentials: credentials)
@@ -192,12 +213,12 @@ public final class RepositoryMigrationModel {
                 self.includeCopyHistory = restored.source.includeCopyHistory
                 self.destinationParent = restored.destination.deletingLastPathComponent(); self.directoryName = restored.destination.lastPathComponent
                 self.preservedDirectory = await service.partialDirectory(for: restored.id)
-                self.stage = .prepared; self.transferProgress.finish("已恢复迁移计划，可继续生成预览")
+                self.stage = .prepared; self.refreshResumeRecords(); self.transferProgress.finish("已恢复迁移计划，可继续生成预览")
             } catch is CancellationError {
                 guard let self, self.requestID == token else { return }; self.stage = .form; self.transferProgress.finish("恢复已取消")
             } catch {
                 guard let self, self.requestID == token else { return }
-                self.stage = .form; self.errorMessage = "无法恢复迁移：\(error.localizedDescription)"; self.transferProgress.finish("无法恢复迁移")
+                self.stage = .form; self.errorMessage = "无法恢复迁移：\(error.localizedDescription)"; self.refreshResumeRecords(); self.transferProgress.finish("无法恢复迁移")
             }
         }
     }

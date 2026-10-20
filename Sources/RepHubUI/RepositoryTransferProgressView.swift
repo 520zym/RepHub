@@ -59,6 +59,9 @@ struct RepositoryTransferProgressView: View {
                 Text(String(format: "当前阶段 %.0f%%", fraction * 100))
                     .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
             }
+            else if progress.isActive {
+                ProgressView().progressViewStyle(.linear).tint(palette.accent)
+            }
             if let migration = progress.migrationProgress {
                 migrationProgressRow(migration)
             }
@@ -98,7 +101,7 @@ struct RepositoryTransferProgressView: View {
     }
 
     @ViewBuilder private var recordList: some View {
-        if progress.records.isEmpty {
+        if progress.records.isEmpty && progress.fractionCompleted == nil {
             VStack(alignment: .leading, spacing: 4) {
                 Text(isCancelling ? "正在请求停止传输…" : (progress.isActive ? "等待当前步骤返回进度" : "没有收到文件或传输记录"))
                     .font(.system(size: 12, weight: .medium))
@@ -107,7 +110,7 @@ struct RepositoryTransferProgressView: View {
             }
             .padding(12).frame(maxWidth: .infinity, alignment: .leading)
             .background(palette.surface.opacity(0.72), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        } else {
+        } else if !progress.records.isEmpty {
             VStack(alignment: .leading, spacing: 7) {
                 HStack {
                     Text("传输记录 \(progress.totalRecordCount)")
@@ -188,9 +191,9 @@ struct RepositoryTransferProgressView: View {
     private func idleDescription(_ idleSeconds: Int) -> String {
         switch idleSeconds {
         case 31...:
-            return "已 \(idleSeconds) 秒未收到新输出；当前步骤仍在等待，可继续等待或取消"
+            return "已 \(idleSeconds) 秒未收到新输出；等待工具或远端响应，可后台运行或取消"
         case 16...:
-            return "已 \(idleSeconds) 秒未收到新输出；当前步骤可能仍在处理，可取消"
+            return "已 \(idleSeconds) 秒未收到新输出；等待工具返回下一次进度"
         case 1...:
             return "最后活动 \(idleSeconds) 秒前"
         default:

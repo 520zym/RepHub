@@ -11,13 +11,13 @@ struct RepositoryOperationView: View {
     @State private var selectedBindingID: String
     @State private var selectedKind: RepositoryOperationKind
 
-    init(model: WorkspaceModel, palette: AppPalette, dismiss: @escaping () -> Void) {
+    init(model: WorkspaceModel, palette: AppPalette, preferredKind: RepositoryOperationKind? = nil, dismiss: @escaping () -> Void) {
         self.model = model
         self.palette = palette
         self.dismiss = dismiss
         let firstBinding = model.selectedBinding ?? model.workspace?.bindings.first
         _selectedBindingID = State(initialValue: firstBinding?.id ?? "")
-        _selectedKind = State(initialValue: firstBinding?.capabilities.contains(.update) == true ? .update : .fetch)
+        _selectedKind = State(initialValue: preferredKind ?? (firstBinding?.capabilities.contains(.update) == true ? .update : .fetch))
     }
 
     private var bindings: [RepositoryBinding] { model.workspace?.bindings ?? [] }

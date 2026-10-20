@@ -198,7 +198,10 @@ public final class GitMigrationTargetProvider: RepositoryMigrationTargetProvider
             }
             return RepositoryPatch(text: patch)
         } catch VersionControlError.outputTooLarge {
-            return RepositoryPatch(text: "[差异预览超过读取上限，未能完整显示]\n", isTruncated: true)
+            // 大型首次提交可能连常规命令输出上限也超过，至少保留可读的文件摘要。
+            let summary = try await git(["show", "--format=", "--stat=100", "--no-renames", "--no-ext-diff", "--no-textconv", revision], in: repository, timeout: 120)
+            let text = try requireSuccess(summary, tool: "git").output
+            return RepositoryPatch(text: "文件变更摘要\n\n" + String(text.prefix(patchLimit)), isTruncated: true)
         }
     }
 
@@ -223,10 +226,11 @@ public final class GitMigrationTargetProvider: RepositoryMigrationTargetProvider
             try await checkMigrationTarget(remoteURL: remote, branch: branch)
             await progress(RepositoryOperationProgress("正在发布迁移后的 Git 历史…"))
             writeStarted = true
+            let reporter = GitTransferProgressReporter(progress)
             let push = try await git([
-                "push", "--porcelain", "--force-with-lease=refs/heads/\(branch):",
+                "push", "--porcelain", "--progress", "--force-with-lease=refs/heads/\(branch):",
                 "--", remote, "\(expectedTip):refs/heads/\(branch)"
-            ], in: repository, timeout: 600, remote: true)
+            ], in: repository, timeout: 600, remote: true, onOutput: { await reporter.accept($0) })
             guard push.exitCode == 0 else {
                 do {
                     let check = try await probeRemoteBranch(remote, branch: branch, in: repository)
@@ -234,6 +238,7 @@ public final class GitMigrationTargetProvider: RepositoryMigrationTargetProvider
                     return MigrationPublicationResult(state: check == nil ? .notPublished : .unknown, message: check == nil ? "目标 Git 未接受迁移提交。" : "推送结果不明确，请先核对目标 Git。")
                 } catch { return MigrationPublicationResult(state: .unknown, message: "推送未完成且无法读取目标 Git，请先核对。") }
             }
+            await progress(RepositoryOperationProgress("正在核对远端分支，确认发布结果…"))
             let confirmed = try await remoteBranch(remote, branch: branch, in: repository)
             guard confirmed == expectedTip else { return MigrationPublicationResult(state: .unknown, message: "推送已返回成功，但未能确认目标 Git 分支。") }
             return await publishedResult(repository: repository, remote: remote, branch: branch, confirmedTip: expectedTip, prefix: "已发布迁移历史并确认目标 Git 分支。")
@@ -822,13 +827,15 @@ extension GitMigrationTargetProvider: RepositoryWorkingCopyMigrationTargetProvid
             try Task.checkCancellation()
             do {
                 await progress(RepositoryOperationProgress("正在发布补迁提交…"))
-                let pushed = try await git(["push", "--porcelain", "--force-with-lease=refs/heads/\(branch):\(expectedBeforeTip)", "--", remote, "\(expectedTip):refs/heads/\(branch)"], in: repository, timeout: 600, remote: true)
+                let reporter = GitTransferProgressReporter(progress)
+                let pushed = try await git(["push", "--porcelain", "--progress", "--force-with-lease=refs/heads/\(branch):\(expectedBeforeTip)", "--", remote, "\(expectedTip):refs/heads/\(branch)"], in: repository, timeout: 600, remote: true, onOutput: { await reporter.accept($0) })
                 if pushed.exitCode != 0 {
                     if let confirmed = try? await probeRemoteBranch(remote, branch: branch, in: repository), confirmed == expectedTip {
                         return await publishedResult(repository: repository, remote: remote, branch: branch, confirmedTip: expectedTip, prefix: "补迁推送返回异常后仍确认目标 Git 已收到提交。")
                     }
                     return MigrationPublicationResult(state: .unknown, message: "补迁推送结果不明确，请先核对目标 Git。")
                 }
+                await progress(RepositoryOperationProgress("正在核对远端分支，确认发布结果…"))
                 let confirmed = try await probeRemoteBranch(remote, branch: branch, in: repository)
                 if confirmed == expectedTip {
                     return await publishedResult(repository: repository, remote: remote, branch: branch, confirmedTip: expectedTip, prefix: "已发布补迁提交并确认目标 Git 分支。")
@@ -873,12 +880,12 @@ private extension GitMigrationTargetProvider {
     static let catFileBatchCount = 256
     static let catFileBatchOutputBytes = 12 * 1024 * 1024
 
-    func git(_ arguments: [String], in directory: URL? = nil, timeout: TimeInterval = 30, remote: Bool = false, standardInput: Data? = nil, maximumStandardInputBytes: Int = 4 * 1024) async throws -> CommandResult {
+    func git(_ arguments: [String], in directory: URL? = nil, timeout: TimeInterval = 30, remote: Bool = false, standardInput: Data? = nil, maximumStandardInputBytes: Int = 4 * 1024, onOutput: CommandOutputHandler? = nil) async throws -> CommandResult {
         let safeguards = ["--no-optional-locks", "-c", "core.pager=cat", "-c", "core.quotepath=false", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "submodule.recurse=false"]
         let protocols = ["-c", "protocol.allow=never", "-c", "protocol.file.allow=always", "-c", "protocol.http.allow=always", "-c", "protocol.https.allow=always", "-c", "protocol.ssh.allow=always"]
         guard fileManager.fileExists(atPath: localHome.path) else { throw VersionControlError.executionFailed("无法建立 Git 迁移隔离配置目录。") }
         let selectedRunner = remote ? runner : localRunner
-        return try await selectedRunner.run(executable: "git", arguments: safeguards + (remote ? protocols : []) + arguments, directory: directory, timeout: timeout, standardInput: standardInput, maximumStandardInputBytes: maximumStandardInputBytes)
+        return try await selectedRunner.run(executable: "git", arguments: safeguards + (remote ? protocols : []) + arguments, directory: directory, timeout: timeout, standardInput: standardInput, maximumStandardInputBytes: maximumStandardInputBytes, onOutput: onOutput)
     }
 
     func gitWritingStandardOutput(_ arguments: [String], in directory: URL, to output: URL,
@@ -1447,13 +1454,15 @@ private extension GitMigrationTargetProvider {
         try Task.checkCancellation()
         do {
             await progress(RepositoryOperationProgress("正在发布迁移后的 Git 历史…"))
-            let pushed = try await git(["push", "--porcelain", "--force-with-lease=refs/heads/\(branch):", "--", remote, "\(expectedTip):refs/heads/\(branch)"], in: repository, timeout: 600, remote: true)
+            let reporter = GitTransferProgressReporter(progress)
+            let pushed = try await git(["push", "--porcelain", "--progress", "--force-with-lease=refs/heads/\(branch):", "--", remote, "\(expectedTip):refs/heads/\(branch)"], in: repository, timeout: 600, remote: true, onOutput: { await reporter.accept($0) })
             if pushed.exitCode != 0 {
                 if let confirmed = try? await probeRemoteBranch(remote, branch: branch, in: repository), confirmed == expectedTip {
                     return await publishedResult(repository: repository, remote: remote, branch: branch, confirmedTip: expectedTip, prefix: "迁移推送返回异常后仍确认目标 Git 已收到提交。")
                 }
                 return MigrationPublicationResult(state: .unknown, message: "迁移推送结果不明确，请先核对目标 Git。")
             }
+            await progress(RepositoryOperationProgress("正在核对远端分支，确认发布结果…"))
             let confirmed = try await probeRemoteBranch(remote, branch: branch, in: repository)
             if confirmed == expectedTip {
                 return await publishedResult(repository: repository, remote: remote, branch: branch, confirmedTip: expectedTip, prefix: "已发布迁移历史并确认目标 Git 分支。")

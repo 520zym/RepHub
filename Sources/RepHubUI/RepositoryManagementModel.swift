@@ -12,6 +12,27 @@ public struct RepositoryComparisonSeed: Equatable, Sendable {
     }
 }
 
+/// 仓库管理窗口一次只聚焦一项任务；具体可见页面由当前绑定的能力决定。
+public enum RepositoryManagementPage: CaseIterable, Hashable {
+    case push
+    case branches
+    case staging
+    case conflicts
+    case comparison
+    case settings
+
+    public var title: String {
+        switch self {
+        case .push: "推送"
+        case .branches: "分支与合并"
+        case .staging: "暂存区"
+        case .conflicts: "冲突"
+        case .comparison: "比较版本"
+        case .settings: "仓库设置"
+        }
+    }
+}
+
 /// 仓库管理窗口的短生命周期状态。界面只根据适配器上下文显示能力，不自行猜测 Git 或 SVN 命令。
 @MainActor
 @Observable
@@ -36,6 +57,10 @@ public final class RepositoryManagementModel {
     public private(set) var isLoadingComparisonPatch = false
     public private(set) var comparisonError: String?
     public private(set) var comparisonSeed: RepositoryComparisonSeed?
+    /// 菜单和工具栏可在打开前指定目标页；加载完成后会按仓库能力回退到可用页。
+    public var selectedPage: RepositoryManagementPage = .settings
+    /// 比较页可在工作副本写保护期间打开，但绝不能借此执行管理写操作。
+    public private(set) var isReadOnly = false
 
     private let service: RepositoryService
     private var task: Task<Void, Never>?
@@ -51,7 +76,13 @@ public final class RepositoryManagementModel {
 
     public var isBusy: Bool { isLoading || isExecuting }
 
-    public func prepare(in workspace: Workspace, binding: RepositoryBinding, comparisonSeed: RepositoryComparisonSeed? = nil) {
+    public func prepare(
+        in workspace: Workspace,
+        binding: RepositoryBinding,
+        comparisonSeed: RepositoryComparisonSeed? = nil,
+        page: RepositoryManagementPage = .settings,
+        readOnly: Bool = false
+    ) {
         guard !isExecuting else { return }
         requestID += 1
         previewID += 1
@@ -72,6 +103,8 @@ public final class RepositoryManagementModel {
         comparisonPath = nil
         comparisonError = nil
         self.comparisonSeed = comparisonSeed
+        isReadOnly = readOnly
+        selectedPage = comparisonSeed == nil ? page : .comparison
         isLoading = true
         isLoadingStagedPatch = false
         isComparing = false
@@ -83,6 +116,9 @@ public final class RepositoryManagementModel {
                 let context = try await service.managementContext(in: binding)
                 guard !Task.isCancelled, let self, self.requestID == token, self.selectedBinding?.id == binding.id else { return }
                 self.context = context
+                self.selectedPage = self.comparisonSeed == nil
+                    ? self.resolvedPage(self.selectedPage, in: context)
+                    : .comparison
                 self.isLoading = false
             } catch is CancellationError {
                 guard let self, self.requestID == token else { return }
@@ -97,7 +133,7 @@ public final class RepositoryManagementModel {
 
     public func execute(_ action: RepositoryManagementAction,
                         completed: @escaping @MainActor @Sendable (WorkspaceManagementResult) -> Void) {
-        guard !isBusy, let workspace, let binding = selectedBinding, let context else { return }
+        guard !isReadOnly, !isBusy, let workspace, let binding = selectedBinding, let context else { return }
         requestID += 1
         previewID += 1
         comparisonID += 1
@@ -240,6 +276,23 @@ public final class RepositoryManagementModel {
         errorMessage = message
     }
 
+    public func availablePages(in context: RepositoryManagementContext) -> [RepositoryManagementPage] {
+        if isReadOnly { return [.comparison] }
+        var pages: [RepositoryManagementPage] = []
+        if context.binding.capabilities.contains(.push) { pages.append(.push) }
+        if context.binding.capabilities.contains(.branchManagement) { pages.append(.branches) }
+        if context.binding.capabilities.contains(.staging) { pages.append(.staging) }
+        if context.binding.capabilities.contains(.conflictResolution) { pages.append(.conflicts) }
+        if context.binding.capabilities.contains(.revisionComparison) { pages.append(.comparison) }
+        pages.append(.settings)
+        return pages
+    }
+
+    private func resolvedPage(_ preferred: RepositoryManagementPage, in context: RepositoryManagementContext) -> RepositoryManagementPage {
+        let pages = availablePages(in: context)
+        return pages.contains(preferred) ? preferred : pages.last ?? .settings
+    }
+
     public func dismiss() {
         guard !isExecuting else { return }
         requestID += 1
@@ -260,6 +313,8 @@ public final class RepositoryManagementModel {
         comparisonPath = nil
         comparisonError = nil
         comparisonSeed = nil
+        selectedPage = .settings
+        isReadOnly = false
         isLoading = false
         isLoadingStagedPatch = false
         isComparing = false

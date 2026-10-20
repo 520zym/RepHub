@@ -6,8 +6,6 @@ import RepositoryApplication
 
 /// 仓库管理按操作语义拆分，避免把推送、分支、暂存和冲突处理混在同一张大表单中。
 struct RepositoryManagementView: View {
-    enum Tab: Hashable { case actions, comparison }
-
     @Bindable var model: RepositoryManagementModel
     let palette: AppPalette
     @Bindable var appearance: AppearanceStore
@@ -15,7 +13,8 @@ struct RepositoryManagementView: View {
     let dismiss: () -> Void
     let completed: @MainActor @Sendable (WorkspaceManagementResult) -> Void
     var editConflict: ((String) -> Void)? = nil
-    @State private var tab: Tab = .actions
+    /// 由工作区提供时，仓库设置页同时承担本地变化检查的控制入口。
+    var localMonitor: WorkspaceMonitor? = nil
     @State private var selectedPaths = Set<String>()
     @State private var selectedConflicts = Set<String>()
     @State private var remote = ""
@@ -56,7 +55,7 @@ struct RepositoryManagementView: View {
                 .font(.system(size: 17, weight: .medium)).foregroundStyle(palette.accent)
                 .frame(width: 31, height: 31).background(palette.selection.opacity(0.65), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
             VStack(alignment: .leading, spacing: 2) {
-                Text("仓库管理").font(.system(size: 15, weight: .semibold))
+                Text(model.selectedPage.title).font(.system(size: 15, weight: .semibold))
                 Text(model.selectedBinding?.displayLabel ?? "读取当前仓库状态")
                     .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
                     .help(model.selectedBinding?.root.path ?? "仓库管理")
@@ -73,31 +72,89 @@ struct RepositoryManagementView: View {
 
     private func content(_ context: RepositoryManagementContext) -> some View {
         VStack(spacing: 0) {
-            WorkbenchSegmentedPicker(title: "仓库管理", selection: $tab,
-                                     options: [.init(.actions, "操作"), .init(.comparison, "比较")], palette: palette)
+            WorkbenchSegmentedPicker(
+                title: "仓库管理",
+                selection: $model.selectedPage,
+                options: model.availablePages(in: context).map { .init($0, $0.title) },
+                palette: palette
+            )
                 .padding(.horizontal, 22).padding(.vertical, 14)
-            if tab == .actions { actions(context) } else { comparisons(context) }
+            Group {
+                switch model.selectedPage {
+                case .push:
+                    pushPage(context)
+                case .branches:
+                    branchPage(context)
+                case .staging:
+                    stagingPage(context)
+                case .conflicts:
+                    conflictPage(context)
+                case .comparison:
+                    comparisons(context)
+                case .settings:
+                    settingsPage(context)
+                }
+            }
+            if let error = model.errorMessage {
+                Text(error)
+                    .font(.system(size: 12))
+                    .foregroundStyle(palette.removed)
+                    .padding(.horizontal, 22).padding(.bottom, 14)
+            }
         }
     }
 
-    private func actions(_ context: RepositoryManagementContext) -> some View {
+    private func settingsPage(_ context: RepositoryManagementContext) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                if context.binding.capabilities.contains(.conflictResolution), !context.conflicts.isEmpty { conflictSection(context) }
                 if context.binding.providerID == .git { repositoryConfiguration(context) }
-                if context.binding.capabilities.contains(.push) { pushSection(context) }
-                if context.binding.capabilities.contains(.branchManagement) { branchSection(context) }
-                if context.binding.capabilities.contains(.staging) { stagingSection(context) }
-                if !hasVisibleAction(in: context) {
+                if let localMonitor { localMonitorSection(localMonitor) }
+                if context.binding.providerID != .git, localMonitor == nil {
                     ContentUnavailableView(
-                        "没有待处理冲突",
-                        systemImage: "checkmark.shield",
-                        description: Text("当前工作副本状态正常。可切换到“比较”查看两个修订之间的差异。")
+                        "没有可配置的仓库设置",
+                        systemImage: "gearshape",
+                        description: Text("此版本控制方式没有额外的远端或提交身份配置。")
                     )
                     .font(.system(size: 12))
                     .foregroundStyle(palette.secondaryText)
                 }
-                if let error = model.errorMessage { Text(error).font(.system(size: 12)).foregroundStyle(palette.removed) }
+            }
+            .padding(.horizontal, 22).padding(.bottom, 22)
+        }
+    }
+
+    private func pushPage(_ context: RepositoryManagementContext) -> some View {
+        ScrollView { pushSection(context).padding(.horizontal, 22).padding(.bottom, 22) }
+    }
+
+    private func branchPage(_ context: RepositoryManagementContext) -> some View {
+        ScrollView { branchSection(context).padding(.horizontal, 22).padding(.bottom, 22) }
+    }
+
+    private func stagingPage(_ context: RepositoryManagementContext) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                stagingSection(context)
+            }
+            .padding(.horizontal, 22).padding(.bottom, 22)
+        }
+    }
+
+    private func conflictPage(_ context: RepositoryManagementContext) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                if context.conflicts.isEmpty {
+                    ContentUnavailableView(
+                        "没有待处理冲突",
+                        systemImage: "checkmark.shield",
+                        description: Text("当前工作副本没有需要标记解决的冲突。")
+                    )
+                    .font(.system(size: 12))
+                    .foregroundStyle(palette.secondaryText)
+                    .frame(maxWidth: .infinity, minHeight: 180)
+                } else {
+                    conflictSection(context)
+                }
             }
             .padding(.horizontal, 22).padding(.bottom, 22)
         }
@@ -127,6 +184,34 @@ struct RepositoryManagementView: View {
                 }.padding(.top, 7)
             }
             .font(.system(size: 12, weight: .medium)).tint(palette.accent)
+        }
+    }
+
+    private func localMonitorSection(_ monitor: WorkspaceMonitor) -> some View {
+        section("自动检查本地变更") {
+            Text("只读取本地仓库状态，不会联网、更新或修改工作副本。")
+                .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
+            HStack(spacing: 10) {
+                Text("检查间隔").font(.system(size: 12)).foregroundStyle(palette.secondaryText).frame(width: 64, alignment: .leading)
+                Picker("检查间隔", selection: Binding(get: { monitor.intervalSeconds }, set: { monitor.intervalSeconds = $0 })) {
+                    Text("关闭").tag(0)
+                    Text("15 秒").tag(15)
+                    Text("30 秒").tag(30)
+                    Text("每分钟").tag(60)
+                }
+                .labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
+            }
+            HStack(spacing: 10) {
+                Text(monitor.isChecking ? "正在检查本地状态…" : "上次检查：\(monitor.lastCheckedAt?.formatted(date: .omitted, time: .shortened) ?? "尚未完成")")
+                    .font(.system(size: 11)).foregroundStyle(palette.secondaryText)
+                Spacer()
+                Button("立即检查") { monitor.checkNow() }
+                    .buttonStyle(WorkbenchButtonStyle(palette: palette, role: .secondary))
+                    .disabled(monitor.isChecking)
+            }
+            if let error = monitor.errorMessage {
+                Text(error).font(.system(size: 11)).foregroundStyle(palette.removed).textSelection(.enabled)
+            }
         }
     }
 
@@ -349,18 +434,11 @@ struct RepositoryManagementView: View {
     private func shortRevision(_ value: String) -> String { value.count > 12 ? String(value.prefix(12)) : value }
     private func reloadContext() {
         guard let workspace = model.workspace, let binding = model.selectedBinding else { return }
-        model.prepare(in: workspace, binding: binding)
-    }
-    private func hasVisibleAction(in context: RepositoryManagementContext) -> Bool {
-        context.binding.providerID == .git
-            || context.binding.capabilities.contains(.push)
-            || context.binding.capabilities.contains(.branchManagement)
-            || context.binding.capabilities.contains(.staging)
-            || !context.conflicts.isEmpty
+        model.prepare(in: workspace, binding: binding, page: model.selectedPage)
     }
     private func applyComparisonSeed() {
         guard let seed = model.comparisonSeed else { return }
-        tab = .comparison
+        model.selectedPage = .comparison
         fromRevision = seed.fromRevision ?? ""
         toRevision = seed.toRevision
     }

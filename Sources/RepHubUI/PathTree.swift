@@ -35,6 +35,13 @@ public struct PathTreeNode<Payload>: Identifiable {
     }
 }
 
+/// 树行缩进必须保留真实深度。目录结构常超过五层，截断深度会让不同父级下的行看起来处于同一层。
+enum TreeIndentation {
+    static func leading(base: CGFloat, perDepth: CGFloat, depth: Int) -> CGFloat {
+        base + CGFloat(max(0, depth)) * perDepth
+    }
+}
+
 /// 将版本控制路径转成稳定的树。构建发生在输入变化时，渲染时只遍历已生成节点。
 public enum PathTree {
     public static func make<Payload>(

@@ -117,6 +117,53 @@ final class RepositorySetupManagementModelTests: XCTestCase {
         XCTAssertEqual(model.workspace?.directory, directory)
     }
 
+    func testManagementOpensRequestedPageAndComparisonSeedTakesPriority() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let service = RepositoryService(providers: [ModelFixtureProvider()])
+        let workspace = try await service.open(directory: directory)
+        let binding = try XCTUnwrap(workspace.bindings.first)
+        let model = RepositoryManagementModel(service: service)
+
+        model.prepare(in: workspace, binding: binding, page: .push)
+        try await waitUntil { model.context != nil && !model.isLoading }
+        XCTAssertEqual(model.selectedPage, .push)
+        let context = try XCTUnwrap(model.context)
+        XCTAssertTrue(model.availablePages(in: context).contains(.settings))
+
+        model.prepare(
+            in: workspace,
+            binding: binding,
+            comparisonSeed: .init(fromRevision: "one", toRevision: "two"),
+            page: .settings
+        )
+        try await waitUntil { model.context != nil && !model.isLoading }
+        XCTAssertEqual(model.selectedPage, .comparison)
+    }
+
+    func testReadOnlyComparisonOnlyShowsComparisonAndRejectsManagementWrites() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let service = RepositoryService(providers: [ModelFixtureProvider()])
+        let workspace = try await service.open(directory: directory)
+        let binding = try XCTUnwrap(workspace.bindings.first)
+        let model = RepositoryManagementModel(service: service)
+
+        model.prepare(in: workspace, binding: binding, page: .comparison, readOnly: true)
+        try await waitUntil { model.context != nil && !model.isLoading }
+        let context = try XCTUnwrap(model.context)
+        XCTAssertTrue(model.isReadOnly)
+        XCTAssertEqual(model.selectedPage, .comparison)
+        XCTAssertEqual(model.availablePages(in: context), [.comparison])
+
+        var delivered = false
+        model.execute(.stage(paths: ["Sources/App.swift"])) { _ in delivered = true }
+        await Task.yield()
+        XCTAssertFalse(model.isExecuting)
+        XCTAssertFalse(delivered)
+        XCTAssertNil(model.result)
+    }
+
     func testCancelledManagementConsumesReturnedRepositoryResult() async throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

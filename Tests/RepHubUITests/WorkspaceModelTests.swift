@@ -6,6 +6,43 @@ import VersionControlCore
 
 @MainActor
 final class WorkspaceModelTests: XCTestCase {
+    func testMenuOperationRoutesToRequestedKindWithoutExecutingIt() async throws {
+        let provider = WorkspaceFixtureProvider()
+        let model = WorkspaceModel(service: RepositoryService(providers: [provider]))
+        model.open(try makeDirectory())
+        try await waitUntil { !model.isLoading && model.snapshot != nil }
+        model.showOperation(.fetch)
+        XCTAssertTrue(model.showsOperationSheet)
+        XCTAssertEqual(model.operationInitialKind, .fetch)
+        XCTAssertFalse(model.isOperationInProgress, "菜单只准备操作窗口，不能直接更新仓库")
+        model.showsOperationSheet = false
+        model.showOperation(.update)
+        XCTAssertEqual(model.operationInitialKind, .update)
+    }
+
+    func testSVNMenuRejectsGitFetchAndKeepsUpdateAvailable() async throws {
+        let model = WorkspaceModel(service: RepositoryService(providers: [WorkspaceFixtureProvider(providerID: .svn)]))
+        model.open(try makeDirectory())
+        try await waitUntil { !model.isLoading && model.snapshot != nil }
+        model.showOperation(.fetch)
+        XCTAssertFalse(model.showsOperationSheet)
+        model.showOperation(.update)
+        XCTAssertTrue(model.showsOperationSheet)
+        XCTAssertEqual(model.operationInitialKind, .update)
+    }
+
+    func testMenuRequestsWithoutRepositoryDoNotPresentWriteFlows() {
+        let model = WorkspaceModel(service: RepositoryService(providers: []))
+        model.showOperation(.update)
+        model.requestCommit()
+        model.prepareManagement(page: .push)
+        model.showLinkedWorkspaces()
+        XCTAssertFalse(model.showsOperationSheet)
+        XCTAssertFalse(model.showsRepositoryManagement)
+        XCTAssertFalse(model.showsLinkedWorkspaces)
+        XCTAssertEqual(model.commitPresentationRequest, 0)
+    }
+
     func testRepeatedTabsRestoreBothSelectionsWithoutReadingProviderAgain() async throws {
         let provider = WorkspaceFixtureProvider()
         let model = WorkspaceModel(service: RepositoryService(providers: [provider]))

@@ -192,7 +192,7 @@ struct WorkspaceFileTreeView: View {
             }
         }
         .font(.system(size: 14))
-        .padding(.leading, 12 + CGFloat(min(row.depth, 5)) * 14).padding(.trailing, 12)
+        .padding(.leading, TreeIndentation.leading(base: 12, perDepth: 14, depth: row.depth)).padding(.trailing, 12)
         .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
         .contentShape(Rectangle())
         .background(entry.path == model.selectedPath ? palette.selection : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -246,7 +246,7 @@ struct WorkspaceFileTreeView: View {
             }
             .font(.system(size: 11))
             .foregroundStyle(palette.secondaryText)
-            .padding(.leading, 28 + CGFloat(min(row.depth, 5)) * 13)
+            .padding(.leading, TreeIndentation.leading(base: 28, perDepth: 13, depth: row.depth))
             .padding(.trailing, 9).padding(.vertical, 4)
             .help(message)
         }
@@ -302,7 +302,7 @@ struct WorkspaceFileTreeView: View {
                     changeBadge(change)
                 }
             }
-            .font(.system(size: 14)).padding(.leading, 12 + CGFloat(min(row.depth, 5)) * 14).padding(.trailing, 12)
+            .font(.system(size: 14)).padding(.leading, TreeIndentation.leading(base: 12, perDepth: 14, depth: row.depth)).padding(.trailing, 12)
             .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading).contentShape(Rectangle())
             .background(row.change.map { $0.path == model.selectedPath } == true ? palette.selection : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             .onTapGesture {

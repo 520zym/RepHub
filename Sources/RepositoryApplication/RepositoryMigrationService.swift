@@ -8,6 +8,7 @@ public actor RepositoryMigrationService {
     private let targets: [any RepositoryMigrationTargetProvider]
     private let prefetchEnabled: Bool
     private let writeGate: RepositoryWriteGate
+    private let resumeStore: MigrationResumeStore
     private var busy = false
     private var jobs: [UUID: Job] = [:]
 
@@ -95,14 +96,16 @@ public actor RepositoryMigrationService {
     }
 
     public init(sources: [any RepositoryMigrationSourceProvider], targets: [any RepositoryMigrationTargetProvider],
-                writeGate: RepositoryWriteGate = RepositoryWriteGate()) {
-        self.init(sources: sources, targets: targets, prefetchEnabled: true, writeGate: writeGate)
+                writeGate: RepositoryWriteGate = RepositoryWriteGate(),
+                resumeStore: MigrationResumeStore = .shared) {
+        self.init(sources: sources, targets: targets, prefetchEnabled: true, writeGate: writeGate, resumeStore: resumeStore)
     }
 
     init(sources: [any RepositoryMigrationSourceProvider], targets: [any RepositoryMigrationTargetProvider],
          prefetchEnabled: Bool,
-         writeGate: RepositoryWriteGate = RepositoryWriteGate()) {
-        self.sources = sources; self.targets = targets; self.prefetchEnabled = prefetchEnabled; self.writeGate = writeGate
+         writeGate: RepositoryWriteGate = RepositoryWriteGate(),
+         resumeStore: MigrationResumeStore = .shared) {
+        self.sources = sources; self.targets = targets; self.prefetchEnabled = prefetchEnabled; self.writeGate = writeGate; self.resumeStore = resumeStore
     }
 
     public func browseSource(providerID: ProviderID, location: RemoteRepositoryLocation) async throws -> RemoteDirectoryListing {
@@ -313,6 +316,7 @@ public actor RepositoryMigrationService {
             job.repository = try await moveVerifiedPreviewRepository(job.repository, to: plan.destination)
             job.complete = true
             jobs[plan.id] = job
+            resumeStore.remove(id: plan.id, kind: .repository)
             try saveReport(job, to: reportURL(job), verified: true)
             await progress(RepositoryOperationProgress("转换及逐修订核对完成，可以预览。", fractionCompleted: 1))
             return preview(job)
@@ -648,7 +652,12 @@ public actor RepositoryMigrationService {
                                     omittedDirectories: job.omittedDirectories.sorted(),
                                     verifiedObjectTree: job.usesVerifiedSession)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]; encoder.dateEncodingStrategy = .iso8601
-        try encoder.encode(checkpoint).write(to: job.folder.appendingPathComponent("checkpoint.json"), options: .atomic)
+        let url = job.folder.appendingPathComponent("checkpoint.json")
+        try encoder.encode(checkpoint).write(to: url, options: .atomic)
+        resumeStore.register(.init(id: job.plan.id, kind: .repository, checkpointURL: url,
+                                   source: RepositoryDisplaySanitizer.redact(job.plan.source.location.url),
+                                   location: job.plan.destination.path,
+                                   progress: "已核对 \(job.mappings.count) / \(job.plan.source.revisions.count) 条修订"))
     }
 
     private func decodeCheckpoint(at url: URL) throws -> Checkpoint {

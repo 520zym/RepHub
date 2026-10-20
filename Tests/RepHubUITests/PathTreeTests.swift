@@ -26,4 +26,19 @@ final class PathTreeTests: XCTestCase {
         XCTAssertTrue(state.revisionCollapsed.contains("revision/Sources"))
         XCTAssertTrue(state.workingCollapsed.isEmpty)
     }
+
+    func testTreeIndentationKeepsIncreasingAfterFiveLevels() {
+        let fifthLevel = TreeIndentation.leading(base: 12, perDepth: 14, depth: 5)
+        let sixthLevel = TreeIndentation.leading(base: 12, perDepth: 14, depth: 6)
+        let seventhLevel = TreeIndentation.leading(base: 12, perDepth: 14, depth: 7)
+        let ninthLevel = TreeIndentation.leading(base: 12, perDepth: 14, depth: 9)
+
+        XCTAssertEqual(fifthLevel, 82)
+        XCTAssertEqual(sixthLevel, 96)
+        XCTAssertEqual(seventhLevel, 110)
+        XCTAssertEqual(ninthLevel, 138)
+        XCTAssertGreaterThan(sixthLevel, fifthLevel)
+        XCTAssertGreaterThan(seventhLevel, sixthLevel)
+        XCTAssertGreaterThan(ninthLevel, seventhLevel)
+    }
 }

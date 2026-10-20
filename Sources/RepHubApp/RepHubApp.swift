@@ -4,6 +4,7 @@ import DesignSystem
 import GitAdapter
 import RepositoryApplication
 import RepHubUI
+import VersionControlCore
 import SVNAdapter
 import AIApplication
 import AIAdapters
@@ -103,7 +104,7 @@ struct RepHubApp: App {
                 AISettingsView(store: dependencies.aiSettings, service: dependencies.aiService, usageStore: dependencies.aiUsage)
                     .tabItem { Label("AI 与场景", systemImage: "sparkles") }
                 AuthorDirectorySettingsContent(store: dependencies.authorDirectory, appearance: dependencies.appearance)
-                    .tabItem { Label("作者通讯录", systemImage: "person.crop.rectangle.stack") }
+                    .tabItem { Label("迁移作者通讯录", systemImage: "person.crop.rectangle.stack") }
             }
             .frame(minWidth: 680, idealWidth: 760, maxWidth: .infinity,
                    minHeight: 500, idealHeight: 600, maxHeight: .infinity)
@@ -169,29 +170,95 @@ private struct WorkspaceCommands: Commands {
             Button("在新窗口打开仓库…", action: openRepositoryInNewWindow)
                 .keyboardShortcut("o", modifiers: [.command, .shift])
             if let workspace { RecentRepositoriesMenu(model: workspace, onOpenInNewWindow: openInNewWindow) }
-        }
-        CommandMenu("项目") {
-            Button("打开仓库…") { workspace?.showRepositoryAcquisition() }
-                .disabled(workspace?.isInteractionLocked ?? true)
-            Button("在新窗口打开仓库…", action: openRepositoryInNewWindow)
-            if let workspace { RecentRepositoriesMenu(model: workspace, onOpenInNewWindow: openInNewWindow) }
-            Divider()
-            Button("刷新仓库") { workspace?.refresh() }.keyboardShortcut("r")
-                .disabled(workspace?.workspace == nil || workspace?.isLoading == true || workspace?.isInteractionLocked == true)
-            Button("仓库操作与版本比较…") { workspace?.prepareManagement() }
-                .disabled(workspace?.selectedBinding == nil || workspace?.isWorkspaceMutationLocked == true)
-            Button("关联工作副本…") { workspace?.chooseLinkedFolder() }
-                .disabled(workspace?.workspace?.bindings.isEmpty != false || workspace?.isInteractionLocked == true)
-            Button("全历史搜索…") { workspace?.showFullHistorySearch() }
-                .disabled(workspace?.workspace == nil || workspace?.isInteractionLocked == true)
-            Button("搁置与恢复改动…") { workspace?.showShelves() }
-                .disabled(workspace?.workspace == nil || workspace?.isWorkspaceMutationLocked == true)
-            Button("迁移仓库…") { workspace?.showRepositoryMigration() }
-                .disabled(workspace?.isInteractionLocked ?? true)
             Divider()
             Button("关闭仓库") { workspace?.closeWorkspace() }
                 .disabled(workspace?.workspace == nil || workspace?.isInteractionLocked == true)
         }
+        CommandGroup(before: .toolbar) {
+            Button("工作区") { workspace?.showSection(.workingCopy) }
+                .keyboardShortcut("1").disabled(cannotRead)
+            Button("提交历史") { workspace?.showSection(.history) }
+                .keyboardShortcut("2").disabled(cannotRead)
+            Toggle("显示提交面板", isOn: Binding(get: { workspace?.showsCommitInspector ?? true }, set: { value in
+                workspace?.showsCommitInspector = value
+                if value { workspace?.showSection(.workingCopy) }
+            })).disabled(cannotRead)
+            Menu("差异显示") {
+                Toggle("忽略空白", isOn: Binding(get: { workspace?.ignoresDiffWhitespace ?? false }, set: { workspace?.ignoresDiffWhitespace = $0 }))
+                Toggle("显示差异元信息", isOn: Binding(get: { workspace?.showsDiffMetadata ?? false }, set: { workspace?.showsDiffMetadata = $0 }))
+            }.disabled(cannotRead)
+            Divider()
+        }
+        CommandMenu("仓库") {
+            Button("刷新状态") { workspace?.refresh() }.keyboardShortcut("r")
+                .disabled(cannotRead || workspace?.isLoading == true)
+            if workspace?.workspace?.isUnmanaged == true {
+                Button("初始化版本控制…") { workspace?.prepareSetup() }.disabled(cannotWrite)
+            }
+            Divider()
+            Button("提交改动…") { workspace?.requestCommit() }.keyboardShortcut(.return, modifiers: [.command])
+                .disabled(cannotWrite || !supports(.commit))
+            if supports(.fetch) {
+                Button("获取远端…") { workspace?.showOperation(.fetch) }.disabled(cannotWrite)
+            }
+            Button(workspace?.selectedBinding?.providerID == .git ? "拉取更新…" : "更新工作副本…") { workspace?.showOperation(.update) }
+                .disabled(cannotWrite || !supports(.update))
+            if supports(.push) {
+                Button("推送…") { workspace?.prepareManagement(page: .push) }.disabled(cannotWrite)
+            }
+            Divider()
+            if supports(.branchManagement) {
+                Button("分支与合并…") { workspace?.prepareManagement(page: .branches) }.disabled(cannotWrite)
+            }
+            Menu("本地改动") {
+                if supports(.staging) {
+                    Button("暂存与取消暂存…") { workspace?.prepareManagement(page: .staging) }
+                }
+                Button("搁置与恢复改动…") { workspace?.showShelves() }
+                if supports(.conflictResolution) {
+                    Button("处理冲突…") { workspace?.prepareManagement(page: .conflicts) }
+                }
+            }.disabled(cannotWrite || workspace?.selectedBinding == nil)
+            Divider()
+            Button("全历史搜索…") { workspace?.showFullHistorySearch() }.disabled(cannotRead || !supports(.history))
+            Button("比较版本…") { workspace?.prepareManagement(page: .comparison) }.disabled(cannotRead || !supports(.revisionComparison))
+            Button("AI 审查…") {
+                workspace?.showAIReview(revision: workspace?.section == .history ? workspace?.selectedRevisionID : nil)
+            }.disabled(cannotRead || workspace?.aiReview == nil || (workspace?.section == .history && workspace?.selectedRevisionID == nil))
+            Divider()
+            Button("关联工作副本…") { workspace?.chooseLinkedFolder() }.disabled(cannotRead || workspace?.workspace?.isUnmanaged != false)
+            Button("管理已关联工作副本…") { workspace?.showLinkedWorkspaces() }.disabled(cannotRead || workspace?.workspace?.linkedDirectories.isEmpty != false)
+            migrationMenu
+            Button("仓库设置…") { workspace?.prepareManagement(page: .settings) }.disabled(cannotWrite || workspace?.selectedBinding == nil)
+        }
+    }
+
+    private var cannotRead: Bool { workspace?.workspace == nil || workspace?.isInteractionLocked != false }
+    private var cannotWrite: Bool { workspace?.workspace == nil || workspace?.isWorkspaceMutationLocked != false }
+    private func supports(_ capability: RepositoryCapabilities) -> Bool {
+        workspace?.selectedBinding?.capabilities.contains(capability) == true
+    }
+
+    private var migrationMenu: some View {
+        Menu("SVN → Git 迁移") {
+            Button("新目录迁移…") { workspace?.showRepositoryMigration(mode: .newDirectory) }
+            Button("当前工作副本迁移…") { workspace?.showRepositoryMigration(mode: .workingCopy) }
+                .disabled(workspace?.workingCopyMigration == nil)
+            Menu("继续已有迁移") {
+                Button("新目录迁移…") { workspace?.resumeRepositoryMigration(mode: .newDirectory) }
+                Button("当前工作副本迁移…") { workspace?.resumeRepositoryMigration(mode: .workingCopy) }
+                    .disabled(workspace?.workingCopyMigration == nil)
+            }
+            if workspace?.hasBackgroundMigration == true || workspace?.isMigrationBusy == true {
+                Button("查看当前迁移任务…") { workspace?.restoreRepositoryMigration() }
+            }
+            if let monitor = workspace?.migrationMonitor {
+                Divider()
+                Button("检查源 SVN 更新") { monitor.checkNow() }.disabled(monitor.isChecking || cannotWrite)
+                Toggle("自动检查源 SVN 更新", isOn: Binding(get: { !monitor.isPaused }, set: { monitor.setPaused(!$0) }))
+            }
+        }
+        .disabled(workspace?.repositoryMigration == nil || workspace?.isInteractionLocked == true)
     }
 
     private func openNewWindow() { openWindow(value: WorkspaceWindowID()) }

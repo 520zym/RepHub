@@ -1884,7 +1884,7 @@ private final class GitIndexLock {
 
 /// Git 传输并不逐个下载工作区文件：clone/fetch 先接收 pack 对象，再在本地检出。
 /// 因此只展示 Git 能可靠报告的对象阶段和进度，避免把对象编号伪装成文件名。
-private actor GitTransferProgressReporter {
+actor GitTransferProgressReporter {
     private let progress: RepositoryOperationProgressHandler
     private var lastUpdate: GitTransferProgressUpdate?
 
@@ -1922,13 +1922,13 @@ enum GitTransferProgressParser {
     /// 只识别 Git 自身稳定的传输行。远端任意输出不会被当成成功或进度信息展示。
     static func parse(_ rawLine: String) -> GitTransferProgressUpdate? {
         let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
-        let expression = #"^(?:remote:\s*)?(Enumerating objects|Counting objects|Compressing objects|Receiving objects|Resolving deltas|Updating files):\s*([0-9]{1,3})%\s*(?:\(([^)]*)\))?(?:,\s*(.*))?$"#
+        let expression = #"^(?:remote:\s*)?(Enumerating objects|Counting objects|Compressing objects|Receiving objects|Writing objects|Resolving deltas|Updating files):\s*([0-9]{1,3})%\s*(?:\(([^)]*)\))?(?:,\s*(.*))?$"#
         guard let regex = try? NSRegularExpression(pattern: expression),
               let match = regex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
               let percentageText = capture(2, from: match, in: line),
               let percentage = Int(percentageText), (0...100).contains(percentage) else {
             // `remote: Enumerating objects: 12, done.` 这种行没有可比较的比例，但可明确说明正在建立传输清单。
-            if line.range(of: #"^remote:\s*Enumerating objects:\s*[0-9]+"#, options: .regularExpression) != nil {
+            if line.range(of: #"^(?:remote:\s*)?Enumerating objects:\s*[0-9]+"#, options: .regularExpression) != nil {
                 return GitTransferProgressUpdate(stage: "enumerating", message: "正在枚举 Git 对象…", fraction: nil, detail: nil)
             }
             return nil
@@ -1941,6 +1941,7 @@ enum GitTransferProgressParser {
         case "Enumerating objects": stage = "enumerating"; message = "正在枚举 Git 对象…"
         case "Counting objects": stage = "counting"; message = "正在统计 Git 对象…"
         case "Compressing objects": stage = "compressing"; message = "正在压缩 Git 对象…"
+        case "Writing objects": stage = "writing"; message = "正在上传 Git 对象…"
         case "Receiving objects": stage = "receiving"; message = "正在接收 Git 对象…"
         case "Resolving deltas": stage = "resolving"; message = "正在解析 Git 差异…"
         case "Updating files": stage = "updating"; message = "正在更新工作区文件…"

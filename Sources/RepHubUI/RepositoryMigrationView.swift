@@ -45,6 +45,11 @@ struct RepositoryMigrationView: View {
         .workbenchSheet(minWidth: 760, idealWidth: 930, minHeight: 580, idealHeight: 760)
         .background(palette.background)
         .foregroundStyle(palette.text)
+        .sheet(isPresented: $model.isShowingResumePicker) {
+            MigrationResumePicker(title: "继续新目录迁移", records: model.resumeRecords, palette: palette,
+                                  resume: model.resume, remove: model.removeResumeRecord,
+                                  choose: model.chooseResumeCheckpoint, dismiss: model.dismissResumePicker)
+        }
     }
 
     private var newDirectoryContent: some View {
@@ -348,7 +353,7 @@ struct RepositoryMigrationView: View {
                             Text("\(mapping.author.name) <\(mapping.author.email)> · \(mapping.source.date.formatted(date: .abbreviated, time: .shortened))")
                                 .font(.system(size: 10)).foregroundStyle(palette.secondaryText).textSelection(.enabled)
                         }.padding(12).frame(maxWidth: .infinity, alignment: .leading).background(palette.sidebar.opacity(0.42))
-                        if let patch = model.historyPatch { MigrationPatchPreview(text: patch.text, palette: palette) }
+                        if let patch = model.historyPatch { MigrationPatchPreview(patch: patch, palette: palette) }
                         else { ProgressView("正在读取提交差异…").frame(maxWidth: .infinity, maxHeight: .infinity) }
                     }
                 } else { ContentUnavailableView("选择一条提交", systemImage: "clock.arrow.circlepath", description: Text("查看转换后的提交差异。")) }
@@ -509,26 +514,4 @@ private struct MigrationFileTree: View {
         .background(selected == node.path ? palette.selection.opacity(0.68) : .clear, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
     }
     private func stateMark(_ state: MigrationFileComparison.State) -> some View { Image(systemName: state == .identical ? "checkmark.circle.fill" : "exclamationmark.circle.fill").foregroundStyle(state == .identical ? palette.accent : palette.removed).font(.system(size: 10)) }
-}
-
-private struct MigrationPatchPreview: View {
-    let text: String; let palette: AppPalette
-    var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(text.split(separator: "\n", omittingEmptySubsequences: false).enumerated()), id: \.offset) { _, raw in
-                    let line = String(raw)
-                    Text(line).font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 13).padding(.vertical, 1.5)
-                        .background(color(for: line))
-                }
-            }.padding(.vertical, 12)
-        }
-    }
-    private func color(for line: String) -> Color {
-        if line.hasPrefix("+") && !line.hasPrefix("+++") { return palette.accent.opacity(0.14) }
-        if line.hasPrefix("-") && !line.hasPrefix("---") { return palette.removed.opacity(0.14) }
-        if line.hasPrefix("@@") { return palette.selection.opacity(0.55) }
-        return .clear
-    }
 }

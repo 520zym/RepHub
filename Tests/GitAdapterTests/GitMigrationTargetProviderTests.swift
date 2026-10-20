@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-import GitAdapter
+@testable import GitAdapter
 import TestSupport
 import ToolExecution
 import VersionControlCore
@@ -37,7 +37,11 @@ struct GitMigrationTargetProviderTests {
         let author = try requireSuccess(try await fixture.run(executable: "git", arguments: ["show", "-s", "--format=%an|%ae|%aI|%B", tip], directory: preview), tool: "git").output
         #expect(author.contains("Old User|old@example.test|"))
         #expect(author.contains("保留原始说明\n\n第二段"))
-        let published = try await provider.publishMigration(at: preview, remoteURL: remote.path, branch: "main", expectedTip: tip, progress: { _ in })
+        let progressLog = MigrationPublicationProgressLog()
+        let published = try await provider.publishMigration(at: preview, remoteURL: remote.path, branch: "main", expectedTip: tip, progress: { await progressLog.append($0) })
+        let updates = await progressLog.updates
+        #expect(updates.contains { $0.message == "正在上传 Git 对象…" && $0.fractionCompleted != nil })
+        #expect(updates.last?.message == "正在核对远端分支，确认发布结果…")
         #expect(published.state == .published)
         let remoteTip = try requireSuccess(try await fixture.run(executable: "git", arguments: ["--git-dir", remote.path, "rev-parse", "refs/heads/main"]), tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
         #expect(remoteTip == tip)
@@ -168,6 +172,23 @@ struct GitMigrationTargetProviderTests {
         #expect(try Data(contentsOf: exported.appendingPathComponent("beyond-16m.bin")) == contents)
     }
 
+    @Test("超大文本提交的差异退回文件摘要")
+    func oversizedPatchRetainsFileSummary() async throws {
+        let fixture = try await LocalRepositoryFixture.create()
+        defer { try? fixture.remove() }
+        let file = fixture.gitWriter.appendingPathComponent("large-migration.txt")
+        try Data(repeating: 0x41, count: 17 * 1024 * 1024).write(to: file)
+        _ = try requireSuccess(try await fixture.run(executable: "git", arguments: ["add", "large-migration.txt"], directory: fixture.gitWriter), tool: "git")
+        _ = try requireSuccess(try await fixture.run(executable: "git", arguments: ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "large text"], directory: fixture.gitWriter), tool: "git")
+        let tip = try requireSuccess(try await fixture.run(executable: "git", arguments: ["rev-parse", "HEAD"], directory: fixture.gitWriter), tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let provider = GitMigrationTargetProvider(runner: fixture.runner)
+        let patch = try await provider.migrationPatch(at: fixture.gitWriter, revision: tip)
+        #expect(patch.isTruncated)
+        #expect(patch.text.hasPrefix("文件变更摘要"))
+        #expect(patch.text.contains("large-migration.txt"))
+        #expect(patch.text.utf8.count < 2 * 1024 * 1024)
+    }
+
     @Test(".git 指向其他仓库时拒绝迁移核对")
     func rejectsGitPointerOutsideMigrationDirectory() async throws {
         let fixture = try await LocalRepositoryFixture.create()
@@ -205,4 +226,9 @@ private actor MigrationProgressCollector {
     private var values: [String] = []
     func append(_ message: String) { values.append(message) }
     func messages() -> [String] { values }
+}
+
+private actor MigrationPublicationProgressLog {
+    private(set) var updates: [RepositoryOperationProgress] = []
+    func append(_ update: RepositoryOperationProgress) { updates.append(update) }
 }

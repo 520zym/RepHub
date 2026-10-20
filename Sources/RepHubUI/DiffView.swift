@@ -13,8 +13,6 @@ public struct DiffView: View {
     @State private var preparedSource: String?
     @State private var preparedPath: String?
     @State private var isPreparingDiff = false
-    @State private var ignoresWhitespace = false
-    @State private var showsDiffMetadata = false
     @State private var addedLineCount = 0
     @State private var removedLineCount = 0
     private let focusLine: Int?
@@ -55,7 +53,7 @@ public struct DiffView: View {
                 switch preparedDiff.content {
                 case let .unified(diff):
                     SideBySideDiff(diff: diff, presentation: presentation, palette: codePalette,
-                                   ignoresWhitespace: ignoresWhitespace, showsMetadata: showsDiffMetadata,
+                                   ignoresWhitespace: model.ignoresDiffWhitespace, showsMetadata: model.showsDiffMetadata,
                                    focusLine: focusLine, focusToken: focusToken)
                         .id(preparedSource ?? "")
                 case let .binary(text):
@@ -107,8 +105,8 @@ public struct DiffView: View {
             }
             if !isDocumentSelection {
                 Menu {
-                    Toggle("忽略空白", isOn: $ignoresWhitespace)
-                    Toggle("显示差异元信息", isOn: $showsDiffMetadata)
+                    Toggle("忽略空白", isOn: $model.ignoresDiffWhitespace)
+                    Toggle("显示差异元信息", isOn: $model.showsDiffMetadata)
                 } label: { Image(systemName: "ellipsis") }
                     .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
                     .frame(height: WorkbenchLayout.titleRowHeight)

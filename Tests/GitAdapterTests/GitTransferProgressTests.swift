@@ -24,6 +24,16 @@ final class GitTransferProgressTests: XCTestCase {
         XCTAssertNil(enumerating?.fraction)
     }
 
+    func testParsesPushWritingObjectsAndLocalEnumeration() {
+        let writing = GitTransferProgressParser.parse("Writing objects:  42% (42/100), 1.25 MiB | 5.00 MiB/s")
+        XCTAssertEqual(writing?.stage, "writing")
+        XCTAssertEqual(writing?.message, "正在上传 Git 对象…")
+        XCTAssertEqual(writing?.fraction, 0.42)
+        XCTAssertEqual(writing?.detail, "42/100 · 1.25 MiB | 5.00 MiB/s")
+        XCTAssertEqual(GitTransferProgressParser.parse("Enumerating objects: 100, done.")?.stage, "enumerating")
+        XCTAssertNil(GitTransferProgressParser.parse("Writing objects: 101% (101/100)"))
+    }
+
     func testDoesNotTreatArbitraryRemoteTextAsTransferProgress() {
         XCTAssertNil(GitTransferProgressParser.parse("remote: deployment succeeded at https://example.invalid/token=secret"))
         XCTAssertNil(GitTransferProgressParser.parse("Receiving objects: ready"))

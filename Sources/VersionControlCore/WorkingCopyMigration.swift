@@ -10,15 +10,25 @@ public struct MigrationWorkingCopyInfo: Sendable, Equatable {
     public let sourceURL: String
     public let repositoryUUID: String
     public let baseRevision: String
-    public init(directory: URL, sourceURL: String, repositoryUUID: String, baseRevision: String) {
+    /// 混合修订时，少数已更新或已提交文件的 BASE 可能高于根目录 BASE。
+    public let maximumRevision: String
+    /// 恢复时核对当前受控路径，区分新加入 SVN 的文件与允许保留的未跟踪文件。
+    public let trackedPaths: Set<String>?
+    public init(directory: URL, sourceURL: String, repositoryUUID: String, baseRevision: String,
+                trackedPaths: Set<String>? = nil, maximumRevision: String? = nil) {
         self.directory = directory; self.sourceURL = sourceURL
         self.repositoryUUID = repositoryUUID; self.baseRevision = baseRevision
+        self.maximumRevision = maximumRevision ?? baseRevision
+        self.trackedPaths = trackedPaths
     }
 }
 
 /// 当前目录模式仍只读取 SVN；补迁不更新或提交 SVN 工作副本。
 public protocol RepositoryWorkingCopyMigrationSourceProvider: RepositoryMigrationSourceProvider {
     func inspectMigrationWorkingCopy(at directory: URL, requireClean: Bool) async throws -> MigrationWorkingCopyInfo
+    /// 恢复结果的应用检查允许正常混合修订，但仍检查已管修改、布局及外部依赖。
+    func inspectMigrationWorkingCopy(at directory: URL, requireClean: Bool,
+                                     allowMixedRevisions: Bool) async throws -> MigrationWorkingCopyInfo
     /// 在预检、准备与应用前按固定修订复核 URL 和仓库 UUID，防止同地址被替换为另一仓库。
     func verifyWorkingCopyMigrationSource(_ location: RemoteRepositoryLocation,
                                           repositoryUUID: String, revision: String) async throws
@@ -33,6 +43,11 @@ public protocol RepositoryWorkingCopyMigrationSourceProvider: RepositoryMigratio
 }
 
 public extension RepositoryWorkingCopyMigrationSourceProvider {
+    func inspectMigrationWorkingCopy(at directory: URL, requireClean: Bool,
+                                     allowMixedRevisions: Bool) async throws -> MigrationWorkingCopyInfo {
+        try await inspectMigrationWorkingCopy(at: directory, requireClean: requireClean)
+    }
+
     func planWorkingCopyHistory(from location: RemoteRepositoryLocation, mode: MigrationMode,
                                 through revision: String?, after previousRevision: String?,
                                 includeCopyHistory: Bool,
@@ -107,10 +122,13 @@ public struct WorkingCopyMigrationPreview: Identifiable, Sendable {
     public let mappings: [MigrationMapping]
     public let files: [MigrationFileComparison]
     public let warnings: [String]
+    /// 恢复结果仍可阅读；当前目录发生变化时单独阻止应用，不重建已完成历史。
+    public let applicationIssue: String?
     public var tip: String { mappings.last?.targetCommit ?? "" }
     public init(plan: WorkingCopyMigrationPlan, repository: URL, mappings: [MigrationMapping],
-                files: [MigrationFileComparison], warnings: [String]) {
+                files: [MigrationFileComparison], warnings: [String], applicationIssue: String? = nil) {
         self.plan = plan; self.repository = repository; self.mappings = mappings; self.files = files; self.warnings = warnings
+        self.applicationIssue = applicationIssue
     }
 }
 

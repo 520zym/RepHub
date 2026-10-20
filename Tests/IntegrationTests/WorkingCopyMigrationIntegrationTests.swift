@@ -117,6 +117,243 @@ struct WorkingCopyMigrationIntegrationTests {
         }
     }
 
+    @Test("初迁检查点遇到后续 SVN 混合修订时仍恢复固定预览，应用前保护原工作副本")
+    func resumesInitialCheckpointAfterSourceBecomesMixedRevision() async throws {
+        try requireTools()
+        let fixture = try await LocalRepositoryFixture.create()
+        defer { try? fixture.remove() }
+        let target = try await emptyGitRemote("mixed-revision-resume-target.git", fixture: fixture)
+        let service = service(for: fixture)
+
+        // 将初迁计划固定为 r3。之后只更新 README 到 r4，模拟提交后常见的
+        // “根目录仍是旧 BASE、少数文件是新修订”的干净 SVN 工作副本。
+        try "checkpoint source r3\n".write(to: fixture.svnWriter.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try await svn(["commit", "-m", "checkpoint source r3"], in: fixture.svnWriter, fixture: fixture)
+        try await svn(["update"], in: fixture.svnReader, fixture: fixture)
+        let fixedBase = try await svnRevision(fixture.svnReader, fixture: fixture)
+        let plan = try await service.plan(at: fixture.svnReader, remoteURL: target.absoluteURL.absoluteString, branch: "main", mode: .history,
+                                          action: .initial, progress: { _ in })
+        let firstPreview = try await service.prepare(plan, progress: { _ in })
+        let checkpoint = firstPreview.repository.deletingLastPathComponent().appendingPathComponent("checkpoint.json")
+        #expect(plan.workingCopy.baseRevision == fixedBase)
+
+        let writer = fixture.root.appendingPathComponent("mixed-revision-writer", isDirectory: true)
+        try await svn(["checkout", fixture.svnURL.absoluteURL.absoluteString, writer.path], in: fixture.root, fixture: fixture)
+        try "later source r4\n".write(to: writer.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try await svn(["commit", "-m", "later source r4"], in: writer, fixture: fixture)
+        try await svn(["update", "README.md"], in: fixture.svnReader, fixture: fixture)
+        let mixedReadme = try Data(contentsOf: fixture.svnReader.appendingPathComponent("README.md"))
+        let mixedWCDB = try Data(contentsOf: fixture.svnReader.appendingPathComponent(".svn/wc.db"))
+        #expect(try await svnRevision(fixture.svnReader, fixture: fixture) == fixedBase)
+        #expect(mixedReadme == Data("later source r4\n".utf8))
+        #expect(!FileManager.default.fileExists(atPath: fixture.svnReader.appendingPathComponent(".git").path))
+        await #expect(throws: VersionControlError.self) {
+            _ = try await service.plan(at: fixture.svnReader, remoteURL: target.absoluteURL.absoluteString,
+                                       branch: "main", mode: .history, action: .initial, progress: { _ in })
+        }
+
+        // 新实例必须按检查点的 r3 计划恢复，而不是因当前工作副本已有 r4 而重新预检。
+        let recoveredService = self.service(for: fixture)
+        let recoveredPlan = try await recoveredService.resume(from: checkpoint)
+        let recoveredPreview = try await recoveredService.prepare(recoveredPlan, progress: { _ in })
+        #expect(recoveredPlan.id == plan.id)
+        #expect(recoveredPlan.source.anchor == plan.source.anchor)
+        #expect(recoveredPreview.tip == firstPreview.tip)
+        #expect(recoveredPreview.mappings.map(\.source.id) == firstPreview.mappings.map(\.source.id))
+        #expect(recoveredPreview.mappings.map(\.targetCommit) == firstPreview.mappings.map(\.targetCommit))
+        #expect(recoveredPreview.files.allSatisfy { $0.state != .different })
+        #expect(recoveredPreview.applicationIssue != nil)
+
+        // 恢复/预览完全隔离；真正安装 .git 前仍须发现源工作副本已不是固定 r3 快照。
+        await #expect(throws: VersionControlError.self) {
+            try await recoveredService.applyAndPublish(recoveredPreview, progress: { _ in })
+        }
+        #expect(!FileManager.default.fileExists(atPath: fixture.svnReader.appendingPathComponent(".git").path))
+        #expect(try Data(contentsOf: fixture.svnReader.appendingPathComponent("README.md")) == mixedReadme)
+        #expect(try Data(contentsOf: fixture.svnReader.appendingPathComponent(".svn/wc.db")) == mixedWCDB)
+        #expect(try await remoteRefs(target, fixture: fixture).isEmpty)
+
+        // 根目录仍是 r3、文件已到 r4 时也能沿用检查点补入 r4，不要求整体 update。
+        let continuedPlan = try #require(try await recoveredService.planContinuation(recoveredPlan, progress: { _ in }))
+        #expect(continuedPlan.source.anchor == "r4")
+        let continued = try await recoveredService.prepare(continuedPlan, progress: { _ in })
+        #expect(continued.applicationIssue == nil)
+        #expect(continued.mappings.count == firstPreview.mappings.count + 1)
+        #expect(Array(continued.mappings.prefix(firstPreview.mappings.count)).map(\.targetCommit) == firstPreview.mappings.map(\.targetCommit))
+        #expect(try Data(contentsOf: fixture.svnReader.appendingPathComponent(".svn/wc.db")) == mixedWCDB)
+
+        // 旧路径内容恢复一致，但 SVN 新增了受控文件时也不能误判为固定快照。
+        try "checkpoint source r3\n".write(to: writer.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try "later tracked file\n".write(to: writer.appendingPathComponent("later.txt"), atomically: true, encoding: .utf8)
+        try await svn(["add", "later.txt"], in: writer, fixture: fixture)
+        try await svn(["commit", "-m", "new tracked path after checkpoint"], in: writer, fixture: fixture)
+        try await svn(["update"], in: fixture.svnReader, fixture: fixture)
+        let rechecked = try await recoveredService.prepare(continuedPlan, progress: { _ in })
+        #expect(rechecked.tip == continued.tip)
+        #expect(rechecked.applicationIssue != nil)
+        await #expect(throws: VersionControlError.self) {
+            try await recoveredService.applyAndPublish(rechecked, progress: { _ in })
+        }
+        #expect(!FileManager.default.fileExists(atPath: fixture.svnReader.appendingPathComponent(".git").path))
+        #expect(try String(contentsOf: fixture.svnReader.appendingPathComponent("later.txt"), encoding: .utf8) == "later tracked file\n")
+        #expect(try await remoteRefs(target, fixture: fixture).isEmpty)
+    }
+
+    @Test("恢复后只追加当前 BASE 内的新提交，保留原提交且不混入远端更晚修订")
+    func continuesRecoveredHistoryThroughCurrentWorkingCopyBase() async throws {
+        try requireTools()
+        let fixture = try await LocalRepositoryFixture.create()
+        defer { try? fixture.remove() }
+        let target = try await emptyGitRemote("continued-checkpoint-target.git", fixture: fixture)
+        let original = service(for: fixture)
+        let plan = try await original.plan(at: fixture.svnReader, remoteURL: target.absoluteURL.absoluteString,
+                                          branch: "main", mode: .history, action: .initial, progress: { _ in })
+        let oldPreview = try await original.prepare(plan, progress: { _ in })
+        let folder = oldPreview.repository.deletingLastPathComponent()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try "new directory commit r3\n".write(to: fixture.svnWriter.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try await svn(["commit", "-m", "directory change after checkpoint"], in: fixture.svnWriter, fixture: fixture)
+        let sibling = fixture.svnRepository.appendingPathComponent("another-project", isDirectory: true)
+        try await svn(["mkdir", sibling.absoluteURL.absoluteString, "-m", "unrelated global r4"], in: fixture.root, fixture: fixture)
+        try await svn(["update"], in: fixture.svnReader, fixture: fixture)
+        let currentBase = try await svnRevision(fixture.svnReader, fixture: fixture)
+        let currentWCDB = try Data(contentsOf: fixture.svnReader.appendingPathComponent(".svn/wc.db"))
+        let currentReadme = try Data(contentsOf: fixture.svnReader.appendingPathComponent("README.md"))
+        // 服务端此后还有 r5；继续操作只迁入本地已更新到的固定 BASE。
+        try "future remote r5\n".write(to: fixture.svnWriter.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try await svn(["commit", "-m", "future remote commit"], in: fixture.svnWriter, fixture: fixture)
+
+        let recovered = service(for: fixture)
+        let restoredPlan = try await recovered.resume(from: folder.appendingPathComponent("checkpoint.json"))
+        _ = try await recovered.prepare(restoredPlan, progress: { _ in })
+        let next = try #require(try await recovered.planContinuation(restoredPlan, progress: { _ in }))
+        #expect(next.id == plan.id)
+        #expect(next.source.anchor == currentBase)
+        #expect(next.workingCopy.baseRevision == plan.workingCopy.baseRevision)
+        let preview = try await recovered.prepare(next, progress: { _ in })
+        #expect(preview.mappings.count == oldPreview.mappings.count + 1)
+        #expect(Array(preview.mappings.prefix(oldPreview.mappings.count)).map(\.targetCommit) == oldPreview.mappings.map(\.targetCommit))
+        #expect(preview.mappings.last?.source.id == "r3")
+        #expect(preview.applicationIssue == nil)
+        #expect(try await previewCommitCount(preview, fixture: fixture) == preview.mappings.count)
+        #expect(!FileManager.default.fileExists(atPath: fixture.svnReader.appendingPathComponent(".git").path))
+        #expect(try await remoteRefs(target, fixture: fixture).isEmpty)
+
+        let result = try await recovered.applyAndPublish(preview, progress: { _ in })
+        #expect(result.publication.state == .published)
+        let record = try #require(try await recovered.readRecord(at: fixture.svnReader))
+        #expect(record.cutoverRevision == plan.workingCopy.baseRevision)
+        #expect(record.lastRevision == currentBase)
+        #expect(try Data(contentsOf: fixture.svnReader.appendingPathComponent("README.md")) == currentReadme)
+        #expect(try Data(contentsOf: fixture.svnReader.appendingPathComponent(".svn/wc.db")) == currentWCDB)
+    }
+
+    @Test("追加范围固定后再次中断，重启保留旧提交并从新增部分续跑", arguments: [0, 1])
+    func resumesInterruptedContinuation(completedTail: Int) async throws {
+        try requireTools()
+        let fixture = try await LocalRepositoryFixture.create()
+        defer { try? fixture.remove() }
+        let target = try await emptyGitRemote("interrupted-continuation-target.git", fixture: fixture)
+        let original = service(for: fixture)
+        let plan = try await original.plan(at: fixture.svnReader, remoteURL: target.absoluteURL.absoluteString,
+                                          branch: "main", mode: .history, action: .initial, progress: { _ in })
+        let before = try await original.prepare(plan, progress: { _ in })
+        let folder = before.repository.deletingLastPathComponent()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        for revision in 3...4 {
+            try "new revision \(revision)\n".write(to: fixture.svnWriter.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+            try await svn(["commit", "-m", "tail r\(revision)"], in: fixture.svnWriter, fixture: fixture)
+        }
+        try await svn(["update"], in: fixture.svnReader, fixture: fixture)
+        let targetWithFault = FailOnceAfterWorkingCopyApplyTarget(base: GitMigrationTargetProvider(runner: fixture.runner))
+        await targetWithFault.failAfterCompletedSnapshots(completedTail)
+        let interrupted = WorkingCopyMigrationService(source: SVNProvider(runner: fixture.runner), target: targetWithFault)
+        let restored = try await interrupted.resume(from: folder.appendingPathComponent("checkpoint.json"))
+        _ = try await interrupted.prepare(restored, progress: { _ in })
+        let next = try #require(try await interrupted.planContinuation(restored, progress: { _ in }))
+        await #expect(throws: VersionControlError.self) {
+            _ = try await interrupted.prepare(next, progress: { _ in })
+        }
+
+        let recovered = service(for: fixture)
+        let persisted = try await recovered.resume(from: folder.appendingPathComponent("checkpoint.json"))
+        #expect(persisted.source.anchor == next.source.anchor)
+        let preview = try await recovered.prepare(persisted, progress: { _ in })
+        #expect(preview.mappings.map(\.source.id) == ["r1", "r2", "r3", "r4"])
+        #expect(Array(preview.mappings.prefix(before.mappings.count)).map(\.targetCommit) == before.mappings.map(\.targetCommit))
+        #expect(try await previewCommitCount(preview, fixture: fixture) == 4)
+        #expect(preview.applicationIssue == nil)
+        #expect(!FileManager.default.fileExists(atPath: fixture.svnReader.appendingPathComponent(".git").path))
+        #expect(try await remoteRefs(target, fixture: fixture).isEmpty)
+    }
+
+    @Test("工作副本 BASE 前进但受控内容未变时，恢复结果可直接应用发布")
+    func appliesRecoveredCheckpointAfterUnrelatedSVNRevision() async throws {
+        try requireTools()
+        let fixture = try await LocalRepositoryFixture.create()
+        defer { try? fixture.remove() }
+        let target = try await emptyGitRemote("unchanged-checkpoint-resume-target.git", fixture: fixture)
+        let original = service(for: fixture)
+        let plan = try await original.plan(at: fixture.svnReader, remoteURL: target.absoluteURL.absoluteString,
+                                          branch: "main", mode: .history, action: .initial, progress: { _ in })
+        let preview = try await original.prepare(plan, progress: { _ in })
+        let checkpoint = preview.repository.deletingLastPathComponent().appendingPathComponent("checkpoint.json")
+        let sibling = fixture.svnRepository.appendingPathComponent("other-project", isDirectory: true)
+        try await svn(["mkdir", sibling.absoluteURL.absoluteString, "-m", "unrelated project revision"], in: fixture.root, fixture: fixture)
+        try await svn(["update"], in: fixture.svnReader, fixture: fixture)
+        #expect(try await svnRevision(fixture.svnReader, fixture: fixture) != plan.workingCopy.baseRevision)
+        let currentWCDB = try Data(contentsOf: fixture.svnReader.appendingPathComponent(".svn/wc.db"))
+        let currentReadme = try Data(contentsOf: fixture.svnReader.appendingPathComponent("README.md"))
+
+        let recovered = service(for: fixture)
+        let restoredPlan = try await recovered.resume(from: checkpoint)
+        let restored = try await recovered.prepare(restoredPlan, progress: { _ in })
+        #expect(restored.tip == preview.tip)
+        #expect(restored.applicationIssue == nil)
+        let result = try await recovered.applyAndPublish(restored, progress: { _ in })
+        #expect(result.publication.state == .published)
+        #expect(try await gitHead(in: fixture.svnReader, fixture: fixture) == preview.tip)
+        #expect(try Data(contentsOf: fixture.svnReader.appendingPathComponent("README.md")) == currentReadme)
+        #expect(try Data(contentsOf: fixture.svnReader.appendingPathComponent(".svn/wc.db")) == currentWCDB)
+    }
+
+    @Test("未完成的初迁检查点恢复后只续跑未完成修订，不重复写入 Git 提交")
+    func resumesPartialInitialCheckpointWithoutDuplicateCommits() async throws {
+        try requireTools()
+        let fixture = try await LocalRepositoryFixture.create()
+        defer { try? fixture.remove() }
+        let target = try await emptyGitRemote("partial-checkpoint-resume-target.git", fixture: fixture)
+        let faultTarget = FailOnceAfterWorkingCopyApplyTarget(base: GitMigrationTargetProvider(runner: fixture.runner))
+        await faultTarget.failAfterCompletedSnapshots(1)
+        let interruptedService = WorkingCopyMigrationService(source: SVNProvider(runner: fixture.runner), target: faultTarget)
+
+        // 确保固定计划至少有三条修订；故障发生在第一条检查点原子落盘之后。
+        try "partial r3\n".write(to: fixture.svnWriter.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try await svn(["commit", "-m", "partial checkpoint r3"], in: fixture.svnWriter, fixture: fixture)
+        try await svn(["update"], in: fixture.svnReader, fixture: fixture)
+        let plan = try await interruptedService.plan(at: fixture.svnReader, remoteURL: target.absoluteURL.absoluteString, branch: "main", mode: .history,
+                                                     action: .initial, progress: { _ in })
+        #expect(plan.source.revisions.count >= 3)
+        await #expect(throws: VersionControlError.self) {
+            _ = try await interruptedService.prepare(plan, progress: { _ in })
+        }
+        let partialFolder = try #require(await interruptedService.partialDirectory(for: plan.id))
+        let checkpoint = partialFolder.appendingPathComponent("checkpoint.json")
+        #expect(FileManager.default.fileExists(atPath: checkpoint.path))
+
+        // 新服务实例从原子检查点恢复，保留已完成映射，仅转换剩余 SVN 修订。
+        let resumedService = self.service(for: fixture)
+        let resumedPlan = try await resumedService.resume(from: checkpoint)
+        let resumedPreview = try await resumedService.prepare(resumedPlan, progress: { _ in })
+        #expect(resumedPlan.id == plan.id)
+        #expect(resumedPreview.mappings.count == plan.source.revisions.count)
+        #expect(resumedPreview.mappings.map(\.source.id) == plan.source.revisions.map(\.id))
+        #expect(Set(resumedPreview.mappings.map(\.targetCommit)).count == resumedPreview.mappings.count)
+        #expect(resumedPreview.files.allSatisfy { $0.state != .different })
+        #expect(!FileManager.default.fileExists(atPath: fixture.svnReader.appendingPathComponent(".git").path))
+        #expect(try await remoteRefs(target, fixture: fixture).isEmpty)
+    }
+
     @Test("初始 SVN 脏工作副本与补迁 Git 脏工作副本都会在预检阶段拒绝")
     func rejectsDirtyWorkingCopiesBeforeWritingMetadataOrRemote() async throws {
         try requireTools()
@@ -323,6 +560,13 @@ struct WorkingCopyMigrationIntegrationTests {
         return count
     }
 
+    private func previewCommitCount(_ preview: WorkingCopyMigrationPreview, fixture: LocalRepositoryFixture) async throws -> Int {
+        // 服务创建的隔离预览在系统临时目录，读取它不使用仅允许 fixture.root 的写操作助手。
+        let result = try await fixture.runner.run(executable: "git", arguments: ["--no-optional-locks", "rev-list", "--count", "HEAD"], directory: preview.repository)
+        let value = try requireSuccess(result, tool: "git").output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return try #require(Int(value))
+    }
+
     private func remoteRefs(_ remote: URL, fixture: LocalRepositoryFixture) async throws -> [String] {
         let value = try await gitOutput(["ls-remote", "--refs", "--", remote.absoluteURL.absoluteString], in: fixture.root, fixture: fixture)
         return value.split(separator: "\n").map(String.init)
@@ -357,14 +601,29 @@ private actor FailOnceAfterWorkingCopyApplyTarget: RepositoryWorkingCopyMigratio
     nonisolated let id: ProviderID = .git
     private let base: GitMigrationTargetProvider
     private var failNext = true
+    private var snapshotFailureLimit: Int?
+    private var completedSnapshots = 0
 
     init(base: GitMigrationTargetProvider) { self.base = base }
 
     func failNextApply() { failNext = true }
+    /// 在指定数量的提交已成功且检查点落盘后，模拟下一条转换中断。
+    /// 此类型故意不声明 Verified target 协议，从而让集成测试走逐条提交的
+    /// 标准检查点路径。
+    func failAfterCompletedSnapshots(_ count: Int) {
+        snapshotFailureLimit = count
+        completedSnapshots = 0
+    }
     func checkMigrationTarget(remoteURL: String, branch: String) async throws { try await base.checkMigrationTarget(remoteURL: remoteURL, branch: branch) }
     func initializeMigration(at directory: URL, branch: String) async throws { try await base.initializeMigration(at: directory, branch: branch) }
     func appendMigrationSnapshot(from snapshot: URL, revision: MigrationRevision, author: MigrationAuthor, to directory: URL, progress: @escaping RepositoryOperationProgressHandler) async throws -> String {
-        try await base.appendMigrationSnapshot(from: snapshot, revision: revision, author: author, to: directory, progress: progress)
+        if let limit = snapshotFailureLimit, completedSnapshots >= limit {
+            snapshotFailureLimit = nil
+            throw VersionControlError.executionFailed("模拟：检查点已保存，下一条 SVN 修订转换中断。")
+        }
+        let commit = try await base.appendMigrationSnapshot(from: snapshot, revision: revision, author: author, to: directory, progress: progress)
+        completedSnapshots += 1
+        return commit
     }
     func verifyMigration(at directory: URL, expectedTip: String, branch: String) async throws { try await base.verifyMigration(at: directory, expectedTip: expectedTip, branch: branch) }
     func verifyMigrationCheckpoint(at directory: URL, expectedTip: String?, branch: String) async throws { try await base.verifyMigrationCheckpoint(at: directory, expectedTip: expectedTip, branch: branch) }

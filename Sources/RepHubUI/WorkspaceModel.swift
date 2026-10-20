@@ -10,6 +10,41 @@ import AIApplication
 @MainActor
 @Observable
 public final class WorkspaceModel {
+    public enum Section: Hashable { case workingCopy, history }
+    public var section: Section = .workingCopy
+    public var showsCommitInspector = true
+    public var ignoresDiffWhitespace = false
+    public var showsDiffMetadata = false
+    public var showsOperationSheet = false
+    public private(set) var operationInitialKind: RepositoryOperationKind?
+    public private(set) var commitPresentationRequest = 0
+    public var showsLinkedWorkspaces = false
+
+    public func showSection(_ section: Section) {
+        guard !isInteractionLocked else { return }
+        self.section = section
+    }
+
+    public func requestCommit() {
+        guard !isWorkspaceMutationLocked, workspace?.bindings.contains(where: { $0.capabilities.contains(.commit) }) == true else { return }
+        section = .workingCopy
+        showsCommitInspector = true
+        commitPresentationRequest += 1
+    }
+
+    public func showOperation(_ kind: RepositoryOperationKind? = nil) {
+        guard !isWorkspaceMutationLocked, let binding = selectedBinding,
+              kind.map({ binding.capabilities.contains($0.capability) }) ??
+                (binding.capabilities.contains(.fetch) || binding.capabilities.contains(.update)) else { return }
+        operationInitialKind = kind
+        showsOperationSheet = true
+    }
+
+    public func showLinkedWorkspaces() {
+        guard !isInteractionLocked, workspace != nil else { return }
+        showsLinkedWorkspaces = true
+    }
+
     public let treeState = WorkspaceTreeState()
     public let fileBrowser = WorkspaceFileBrowser()
     public private(set) var filePreview: WorkspaceFilePreview?
@@ -287,7 +322,7 @@ public final class WorkspaceModel {
     public func chooseFolder() {
         guard !isInteractionLocked else { return }
         let panel = NSOpenPanel()
-        panel.title = "打开工作区"
+        panel.title = "打开仓库"
         panel.message = "选择已有 Git 或 Subversion 工作目录"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -313,8 +348,15 @@ public final class WorkspaceModel {
                                  initialPathsByBinding: initialPathsByBinding, initialMessages: initialMessages)
     }
 
-    public func prepareManagement() {
-        prepareManagement(comparing: nil)
+    public func prepareManagement() { prepareManagement(page: .settings) }
+
+    public func prepareManagement(page: RepositoryManagementPage) {
+        guard !(page == .comparison ? isInteractionLocked : isWorkspaceMutationLocked),
+              let workspace, let binding = selectedBinding else { return }
+        cancelReading()
+        cancelHistoryPage()
+        repositoryManagement.prepare(in: workspace, binding: binding, page: page, readOnly: isWorkspaceMutationLocked)
+        showsRepositoryManagement = true
     }
 
     public func prepareComparison(revision: Revision) {
@@ -322,7 +364,7 @@ public final class WorkspaceModel {
     }
 
     private func prepareManagement(comparing revision: Revision?) {
-        guard !isWorkspaceMutationLocked, let workspace, let binding = selectedBinding else { return }
+        guard !isInteractionLocked, let workspace, let binding = selectedBinding else { return }
         cancelReading()
         cancelHistoryPage()
         let comparisonSeed = revision.map { revision in
@@ -331,7 +373,7 @@ public final class WorkspaceModel {
                 toRevision: revision.id
             )
         }
-        repositoryManagement.prepare(in: workspace, binding: binding, comparisonSeed: comparisonSeed)
+        repositoryManagement.prepare(in: workspace, binding: binding, comparisonSeed: comparisonSeed, readOnly: isWorkspaceMutationLocked)
         showsRepositoryManagement = true
     }
 
@@ -348,10 +390,10 @@ public final class WorkspaceModel {
         showsRepositorySetup = true
     }
 
-    public func showRepositoryMigration() {
+    public func showRepositoryMigration(mode: MigrationPresentationMode? = nil) {
         if hasBackgroundMigration || isMigrationBusy { restoreRepositoryMigration(); return }
         guard !isInteractionLocked, let migration = repositoryMigration else { return }
-        migrationPresentationMode = .newDirectory
+        migrationPresentationMode = mode ?? .newDirectory
         migration.reset()
         workingCopyMigration?.reset()
         if let svn = workspace?.bindings.first(where: { $0.providerID == .svn }), let remote = svn.remoteURL {
@@ -359,6 +401,14 @@ public final class WorkspaceModel {
             workingCopyMigration?.prefill(directory: svn.root)
         }
         showsRepositoryMigration = true
+    }
+
+    public func resumeRepositoryMigration(mode: MigrationPresentationMode) {
+        guard !hasBackgroundMigration, !isMigrationBusy else { restoreRepositoryMigration(); return }
+        showRepositoryMigration(mode: mode)
+        guard showsRepositoryMigration else { return }
+        if mode == .workingCopy { workingCopyMigration?.resumeExistingMigration() }
+        else { repositoryMigration?.resumeExistingMigration() }
     }
 
     public func showMigrationSupplement(_ notice: MigrationSourceUpdate) {

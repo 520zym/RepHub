@@ -1374,6 +1374,11 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         at directory: URL,
         requireClean: Bool
     ) async throws -> MigrationWorkingCopyInfo {
+        try await inspectMigrationWorkingCopy(at: directory, requireClean: requireClean, allowMixedRevisions: false)
+    }
+
+    public func inspectMigrationWorkingCopy(at directory: URL, requireClean: Bool,
+                                           allowMixedRevisions: Bool) async throws -> MigrationWorkingCopyInfo {
         guard let binding = try await detect(at: directory) else {
             throw VersionControlError.invalidRepository("所选目录不是 SVN 工作副本。")
         }
@@ -1386,8 +1391,13 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         guard selectedPath == rootPath else {
             throw VersionControlError.invalidRepository("请选择 SVN 工作副本根目录：\(root.path)")
         }
-        let info = try await svn(["info", "--xml", "--depth", "empty"], directory: root, remoteURL: binding.remoteURL)
-        guard let entry = try SVNXMLDocument(data: info.data).infoEntry,
+        let info = try await svn(["info", "--xml", "--depth", allowMixedRevisions ? "infinity" : "empty"], directory: root, remoteURL: binding.remoteURL)
+        let document = try SVNXMLDocument(data: info.data)
+        guard let entry = document.infoEntries.first(where: { item in
+                  guard let path = item.path else { return false }
+                  let relative = relativePath(path, root: root)
+                  return relative.isEmpty || relative == "."
+              }),
               entry.kind == "dir",
               let rawURL = entry.url,
               let rawUUID = entry.repositoryUUID, !rawUUID.isEmpty,
@@ -1395,9 +1405,24 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
             throw VersionControlError.invalidRepository("SVN 工作副本缺少 URL、仓库 UUID 或 BASE 修订号。")
         }
         let sourceURL = try normalizedRemoteAddress(rawURL)
+        let trackedPaths: Set<String>?
+        if allowMixedRevisions {
+            var paths = Set<String>()
+            for item in document.infoEntries {
+                guard let path = item.path else { throw VersionControlError.invalidData("SVN 工作副本缺少受控路径信息。") }
+                let relative = relativePath(path, root: root)
+                if !relative.isEmpty, relative != "." { paths.insert(relative) }
+            }
+            trackedPaths = paths
+        } else { trackedPaths = nil }
+        let maximumRevision = allowMixedRevisions
+            ? document.infoEntries.compactMap { $0.revision.flatMap(Int.init) }.max().map { "r\($0)" }
+            : nil
 
         guard requireClean else {
-            return MigrationWorkingCopyInfo(directory: root, sourceURL: sourceURL, repositoryUUID: rawUUID, baseRevision: "r\(normalizedRevision(revision))")
+            return MigrationWorkingCopyInfo(directory: root, sourceURL: sourceURL, repositoryUUID: rawUUID,
+                                            baseRevision: "r\(normalizedRevision(revision))", trackedPaths: trackedPaths,
+                                            maximumRevision: maximumRevision)
         }
 
         let status = try await svn(
@@ -1417,7 +1442,7 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         let versionResult = try await runner.run(executable: "svnversion", arguments: [], directory: root)
         _ = try requireSuccess(versionResult, tool: "svnversion")
         let version = try parseWorkingCopyVersion(versionResult.output, path: nil)
-        guard version.minimum == version.maximum else {
+        guard allowMixedRevisions || version.minimum == version.maximum else {
             throw VersionControlError.invalidRepository("首次迁移不支持混合 SVN 修订（\(version.description)）。请先在其他工具中统一工作副本。")
         }
         guard !version.hasUncertainLayout else {
@@ -1430,7 +1455,9 @@ public struct SVNProvider: RepositoryOperationProvider, RepositoryHistoryPagingP
         guard externals.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw VersionControlError.invalidRepository("首次迁移不支持包含 svn:externals 的工作副本，请先拆分外部依赖。")
         }
-        return MigrationWorkingCopyInfo(directory: root, sourceURL: sourceURL, repositoryUUID: rawUUID, baseRevision: "r\(version.maximum)")
+        return MigrationWorkingCopyInfo(directory: root, sourceURL: sourceURL, repositoryUUID: rawUUID,
+                                        baseRevision: "r\(allowMixedRevisions ? normalizedRevision(revision) : String(version.maximum))",
+                                        trackedPaths: trackedPaths, maximumRevision: maximumRevision)
     }
 
     /// URL 相同不足以证明仍是同一 SVN 仓库：服务端可能在相同地址恢复、替换了仓库。

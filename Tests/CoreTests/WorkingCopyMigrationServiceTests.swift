@@ -57,8 +57,10 @@ struct WorkingCopyMigrationServiceTests {
     @Test("新版工作副本迁移检查点可在新服务实例中恢复同一固定计划")
     func resumesDurableInitialCheckpoint() async throws {
         let root = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: root) }
-        let source = WorkingCopySourceFixture(root: root)
-        let first = WorkingCopyMigrationService(source: source, target: WorkingCopyTargetFixture())
+        let stats = WorkingCopySessionStats()
+        let source = WorkingCopySourceFixture(root: root, sessionStats: stats)
+        let target = WorkingCopyTargetFixture()
+        let first = WorkingCopyMigrationService(source: source, target: target)
         let plan = try await first.plan(at: root, remoteURL: "https://example.test/project.git", branch: "main",
                                          mode: .history, action: .initial, progress: { _ in })
         _ = try await first.prepare(plan, progress: { _ in })
@@ -67,7 +69,7 @@ struct WorkingCopyMigrationServiceTests {
         let checkpoint = folder.appendingPathComponent("checkpoint.json")
         #expect(FileManager.default.fileExists(atPath: checkpoint.path))
 
-        let restoredService = WorkingCopyMigrationService(source: source, target: WorkingCopyTargetFixture())
+        let restoredService = WorkingCopyMigrationService(source: source, target: target)
         // macOS 的 temporaryDirectory 通常报告 /var，而底层对象实际位于 /private/var。
         // 两个等价绝对路径都应通过容器校验，不能因解析真实路径而误判为移动过检查点。
         let checkpointAlias = checkpoint.path.hasPrefix("/var/")
@@ -78,6 +80,9 @@ struct WorkingCopyMigrationServiceTests {
         #expect(restored.source.revisions == plan.source.revisions)
         let preview = try await restoredService.prepare(restored, progress: { _ in })
         #expect(preview.mappings.map(\.source.id) == ["r9"])
+        #expect(await target.appendedRevisions == ["r9"])
+        #expect(await stats.seedPath == nil)
+        #expect(await stats.sessionRevisions == [["r9"], ["r9"]])
     }
 
     @Test("目录历史早于固定 BASE 时仍可预览并从检查点恢复")
@@ -284,7 +289,7 @@ private struct WorkingCopySourceFixture: RepositoryWorkingCopyMigrationSourcePro
     func exportMigrationSnapshot(plan: MigrationSourcePlan, revision: MigrationRevision, to directory: URL, progress: @escaping RepositoryOperationProgressHandler) async throws {}
     func makeMigrationSnapshotSession(plan: MigrationSourcePlan, in workspace: URL,
                                       seedWorkingCopy: URL?) async throws -> any RepositoryMigrationSnapshotSession {
-        await sessionStats?.recordSeed(seedWorkingCopy)
+        await sessionStats?.recordSession(seed: seedWorkingCopy, revisions: plan.revisions)
         return WorkingCopySnapshotSession(stats: sessionStats)
     }
     func detect(at directory: URL) async throws -> RepositoryBinding? { nil }
@@ -309,7 +314,11 @@ private struct WorkingCopySnapshotSession: RepositoryMigrationSnapshotSession {
 
 private actor WorkingCopySessionStats {
     private(set) var seedPath: String?
-    func recordSeed(_ seed: URL?) { seedPath = seed?.standardizedFileURL.path }
+    private(set) var sessionRevisions: [[String]] = []
+    func recordSession(seed: URL?, revisions: [MigrationRevision]) {
+        seedPath = seed?.standardizedFileURL.path
+        sessionRevisions.append(revisions.map(\.id))
+    }
 }
 
 private actor WorkingCopyTargetFixture: RepositoryWorkingCopyMigrationTargetProvider {

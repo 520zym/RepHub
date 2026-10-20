@@ -4,11 +4,14 @@
 <dict>
     <key>CFBundleName</key><string>RepHub</string>
     <key>CFBundleDisplayName</key><string>RepHub</string>
+    <key>CFBundleDevelopmentRegion</key><string>zh-Hans</string>
+    <key>CFBundleLocalizations</key>
+    <array><string>zh-Hans</string></array>
     <key>CFBundleIdentifier</key><string>com.zym.RepHub</string>
     <key>CFBundleIconFile</key><string>RepHub.icns</string>
     <key>CFBundleExecutable</key><string>RepHub</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleShortVersionString</key><string>0.0.1</string>
     <key>CFBundleVersion</key><string>1</string>
     <key>LSMinimumSystemVersion</key><string>26.0</string>
     <key>NSHighResolutionCapable</key><true/>
