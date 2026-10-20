@@ -27,6 +27,15 @@ public struct WorkspaceView: View {
     public var body: some View {
         let palette = appearance.palette(for: appearance.preferredColorScheme ?? systemColorScheme)
         let codePalette = appearance.codePalette(for: appearance.preferredColorScheme ?? systemColorScheme)
+        inspectionSheets(palette: palette, codePalette: codePalette)
+            .alert("无法打开仓库", isPresented: recentRepositoryErrorBinding) {
+                Button("好", role: .cancel) { model.recentRepositoryError = nil }
+            } message: {
+                Text(model.recentRepositoryError ?? "")
+            }
+    }
+
+    private func workspaceLayout(palette: AppPalette) -> some View {
         GeometryReader { geometry in
             VStack(spacing: 0) {
                 if model.workspace == nil || model.workspace?.bindings.isEmpty == true {
@@ -77,6 +86,10 @@ public struct WorkspaceView: View {
             model.section = .history
             model.setHistoryVisible(true)
         }
+    }
+
+    private func commitSheets(palette: AppPalette) -> some View {
+        workspaceLayout(palette: palette)
         .sheet(isPresented: $model.showsOperationSheet, onDismiss: model.dismissOperationResult) {
             RepositoryOperationView(model: model, palette: palette, preferredKind: model.operationInitialKind) {
                 model.dismissOperationResult()
@@ -124,6 +137,10 @@ public struct WorkspaceView: View {
                 } }
             )
         }
+    }
+
+    private func managementSheets(palette: AppPalette) -> some View {
+        commitSheets(palette: palette)
         .sheet(isPresented: $model.showsRepositoryManagement, onDismiss: {
             model.repositoryManagement.dismiss()
             if let path = conflictToOpen {
@@ -155,6 +172,10 @@ public struct WorkspaceView: View {
                 model.open(result.directory)
             })
         }
+    }
+
+    private func inspectionSheets(palette: AppPalette, codePalette: CodePalette) -> some View {
+        managementSheets(palette: palette)
         .sheet(isPresented: migrationSheetBinding, onDismiss: model.hideRepositoryMigration) {
             if let migration = model.repositoryMigration {
                 RepositoryMigrationView(model: migration, workingCopyModel: model.workingCopyMigration,
@@ -173,11 +194,6 @@ public struct WorkspaceView: View {
         }
         .sheet(item: $model.toolRequest, onDismiss: { model.toolIsBusy = false }) { request in
             WorkspaceToolView(model: model, request: request, palette: palette, appearance: appearance)
-        }
-        .alert("无法打开仓库", isPresented: recentRepositoryErrorBinding) {
-            Button("好", role: .cancel) { model.recentRepositoryError = nil }
-        } message: {
-            Text(model.recentRepositoryError ?? "")
         }
     }
 
