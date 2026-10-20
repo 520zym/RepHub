@@ -174,10 +174,7 @@ public struct WorkspaceView: View {
         .sheet(item: $model.toolRequest, onDismiss: { model.toolIsBusy = false }) { request in
             WorkspaceToolView(model: model, request: request, palette: palette, appearance: appearance)
         }
-        .alert("无法打开仓库", isPresented: Binding(
-            get: { model.recentRepositoryError != nil },
-            set: { if !$0 { model.recentRepositoryError = nil } }
-        )) {
+        .alert("无法打开仓库", isPresented: recentRepositoryErrorBinding) {
             Button("好", role: .cancel) { model.recentRepositoryError = nil }
         } message: {
             Text(model.recentRepositoryError ?? "")
@@ -354,6 +351,12 @@ public struct WorkspaceView: View {
     /// 值仅为可收缩的上限，不会放大短分支名，因此宽窗口会采用文字的自然完整宽度。
     private func branchLabelWidth(in windowWidth: CGFloat) -> CGFloat {
         max(0, windowWidth - 820)
+    }
+
+    private var recentRepositoryErrorBinding: Binding<Bool> {
+        Binding<Bool>(get: { model.recentRepositoryError != nil }, set: { isPresented in
+            if !isPresented { model.recentRepositoryError = nil }
+        })
     }
 
     /// 系统关闭 sheet 时会先把绑定置为 false；在 setter 内先收起，才能保留完成或失败的迁移提示。
