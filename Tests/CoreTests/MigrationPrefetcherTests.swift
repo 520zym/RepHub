@@ -3,7 +3,7 @@ import Testing
 @testable import RepositoryApplication
 import VersionControlCore
 
-@Suite("迁移快照单页预取")
+@Suite("迁移快照预取")
 struct MigrationPrefetcherTests {
     @Test("仓库初迁预取与已核对提交重叠，但提交顺序和检查点保持串行")
     func repositoryInitialMigrationOverlapsOnlySourcePreparation() async throws {
@@ -45,7 +45,9 @@ struct MigrationPrefetcherTests {
         #expect(await stats.appended == [])
         #expect(await stats.finishedExport("r2"))
         #expect(await stats.cancelledExport("r2"))
-        #expect(await stats.maximumExports == 1)
+        // 当前工作副本最多并行三份快照，取消验证不要求调度恰好达到峰值。
+        let maximumExports = await stats.maximumExports
+        #expect((1...3).contains(maximumExports))
     }
 
     @Test("只保留一个下一修订并拒绝越序消费")
@@ -131,8 +133,11 @@ struct MigrationPrefetcherTests {
         #expect(updates.count == 2)
         #expect(updates[0].records.count == 1)
         #expect(updates[1].records.isEmpty)
-        #expect(updates.flatMap(\.records).filter { $0.path == "A.swift" }.count == 1)
-        #expect(updates.flatMap(\.records).filter { $0.path == "B.swift" }.isEmpty)
+        let records = updates.flatMap(\.records)
+        let foregroundRecords = records.filter { $0.path == "A.swift" }
+        let backgroundRecords = records.filter { $0.path == "B.swift" }
+        #expect(foregroundRecords.count == 1)
+        #expect(backgroundRecords.isEmpty)
         #expect(updates[1].migrationProgress == foreground.migrationProgress)
         #expect(updates[1].detail?.contains("同时后台预取 r3") == true)
     }

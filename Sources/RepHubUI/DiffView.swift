@@ -611,7 +611,7 @@ private struct SideBySideDiff: View {
     }
     private var unifiedFocusAnchor: String? {
         guard let focusLine else { return nil }
-        return displayedRows.compactMap { row in
+        return displayedRows.compactMap { row -> String? in
             guard case let .paired(old, new) = row, row.contains(line: focusLine) else { return nil }
             return unifiedRowID(old: old, new: new)
         }.first

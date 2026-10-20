@@ -34,7 +34,7 @@ struct RepositoryInspectionView: View {
             header
             if model.canBlame {
                 WorkbenchSegmentedPicker(
-                    title: "检查方式", selection: Binding(get: { model.mode }, set: model.selectMode),
+                    title: "检查方式", selection: Binding(get: { model.mode }, set: { model.selectMode($0) }),
                     options: inspectionOptions, palette: palette
                 )
                 .padding(.horizontal, 20).padding(.vertical, 12)
