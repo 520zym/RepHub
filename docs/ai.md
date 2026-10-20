@@ -4,7 +4,7 @@ AI 功能只在点击“生成提交说明”或“开始审查”后运行，�
 
 ## 使用方式
 
-1. 在“RepHub → Settings… → AI 与场景”添加连接，可选择 DeepSeek、Kimi、MiniMax 或 GLM 预设。预设填写地址及默认模型，只需提供 API Key；前三者保存时会查询模型列表，GLM 使用明确标识的官方预设。也可选择自定义 API（Chat Completions、OpenAI Responses、Anthropic Messages）或本机 CLI。协议由独立适配器实现。密钥保存到 macOS 钥匙串。本机 localhost / 127.0.0.1 / ::1 可以使用 HTTP 和无密钥服务。
+1. 在“RepHub → 设置… → AI 与场景”添加连接，可选择 DeepSeek、Kimi、MiniMax 或 GLM 预设。预设填写地址及默认模型，只需提供 API Key；前三者保存时会查询模型列表，GLM 使用明确标识的官方预设。也可选择自定义 API（Chat Completions、OpenAI Responses、Anthropic Messages）或本机 CLI。协议由独立适配器实现。密钥保存到 macOS 钥匙串。本机 localhost / 127.0.0.1 / ::1 可以使用 HTTP 和无密钥服务。
 2. API 地址可以填完整端点、以 `/v1` 结尾的基地址，或适配器对应的根地址。`api.openai.com` 与 `api.anthropic.com` 的根地址会按所选协议自动补为 `/v1/chat/completions`、`/v1/responses` 或 `/v1/messages`；自定义服务根地址则按所选协议补 `/chat/completions`、`/responses` 或 `/messages`，应按该服务文档填写其基路径。已是对应端点的完整路径不会重复追加。
 3. CLI 连接可选 Codex CLI 或 Claude Code。路径留空时检测常用安装位置；找不到时填写可执行文件路径。模型留空沿用工具默认值。CLI 复用自身登录状态，RepHub 不读取登录令牌。
 4. 内置“生成提交说明”和“代码审查”两个场景；可编辑提示词、新建场景并指定默认连接和模型。模型可继承连接默认值，也可为该场景单独指定。运行面板展示实际将使用的模型；如果临时切换到其他连接，使用新连接的默认模型，不把原厂商的模型名带过去。
