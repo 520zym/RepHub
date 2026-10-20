@@ -196,7 +196,7 @@ struct RepositorySetupView: View {
     }
 
     private var providerBinding: Binding<ProviderID> {
-        Binding(get: { model.selectedProviderID ?? model.options.first?.providerID ?? .git }, set: model.selectProvider)
+        Binding(get: { model.selectedProviderID ?? model.options.first?.providerID ?? .git }, set: { model.selectProvider($0) })
     }
 
     private func field<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
