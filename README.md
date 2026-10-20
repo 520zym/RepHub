@@ -40,6 +40,10 @@ RepHub 是一款 macOS 原生 Git / Subversion 客户端，面向同时维护两
 
 ## 安装
 
+从 [GitHub Releases](https://github.com/520zym/RepHub/releases/latest) 下载 DMG：Apple Silicon（M 系列）选择 `arm64`，Intel 选择 `x86_64`。打开安装包，将 RepHub 拖入“应用程序”后启动。每个安装包附带 SHA-256 校验文件。
+
+安装包需要 macOS 26 或更新版本，使用临时签名，尚未经过 Apple 公证。
+
 ### 从源码构建
 
 需要 Xcode 26 或更新版本，以及本地 `git`。使用 SVN 功能还需安装 `svn`；工具会从常见安装目录和当前 `PATH` 查找。
@@ -61,7 +65,7 @@ open build/RepHub.app
 
 安装包与 SHA-256 校验文件输出到 `build/dist/`，使用构建机器的架构。打开 DMG，将 RepHub 拖入“应用程序”后启动。
 
-构建脚本使用本机临时签名，产物尚未经过 Apple 公证。旧 SVN 服务的 TLS 兼容条件见 [SVN TLS 兼容说明](docs/svn-tls-compatibility.md)。
+旧 SVN 服务的 TLS 兼容条件见 [SVN TLS 兼容说明](docs/svn-tls-compatibility.md)。
 
 ## 开始使用
 
@@ -107,6 +111,8 @@ swift test
 ```
 
 自动化测试和界面验收使用隔离的临时仓库。功能的验证范围与已知边界见 [原生验证记录](docs/native-verification.md)，完整需求见 [需求文档](docs/requirements.md)。构建产物位于 `.build/` 和 `build/`，不纳入版本控制。
+
+推送 `0.0.1` 这样的版本标签后，GitHub Actions 自动测试、打包并发布两种架构的 DMG。标签与应用版本必须一致；也可手动运行流水线，仅构建安装包。操作步骤见 [打包与发布](docs/releasing.md)。
 
 ## 反馈
 
