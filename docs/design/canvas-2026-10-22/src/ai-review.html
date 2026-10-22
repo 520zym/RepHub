@@ -1,0 +1,36 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>RepHub · AI 审查</title><link rel="stylesheet" href="styles.css"></head>
+<body><script src="sprite.js"></script>
+<div class="modal-stage" id="screen-ai-review">
+  <div class="backdrop"><img src="../01-workspace.png" alt="" /></div>
+  <section class="sheet ai-sheet">
+    <header class="sheet-head"><span class="sheet-icon"><svg class="ic " aria-hidden="true"><use href="#i-sparkles"></use></svg></span><div class="sheet-title"><h2>AI 代码审查</h2><div class="sub">仅分析明确选中的文本差异；不会修改仓库或执行提交</div></div><button class="close"><svg class="ic " aria-hidden="true"><use href="#i-close"></use></svg></button></header>
+    <div class="ai-body">
+      <aside class="ai-source">
+        <div class="overline">Review <span class="sep">/</span> Scope</div><h3>审查范围</h3><div class="sub">2 / 6 个文件 · 已读取差异</div>
+        <div class="ai-files"><div class="ai-file selected"><span class="check on"><svg class="ic " aria-hidden="true"><use href="#i-check"></use></svg></span><span class="fname">HttpClient.java</span></div>
+<div class="ai-file selected"><span class="check on"><svg class="ic " aria-hidden="true"><use href="#i-check"></use></svg></span><span class="fname">RequestOptions.java</span></div>
+<div class="ai-file "><span class="check "></span><span class="fname">ResponseHandler.java</span></div>
+<div class="ai-file "><span class="check "></span><span class="fname">application.yml</span></div>
+<div class="ai-file "><span class="check "></span><span class="fname">更新说明.md</span></div>
+<div class="ai-file "><span class="check "></span><span class="fname">README.md</span></div></div>
+        <div class="ai-config">
+          <div class="ai-select"><label>场景</label><div class="value">代码审查 · 严格 <svg class="ic " aria-hidden="true"><use href="#i-chevron-down"></use></svg></div></div>
+          <div class="ai-select"><label>连接</label><div class="value">DeepSeek API <svg class="ic " aria-hidden="true"><use href="#i-chevron-down"></use></svg></div></div>
+          <button class="btn primary"><svg class="ic " aria-hidden="true"><use href="#i-play"></use></svg> 开始审查</button>
+        </div>
+      </aside>
+      <section class="ai-main">
+        <div class="ai-result-head"><div class="overline">Result <span class="sep">/</span> 03</div><h3>发现的问题</h3><div class="right"><span class="pill green"><svg class="ic " aria-hidden="true"><use href="#i-check-circle"></use></svg> 完成</span><span class="mono">2.4s</span></div></div>
+        <div class="findings">
+          <article class="finding"><div class="finding-head"><span class="sev">中</span><span class="title">超时值与配置入口不一致</span><span class="loc">HttpClient.java:22</span></div><div class="desc">构造函数仍然读取默认超时，execute() 才使用 options.timeout()。两条路径可能得到不同的超时时间。</div><div class="action"><svg class="ic " aria-hidden="true"><use href="#i-pin"></use></svg> 在工作区定位 <span class="pill">建议：统一读取 options</span></div></article>
+          <article class="finding"><div class="finding-head"><span class="sev low">低</span><span class="title">错误信息可能包含完整响应体</span><span class="loc">HttpClient.java:24</span></div><div class="desc">response.body() 被拼进异常消息，可能在日志中留下较大的响应内容。</div><div class="action"><svg class="ic " aria-hidden="true"><use href="#i-pin"></use></svg> 在工作区定位</div></article>
+          <article class="finding"><div class="finding-head"><span class="sev low">低</span><span class="title">建议补充资源关闭的测试</span><span class="loc">HttpClient.java:28</span></div><div class="desc">当前 try-with-resources 已正确关闭响应；可以补一个异常路径的测试来锁定行为。</div><div class="action"><svg class="ic " aria-hidden="true"><use href="#i-pin"></use></svg> 在工作区定位</div></article>
+        </div>
+        <div class="ai-output"><div class="ai-output-head"><svg class="ic " aria-hidden="true"><use href="#i-code"></use></svg> 审查摘要</div><p>整体风险较低。两处异常路径的语义已经比之前更清楚；提交前建议统一超时入口，并确认错误消息不会把过大的响应体写入日志。</p></div>
+        <div class="ai-usage"><span>2,184 输入</span><span>486 输出</span><span>DeepSeek · deepseek-chat</span><span class="right">仅用于本次审查</span></div>
+      </section>
+    </div>
+    <footer class="sheet-foot"><div class="left"><span class="pill"><svg class="ic " aria-hidden="true"><use href="#i-shield"></use></svg> 不会自动应用建议</span></div><div class="right"><button class="btn quiet">关闭</button><button class="btn secondary"><svg class="ic " aria-hidden="true"><use href="#i-refresh"></use></svg> 重新运行</button></div></footer>
+  </section>
+</div>
+</body></html>

@@ -1,0 +1,34 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>RepHub · 设置 · 外观</title><link rel="stylesheet" href="styles.css"></head>
+<body><script src="sprite.js"></script>
+<div class="settings-stage" id="screen-settings-appearance">
+  <section class="settings-window">
+    <header class="window-chrome"><div class="traffic"><span class="light r"></span><span class="light y"></span><span class="light g"></span></div><span class="title">设置</span><span class="grow"></span><span class="tiny">RepHub 0.0.1</span></header>
+    <div class="settings-main">
+      <nav class="settings-nav"><div class="nav-label">Settings</div><button class="active"><svg class="ic " aria-hidden="true"><use href="#i-sliders"></use></svg> 外观与代码配色</button><button><svg class="ic " aria-hidden="true"><use href="#i-sparkles"></use></svg> AI 与场景</button><button><svg class="ic " aria-hidden="true"><use href="#i-user"></use></svg> 迁移作者</button><button><svg class="ic " aria-hidden="true"><use href="#i-info"></use></svg> 关于 RepHub</button><div class="tail">应用主题、日夜模式和代码配色互相独立，切换不会重置工作区。</div></nav>
+      <main class="settings-content">
+        <h1>外观与代码配色</h1><div class="lead">应用壳层和代码阅读区可以分开选择；深色应用搭配浅色代码同样有效。</div>
+        <div class="sections">
+          <section class="settings-section"><h2>应用外观</h2><div class="section-sub">主题决定界面底色与强调色，不影响代码高亮。</div>
+            <div class="theme-grid">
+              <div class="theme-card active"><div class="theme-preview"></div><div class="text"><b>暖灰 · 翡翠</b><span>柔和白面 · 苔绿强调</span></div><span class="check-badge"><svg class="ic " aria-hidden="true"><use href="#i-check"></use></svg></span></div>
+              <div class="theme-card"><div class="theme-preview dark"></div><div class="text"><b>石墨灰 · 夜航</b><span>深炭底 · 薄荷状态</span></div></div>
+            </div>
+            <div class="form-row" style="margin-top:11px"><span class="label">日夜模式</span><div class="seg"><button class="active">跟随系统</button><button>浅色</button><button>深色</button></div><span class="grow"></span><span class="tiny">即时生效</span></div>
+          </section>
+          <section class="settings-section"><h2>代码配色</h2><div class="section-sub">只作用于差异和代码阅读区；行号、增删背景与语法颜色成组切换。</div>
+            <div class="form-row" style="margin-top:9px"><span class="label">代码主题</span><div class="seg"><button class="active">跟随外观</button><button>浅色代码</button><button>深色代码</button></div></div>
+            <div class="code-preview">
+              <div class="row"><span class="num">1</span><span><span class="kw">struct</span> Repository: View {</span></div>
+              <div class="row"><span class="num">2</span><span>    <span class="kw">let</span> name: String</span></div>
+              <div class="row"><span class="num">3</span><span>    <span class="cm">// 当前工作区</span></span></div>
+              <div class="row add"><span class="num">4</span><span>+   Text(<span class="str">"RepHub"</span>)</span></div>
+              <div class="row del"><span class="num">5</span><span>-   Text(<span class="str">"旧视图"</span>)</span></div>
+            </div>
+            <div class="setting-caption">代码配色与应用外观完全独立。无论应用选择浅色还是深色，都可以固定使用同一种代码主题。</div>
+          </section>
+                  </div>
+      </main>
+    </div>
+  </section>
+</div>
+</body></html>

@@ -1,0 +1,30 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>RepHub · 仓库管理</title><link rel="stylesheet" href="styles.css"></head>
+<body><script src="sprite.js"></script>
+<div class="modal-stage" id="screen-management">
+  <div class="backdrop"><img src="../01-workspace.png" alt="" /></div>
+  <section class="sheet management-sheet">
+    <header class="sheet-head"><span class="sheet-icon"><svg class="ic " aria-hidden="true"><use href="#i-sliders"></use></svg></span><div class="sheet-title"><h2>仓库管理</h2><div class="sub">efb-standard · Git · hotfix/request-timeout</div></div><button class="close"><svg class="ic " aria-hidden="true"><use href="#i-close"></use></svg></button></header>
+    <div class="management-tabs"><div class="seg pill"><button class="active">推送</button><button>分支</button><button>暂存</button><button>冲突</button><button>比较</button><button>设置</button></div></div>
+    <div class="management-body"><div class="mgt-layout">
+      <section class="mgt-section">
+        <div class="overline">Push <span class="sep">/</span> Preview</div><h3>推送目标</h3><div class="desc">推送只更新远端分支，不会修改当前工作区。</div>
+        <div class="mgt-field"><label>远端</label><div class="value"><svg class="ic " aria-hidden="true"><use href="#i-cloud"></use></svg> origin <span class="mono">· git@github.com:team/efb-standard.git</span><span class="right"><svg class="ic " aria-hidden="true"><use href="#i-chevron-down"></use></svg></span></div></div>
+        <div class="mgt-field"><label>目标分支</label><div class="value"><svg class="ic " aria-hidden="true"><use href="#i-branch"></use></svg> hotfix/request-timeout <span class="mono">→ origin/hotfix/request-timeout</span><span class="right"><svg class="ic " aria-hidden="true"><use href="#i-chevron-down"></use></svg></span></div></div>
+        <div class="mgt-toggle"><span class="mgt-switch"></span>设置为上游分支 <span class="muted">· 之后可直接推送</span></div>
+        <div class="mgt-preview"><b>将推送 1 个提交</b><br>4a72d9c · fix: 优化请求超时与连接释放<br>推送后远端分支会更新；本地工作区不变。</div>
+      </section>
+      <aside class="mgt-status">
+        <div class="overline">Status <span class="sep">/</span> Local</div><h3>当前状态</h3>
+        <div class="status-block">
+          <div class="status-row"><span>当前分支</span><b>hotfix/request-timeout</b></div>
+          <div class="status-row"><span>本地领先</span><b>1 个提交</b></div>
+          <div class="status-row"><span>上游</span><b>origin/main</b></div>
+          <div class="status-row"><span>待推送</span><b>4a72d9c</b></div>
+        </div>
+        <div class="status-note"><svg class="ic " aria-hidden="true"><use href="#i-shield"></use></svg> 远端地址和分支会在确认前再次显示；不会自动强推。</div>
+      </aside>
+    </div></div>
+    <footer class="sheet-foot"><div class="left"><span class="pill"><svg class="ic " aria-hidden="true"><use href="#i-lock"></use></svg> 推送是远端写操作</span></div><div class="right"><button class="btn quiet">取消</button><button class="btn primary">确认推送 <svg class="ic " aria-hidden="true"><use href="#i-arrow-up"></use></svg></button></div></footer>
+  </section>
+</div>
+</body></html>

@@ -1,0 +1,33 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>RepHub · 开始</title><link rel="stylesheet" href="styles.css"></head>
+<body><script src="sprite.js"></script>
+<div class="stage" id="screen-welcome"><div class="app welcome-app">
+  <header class="welcome-chrome">
+    <div class="traffic"><span class="light r"></span><span class="light y"></span><span class="light g"></span></div>
+    <span class="brandmark" style="margin-left:6px"><svg class="ic " aria-hidden="true"><use href="#i-branch"></use></svg></span><span class="wordmark">RepHub</span>
+    <div class="actions"><button class="tool"><svg class="ic " aria-hidden="true"><use href="#i-settings"></use></svg> 设置</button><button class="btn primary" style="height:34px;font-size:11px;padding:0 14px;box-shadow:none"><svg class="ic " aria-hidden="true"><use href="#i-folder"></use></svg> 打开仓库</button></div>
+  </header>
+  <div class="welcome-body">
+    <section class="welcome-hero">
+      <div class="hero-mark"><svg class="ic " aria-hidden="true"><use href="#i-branch"></use></svg></div>
+      <div class="overline">RepHub <span class="sep">/</span> Git + Subversion</div>
+      <h1>从工作区开始。<br><span class="light">变更、差异和历史都在一处。</span></h1>
+      <p class="lead">打开一个已经存在的本地工作副本，或从远程克隆 Git、检出 SVN 子目录。RepHub 会自动识别 Git、SVN 以及两者共管的目录。</p>
+      <div class="welcome-actions"><button class="btn primary"><svg class="ic " aria-hidden="true"><use href="#i-folder"></use></svg> 打开本地仓库</button><button class="btn secondary"><svg class="ic " aria-hidden="true"><use href="#i-cloud"></use></svg> 克隆 Git</button><button class="btn secondary"><svg class="ic " aria-hidden="true"><use href="#i-download"></use></svg> 检出 SVN</button></div>
+      <div class="welcome-note"><svg class="ic " aria-hidden="true"><use href="#i-shield-check"></use></svg> 不会修改仓库，直到你明确执行提交、更新或推送。</div>
+      <div class="quick-path">
+        <div class="quick-step"><span class="num">1</span><div><b>选择仓库</b><span>本地或远程</span></div></div><span class="quick-line"></span>
+        <div class="quick-step"><span class="num">2</span><div><b>阅读差异</b><span>按文件勾选</span></div></div><span class="quick-line"></span>
+        <div class="quick-step"><span class="num">3</span><div><b>检查并提交</b><span>逐目标确认</span></div></div>
+      </div>
+    </section>
+    <section class="card recent-card">
+      <div class="recent-head"><div><div class="overline">Recent <span class="sep">/</span> 06</div><h2>最近打开</h2></div><button class="textbtn">清空记录</button></div>
+      <div class="recent-list"><div class="recent-row selected"><span class="recent-icon"><svg class="ic " aria-hidden="true"><use href="#i-folder"></use></svg></span><div class="recent-main"><b>efb-standard</b><span>~/Documents/Code/efb-standard</span></div><div class="recent-meta"><span class="branch"><svg class="ic sm" aria-hidden="true"><use href="#i-branch"></use></svg> hotfix/request-timeout</span><div style="margin-top:5px">今天 10:42</div></div></div><div class="recent-row "><span class="recent-icon"><svg class="ic " aria-hidden="true"><use href="#i-folder"></use></svg></span><div class="recent-main"><b>portal-web</b><span>~/Documents/Code/portal-web</span></div><div class="recent-meta"><span class="branch"><svg class="ic sm" aria-hidden="true"><use href="#i-branch"></use></svg> main</span><div style="margin-top:5px">昨天 16:30</div></div></div><div class="recent-row "><span class="recent-icon"><svg class="ic " aria-hidden="true"><use href="#i-folder"></use></svg></span><div class="recent-main"><b>svn-tools</b><span>~/Documents/Code/svn-tools</span></div><div class="recent-meta"><span class="branch"><svg class="ic sm" aria-hidden="true"><use href="#i-branch"></use></svg> trunk</span><div style="margin-top:5px">10月18日</div></div></div><div class="recent-row "><span class="recent-icon"><svg class="ic " aria-hidden="true"><use href="#i-folder"></use></svg></span><div class="recent-main"><b>api-gateway</b><span>~/Documents/Code/api-gateway</span></div><div class="recent-meta"><span class="branch"><svg class="ic sm" aria-hidden="true"><use href="#i-branch"></use></svg> release/2.4</span><div style="margin-top:5px">10月15日</div></div></div>        <div class="recent-row"><span class="recent-icon"><svg class="ic" aria-hidden="true"><use href="#i-folder"></use></svg></span><div class="recent-main"><b>design-system</b><span>~/Documents/Code/design-system</span></div><div class="recent-meta"><span class="branch"><svg class="ic sm" aria-hidden="true"><use href="#i-branch"></use></svg> feature/canvas</span><div style="margin-top:5px">10月12日</div></div></div>
+        <div class="recent-row"><span class="recent-icon"><svg class="ic" aria-hidden="true"><use href="#i-folder"></use></svg></span><div class="recent-main"><b>legacy-batch</b><span>~/Documents/Code/legacy-batch</span></div><div class="recent-meta"><span class="branch"><svg class="ic sm" aria-hidden="true"><use href="#i-branch"></use></svg> trunk</span><div style="margin-top:5px">10月09日</div></div></div>
+</div>
+      <div class="recent-cta"><b>还没有本地工作副本？</b><span>从远程获取一个完整的工作区，RepHub 会保留 Git / SVN 各自的能力。</span><div class="row"><button class="btn secondary"><svg class="ic" aria-hidden="true"><use href="#i-cloud"></use></svg> 克隆 Git</button><button class="btn secondary"><svg class="ic" aria-hidden="true"><use href="#i-download"></use></svg> 检出 SVN</button></div></div>
+      <div class="recent-foot"><span>从菜单或顶部入口继续</span><button class="textbtn">查看全部 <svg class="ic " aria-hidden="true"><use href="#i-arrow-right"></use></svg></button></div>
+    </section>
+  </div>
+  <footer class="statusbar"><span class="st"><span class="dot"></span> 就绪</span><span class="st">尚未打开仓库</span><span class="right"><span class="st">RepHub 0.0.1</span><span class="st">macOS 26</span></span></footer>
+</div></div></body></html>

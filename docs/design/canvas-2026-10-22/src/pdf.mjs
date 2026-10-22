@@ -1,0 +1,12 @@
+import pw from '/Users/zhangyiming/.npm/_npx/a1722018f28f9df2/node_modules/playwright-core/index.js';
+const { chromium } = pw;
+import path from 'node:path';
+const root = path.resolve('docs/design/canvas-2026-10-22');
+const browser = await chromium.launch({ executablePath: '/Users/zhangyiming/Library/Caches/ms-playwright/chromium-1223/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing', headless: true });
+const page = await browser.newPage({ viewport: { width: 1512, height: 982 } });
+await page.goto('file://' + path.join(root, 'src/deck.html'));
+await page.waitForTimeout(900);
+await page.evaluate(() => document.fonts.ready);
+await page.pdf({ path: path.join(root, 'RepHub-Canvas-Design-Proposal.pdf'), printBackground: true, preferCSSPageSize: true });
+console.log('pdf written');
+await browser.close();

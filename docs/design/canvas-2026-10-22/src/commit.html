@@ -1,0 +1,54 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>RepHub · 提交代码</title><link rel="stylesheet" href="styles.css"></head>
+<body><script src="sprite.js"></script>
+<div class="modal-stage" id="screen-commit">
+  <div class="backdrop"><img src="../01-workspace.png" alt="" /></div>
+  <section class="sheet commit-sheet">
+    <header class="sheet-head"><span class="sheet-icon"><svg class="ic " aria-hidden="true"><use href="#i-check-circle"></use></svg></span><div class="sheet-title"><h2>提交代码</h2><div class="sub">Git 提交当前工作区；SVN 会直接写入服务器</div></div><button class="close"><svg class="ic " aria-hidden="true"><use href="#i-close"></use></svg></button></header>
+    <div class="commit-targetbar"><div class="seg"><button class="active">Git 本地 6</button><button>SVN 服务器 2</button></div><div class="target-note"><svg class="ic " aria-hidden="true"><use href="#i-lock"></use></svg> Git 提交写入本地 · 推送是独立操作</div></div>
+    <div class="commit-body">
+      <div class="commit-main">
+        <section class="file-pick">
+          <div class="file-pick-head"><div><div class="overline">Files <span class="sep">/</span> 06</div><h3>可提交路径</h3></div><button class="textbtn">全选</button></div>
+          <div class="tree"><div class="tree-row selected" style="--d:0"><span class="check on"><svg class="ic " aria-hidden="true"><use href="#i-check"></use></svg></span><span class="file-ico"><svg class="ic " aria-hidden="true"><use href="#i-file"></use></svg></span><span class="fname">HttpClient.java</span><span class="badge M">M</span></div>
+<div class="tree-row selected" style="--d:0"><span class="check on"><svg class="ic " aria-hidden="true"><use href="#i-check"></use></svg></span><span class="file-ico"><svg class="ic " aria-hidden="true"><use href="#i-file"></use></svg></span><span class="fname">RequestOptions.java</span><span class="badge M">M</span></div>
+<div class="tree-row selected" style="--d:0"><span class="check on"><svg class="ic " aria-hidden="true"><use href="#i-check"></use></svg></span><span class="file-ico"><svg class="ic " aria-hidden="true"><use href="#i-file"></use></svg></span><span class="fname">ResponseHandler.java</span><span class="badge M">M</span></div>
+<div class="tree-row selected" style="--d:0"><span class="check on"><svg class="ic " aria-hidden="true"><use href="#i-check"></use></svg></span><span class="file-ico"><svg class="ic " aria-hidden="true"><use href="#i-file"></use></svg></span><span class="fname">application.yml</span><span class="badge M">M</span></div>
+<div class="tree-row selected" style="--d:0"><span class="check on"><svg class="ic " aria-hidden="true"><use href="#i-check"></use></svg></span><span class="file-ico"><svg class="ic " aria-hidden="true"><use href="#i-file"></use></svg></span><span class="fname">更新说明.md</span><span class="badge M">M</span></div>
+<div class="tree-row selected" style="--d:0"><span class="check on"><svg class="ic " aria-hidden="true"><use href="#i-check"></use></svg></span><span class="file-ico"><svg class="ic " aria-hidden="true"><use href="#i-file"></use></svg></span><span class="fname">README.md</span><span class="badge A">A</span></div></div>
+          <div class="file-pick-foot"><svg class="ic " aria-hidden="true"><use href="#i-check-circle"></use></svg> 6 / 6 已选择 <span class="grow"></span><span class="mono">+38 −12</span></div>
+        </section>
+        <section class="preview-panel">
+          <div class="diff-head"><div class="diff-file"><span class="file-chip"><svg class="ic " aria-hidden="true"><use href="#i-java"></use></svg></span><div><h3>HttpClient.java</h3><div class="path">src / main / java / network</div></div></div><div class="diff-actions"><button class="textbtn"><svg class="ic " aria-hidden="true"><use href="#i-history"></use></svg> 文件历史</button><div class="mode"><span class="active"><svg class="ic " aria-hidden="true"><use href="#i-rows"></use></svg> 统一</span></div></div></div>
+          <div class="compare"><span><b>HEAD</b> <span class="muted">→</span> 工作区</span><span class="add">+38</span><span class="del">−12</span><span class="right">第 22–28 行</span></div>
+          <div class="code-wrap"><div class="code"><div class="code-row ctx"><span class="ln">10</span><span class="ln">10</span><span class="mk"></span><span class="src">    <span class="k">public</span> <span class="fn">HttpClient</span>(<span class="t">RequestOptions</span> options) {</span></div>
+<div class="code-row ctx"><span class="ln">11</span><span class="ln">11</span><span class="mk"></span><span class="src">        <span class="k">this</span>.options = options;</span></div>
+<div class="code-row ctx"><span class="ln">12</span><span class="ln">12</span><span class="mk"></span><span class="src">        <span class="k">this</span>.client = <span class="t">HttpClient</span>.newBuilder()</span></div>
+<div class="code-row ctx"><span class="ln">13</span><span class="ln">13</span><span class="mk"></span><span class="src">            .version(<span class="t">HttpClient</span>.<span class="t">Version</span>.HTTP_2)</span></div>
+<div class="code-row ctx"><span class="ln">14</span><span class="ln">14</span><span class="mk"></span><span class="src">            .connectTimeout(options.connectTimeout())</span></div>
+<div class="code-row ctx"><span class="ln">15</span><span class="ln">15</span><span class="mk"></span><span class="src">            .build();</span></div>
+<div class="code-row ctx"><span class="ln">16</span><span class="ln">16</span><span class="mk"></span><span class="src">    }</span></div>
+<div class="code-row ctx"><span class="ln">17</span><span class="ln">17</span><span class="mk"></span><span class="src"></span></div>
+<div class="code-row ctx"><span class="ln">18</span><span class="ln">18</span><span class="mk"></span><span class="src">    <span class="k">public</span> <span class="t">Response</span> <span class="fn">execute</span>(<span class="t">Request</span> request) <span class="k">throws</span> <span class="t">RequestException</span> {</span></div>
+<div class="code-row ctx"><span class="ln">19</span><span class="ln">19</span><span class="mk"></span><span class="src">        <span class="t">Duration</span> timeout = options.timeout();</span></div>
+<div class="code-row ctx"><span class="ln">20</span><span class="ln">20</span><span class="mk"></span><span class="src">        <span class="k">try</span> (<span class="t">Response</span> response = client.send(request)) {</span></div>
+<div class="code-row ctx"><span class="ln">21</span><span class="ln">21</span><span class="mk"></span><span class="src">            <span class="k">if</span> (!response.isSuccessful()) {</span></div>
+<div class="code-row del"><span class="ln">22</span><span class="ln"></span><span class="mk">-</span><span class="src">                <span class="k">throw</span> <span class="k">new</span> <span class="t">RequestException</span>(response.code());</span></div>
+<div class="code-row add"><span class="ln"></span><span class="ln">22</span><span class="mk">+</span><span class="src">                <span class="k">throw</span> <span class="k">new</span> <span class="t">RequestException</span>(</span></div>
+<div class="code-row add"><span class="ln"></span><span class="ln">23</span><span class="mk">+</span><span class="src">                    <span class="s">"HTTP request failed: "</span> + response.code() + <span class="s">" "</span> + response.body()</span></div>
+<div class="code-row add"><span class="ln"></span><span class="ln">24</span><span class="mk">+</span><span class="src">                );</span></div>
+<div class="code-row ctx"><span class="ln">23</span><span class="ln">25</span><span class="mk"></span><span class="src">            }</span></div>
+<div class="code-row ctx"><span class="ln">24</span><span class="ln">26</span><span class="mk"></span><span class="src">            <span class="k">return</span> response;</span></div>
+<div class="code-row ctx"><span class="ln">25</span><span class="ln">27</span><span class="mk"></span><span class="src">        } <span class="k">catch</span> (<span class="t">IOException</span> e) {</span></div>
+<div class="code-row add"><span class="ln"></span><span class="ln">28</span><span class="mk">+</span><span class="src">            <span class="k">throw</span> <span class="k">new</span> <span class="t">RequestException</span>(<span class="s">"Request execution failed: "</span> + e.getMessage(), e);</span></div></div><div class="code-fade"></div></div>
+        </section>
+      </div>
+      <section class="commit-message">
+        <div class="commit-message-head"><span class="lab">Git 提交说明</span><span class="ai"><svg class="ic " aria-hidden="true"><use href="#i-sparkles"></use></svg> AI 生成</span></div>
+        <div class="commit-text"><b>fix: 优化请求超时与连接释放</b><p>统一请求超时配置，补充异常处理，确保响应资源在请求完成后及时关闭。<span class="caret"></span></p></div>
+        <div class="commit-message-foot"><span>草稿会保留 · 支持多行编辑</span><span>112 字</span></div>
+      </section>
+    </div>
+    <footer class="sheet-foot"><div class="left"><span class="commit-footer-note"><svg class="ic " aria-hidden="true"><use href="#i-warning"></use></svg> SVN 目标将直接写入服务器</span><span class="wizard-hint">切换目标可分别编辑说明</span></div><div class="right"><button class="btn quiet">取消</button><button class="btn primary">提交 Git 6 · SVN 2 <svg class="ic " aria-hidden="true"><use href="#i-arrow-right"></use></svg></button></div></footer>
+  </section>
+</div>
+</body></html>

@@ -1,0 +1,42 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>RepHub · SVN → Git 迁移</title><link rel="stylesheet" href="styles.css"></head>
+<body><script src="sprite.js"></script>
+<div class="modal-stage" id="screen-migration">
+  <div class="backdrop"><img src="../01-workspace.png" alt="" /></div>
+  <section class="sheet">
+    <header class="sheet-head"><span class="sheet-icon"><svg class="ic " aria-hidden="true"><use href="#i-merge"></use></svg></span><div class="sheet-title"><h2>迁移仓库</h2><div class="sub">SVN → Git · 本地预览，确认后才发布</div></div><button class="close"><svg class="ic " aria-hidden="true"><use href="#i-close"></use></svg></button></header>
+    <div class="migration-body"><div class="migration-layout">
+      <aside class="migration-steps">
+        <div class="overline steps-eyebrow">Migration</div>
+        <div class="step-item complete"><span class="step-num"><svg class="ic " aria-hidden="true"><use href="#i-check"></use></svg></span><span>范围与预检</span></div>
+        <div class="step-item complete"><span class="step-num"><svg class="ic " aria-hidden="true"><use href="#i-check"></use></svg></span><span>作者映射</span></div>
+        <div class="step-item active"><span class="step-num">3</span><span>转换预览</span></div>
+        <div class="step-item"><span class="step-num">4</span><span>发布到 Git</span></div>
+        <div class="migration-source">隔离预览目录<b>~/RepHub-Migrations/efb-20261022</b><br>不会修改来源 SVN 仓库。</div>
+      </aside>
+      <section class="migration-preview">
+        <div class="overline">Preview <span class="sep">/</span> 428 commits</div><h3>转换结果已就绪</h3>
+        <div class="migration-tabs"><div class="seg"><button class="active">概览</button><button>文件 1,236</button><button>历史 428</button></div></div>
+        <div class="metric-row"><div class="metric"><span>新增提交</span><b>428 <small>条</small></b></div><div class="metric"><span>文件核对</span><b>1,236 <small>项</small></b></div><div class="metric"><span>作者映射</span><b>12 / 12</b></div></div>
+        <div class="mig-rows">
+          <div class="mig-row"><span class="label">SVN 来源</span><span class="value">svn.example.com/svn/EfbServer-J</span></div>
+          <div class="mig-row"><span class="label">历史范围</span><span class="value">r14210 → r16074 · 包含复制前历史</span></div>
+          <div class="mig-row"><span class="label">Git 目标</span><span class="value">git@github.com:team/efb-standard.git</span></div>
+          <div class="mig-row"><span class="label">目标分支</span><span class="value">main · 本地预览</span></div>
+        </div>
+        <div class="mig-warning"><svg class="ic " aria-hidden="true"><use href="#i-warning"></use></svg> 发布前请先打开结果核对文件与历史；发布是明确的远端写操作。</div>
+        <div class="mig-commits"><div class="mig-commit"><span class="hash">r16074</span><span class="msg">fix: 优化请求超时与连接释放</span><span class="author">zym</span></div><div class="mig-commit"><span class="hash">r16062</span><span class="msg">feat: 增加请求配置项</span><span class="author">chen</span></div><div class="mig-commit"><span class="hash">r16048</span><span class="msg">refactor: 整理响应处理逻辑</span><span class="author">li</span></div><div class="mig-commit"><span class="hash">r16041</span><span class="msg">docs: 更新本地开发说明</span><span class="author">zym</span></div></div>
+      </section>
+      <aside class="migration-side">
+        <div class="overline">Authors <span class="sep">/</span> 12</div><h3>作者映射</h3>
+        <div class="author-row"><span class="author-avatar">ZY</span><div class="author-text"><b>zym</b><span>zym &lt;zym@example.com&gt;</span></div><span class="ok"><svg class="ic " aria-hidden="true"><use href="#i-check-circle"></use></svg></span></div>
+        <div class="author-row"><span class="author-avatar">CH</span><div class="author-text"><b>chen</b><span>chen &lt;chen@example.com&gt;</span></div><span class="ok"><svg class="ic " aria-hidden="true"><use href="#i-check-circle"></use></svg></span></div>
+        <div class="author-row"><span class="author-avatar">LI</span><div class="author-text"><b>li</b><span>li &lt;li@example.com&gt;</span></div><span class="ok"><svg class="ic " aria-hidden="true"><use href="#i-check-circle"></use></svg></span></div>
+        <div class="author-row" style="background:transparent;padding-left:2px;color:var(--ink-3)"><span style="font-size:9px">其余 9 位作者已映射</span></div>
+        <div class="mig-target"><div class="row"><span>目标远端</span><b>origin</b></div><div class="row"><span>目标分支</span><b>main</b></div><div class="row"><span>发布状态</span><b>本地预览 · 未发布</b></div></div>
+        <div class="mig-checks"><div class="mig-check"><svg class="ic " aria-hidden="true"><use href="#i-check"></use></svg> 目标分支未受保护</div><div class="mig-check"><svg class="ic " aria-hidden="true"><use href="#i-check"></use></svg> 来源工作副本干净</div><div class="mig-check"><svg class="ic " aria-hidden="true"><use href="#i-check"></use></svg> 预览目录已生成</div></div>
+      </aside>
+    </div></div>
+    <footer class="sheet-foot"><div class="left"><button class="btn quiet">收起到后台</button><span class="wizard-hint">原 SVN 仓库不会被修改</span></div><div class="right"><button class="btn secondary">打开结果</button><button class="btn primary">发布到 Git <svg class="ic " aria-hidden="true"><use href="#i-arrow-up"></use></svg></button></div></footer>
+  </section>
+</div>
+</body></html>

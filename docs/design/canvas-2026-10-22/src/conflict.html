@@ -1,0 +1,81 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>RepHub · 处理冲突</title><link rel="stylesheet" href="styles.css"></head>
+<body><script src="sprite.js"></script>
+<div class="modal-stage" id="screen-conflict">
+  <div class="backdrop"><img src="../01-workspace.png" alt="" /></div>
+  <section class="sheet conflict-sheet">
+    <header class="sheet-head"><span class="sheet-icon red"><svg class="ic " aria-hidden="true"><use href="#i-merge"></use></svg></span><div class="sheet-title"><h2>处理内容冲突</h2><div class="sub">src / main / java / network / HttpClient.java</div></div><button class="close"><svg class="ic " aria-hidden="true"><use href="#i-close"></use></svg></button></header>
+    <div class="conflict-body">
+      <div class="conflict-notice"><span class="pill amber"><svg class="ic " aria-hidden="true"><use href="#i-warning"></use></svg> 3 个冲突块</span><span class="block-chip active">冲突块 1</span><span class="block-chip">冲突块 2</span><span class="block-chip">冲突块 3</span><span class="hint">选择版本后会替换对应块，也可在下方继续编辑</span></div>
+      <div class="conflict-grid">
+        <section class="conflict-pane"><div class="pane-head base"><span class="pane-dot"></span>基准版本 <span class="count">BASE</span></div><div class="pane-code"><div class="code"><div class="code-row "><span class="ln">1</span><span class="mk"></span><span class="src"><span class="k">package</span> com.navchina.network;</span></div>
+<div class="code-row "><span class="ln">2</span><span class="mk"></span><span class="src"><span class="k">import</span> java.io.IOException;</span></div>
+<div class="code-row "><span class="ln">3</span><span class="mk"></span><span class="src"><span class="k">import</span> java.time.Duration;</span></div>
+<div class="code-row "><span class="ln">4</span><span class="mk"></span><span class="src"></span></div>
+<div class="code-row "><span class="ln">5</span><span class="mk"></span><span class="src"><span class="k">public</span> <span class="t">Response</span> <span class="fn">execute</span>(<span class="t">Request</span> request) {</span></div>
+<div class="code-row "><span class="ln">6</span><span class="mk"></span><span class="src">    <span class="t">Duration</span> timeout = <span class="t">Duration</span>.ofSeconds(<span class="n">10</span>);</span></div>
+<div class="code-row "><span class="ln">7</span><span class="mk"></span><span class="src">    <span class="k">try</span> (<span class="t">Response</span> response = client.send(request)) {</span></div>
+<div class="code-row "><span class="ln">8</span><span class="mk"></span><span class="src">        <span class="k">if</span> (!response.isSuccessful()) {</span></div>
+<div class="code-row "><span class="ln">9</span><span class="mk"></span><span class="src">            <span class="k">throw</span> <span class="k">new</span> <span class="t">RequestException</span>(</span></div>
+<div class="code-row "><span class="ln">10</span><span class="mk"></span><span class="src">                response.code()</span></div>
+<div class="code-row "><span class="ln">11</span><span class="mk"></span><span class="src">            );</span></div>
+<div class="code-row "><span class="ln">12</span><span class="mk"></span><span class="src">        }</span></div>
+<div class="code-row "><span class="ln">13</span><span class="mk"></span><span class="src">        <span class="k">return</span> response;</span></div>
+<div class="code-row "><span class="ln">14</span><span class="mk"></span><span class="src">    } <span class="k">catch</span> (<span class="t">IOException</span> e) {</span></div>
+<div class="code-row "><span class="ln">15</span><span class="mk"></span><span class="src">        <span class="k">throw</span> <span class="k">new</span> <span class="t">RequestException</span>(<span class="s">"Request failed"</span>, e);</span></div>
+<div class="code-row "><span class="ln">16</span><span class="mk"></span><span class="src">    }</span></div>
+<div class="code-row "><span class="ln">17</span><span class="mk"></span><span class="src">}</span></div></div></div></section>
+        <section class="conflict-pane"><div class="pane-head local"><span class="pane-dot" style="background:var(--accent)"></span>本地修改 <span class="count">LOCAL</span></div><div class="pane-code"><div class="code"><div class="code-row "><span class="ln">1</span><span class="mk"></span><span class="src"><span class="k">package</span> com.navchina.network;</span></div>
+<div class="code-row "><span class="ln">2</span><span class="mk"></span><span class="src"><span class="k">import</span> java.io.IOException;</span></div>
+<div class="code-row "><span class="ln">3</span><span class="mk"></span><span class="src"><span class="k">import</span> java.time.Duration;</span></div>
+<div class="code-row "><span class="ln">4</span><span class="mk"></span><span class="src"></span></div>
+<div class="code-row "><span class="ln">5</span><span class="mk"></span><span class="src"><span class="k">public</span> <span class="t">Response</span> <span class="fn">execute</span>(<span class="t">Request</span> request) {</span></div>
+<div class="code-row "><span class="ln">6</span><span class="mk"></span><span class="src">    <span class="t">Duration</span> timeout = options.timeout();</span></div>
+<div class="code-row "><span class="ln">7</span><span class="mk"></span><span class="src">    <span class="k">try</span> (<span class="t">Response</span> response = client.send(request)) {</span></div>
+<div class="code-row "><span class="ln">8</span><span class="mk"></span><span class="src">        <span class="k">if</span> (!response.isSuccessful()) {</span></div>
+<div class="code-row add"><span class="ln">9</span><span class="mk">+</span><span class="src">           <span class="k">throw</span> <span class="k">new</span> <span class="t">RequestException</span>(</span></div>
+<div class="code-row add"><span class="ln">10</span><span class="mk">+</span><span class="src">               <span class="s">"HTTP request failed: "</span> + response.code()</span></div>
+<div class="code-row add"><span class="ln">11</span><span class="mk">+</span><span class="src">           );</span></div>
+<div class="code-row "><span class="ln">12</span><span class="mk"></span><span class="src">        }</span></div>
+<div class="code-row "><span class="ln">13</span><span class="mk"></span><span class="src">        <span class="k">return</span> response;</span></div>
+<div class="code-row "><span class="ln">14</span><span class="mk"></span><span class="src">    } <span class="k">catch</span> (<span class="t">IOException</span> e) {</span></div>
+<div class="code-row add"><span class="ln">15</span><span class="mk">+</span><span class="src">       <span class="k">throw</span> <span class="k">new</span> <span class="t">RequestException</span>(</span></div>
+<div class="code-row add"><span class="ln">16</span><span class="mk">+</span><span class="src">           e.getMessage(), e</span></div>
+<div class="code-row add"><span class="ln">17</span><span class="mk">+</span><span class="src">       );</span></div>
+<div class="code-row "><span class="ln">18</span><span class="mk"></span><span class="src">    }</span></div>
+<div class="code-row "><span class="ln">19</span><span class="mk"></span><span class="src">}</span></div></div></div></section>
+        <section class="conflict-pane"><div class="pane-head incoming"><span class="pane-dot" style="background:var(--red)"></span>传入修改 <span class="count">INCOMING</span></div><div class="pane-code"><div class="code"><div class="code-row "><span class="ln">1</span><span class="mk"></span><span class="src"><span class="k">package</span> com.navchina.network;</span></div>
+<div class="code-row "><span class="ln">2</span><span class="mk"></span><span class="src"><span class="k">import</span> java.io.IOException;</span></div>
+<div class="code-row "><span class="ln">3</span><span class="mk"></span><span class="src"><span class="k">import</span> java.time.Duration;</span></div>
+<div class="code-row "><span class="ln">4</span><span class="mk"></span><span class="src"></span></div>
+<div class="code-row "><span class="ln">5</span><span class="mk"></span><span class="src"><span class="k">public</span> <span class="t">Response</span> <span class="fn">execute</span>(<span class="t">Request</span> request) {</span></div>
+<div class="code-row "><span class="ln">6</span><span class="mk"></span><span class="src">    <span class="t">Duration</span> timeout = <span class="t">Duration</span>.ofSeconds(<span class="n">30</span>);</span></div>
+<div class="code-row "><span class="ln">7</span><span class="mk"></span><span class="src">    <span class="k">try</span> (<span class="t">Response</span> response = client.send(request)) {</span></div>
+<div class="code-row "><span class="ln">8</span><span class="mk"></span><span class="src">        <span class="k">if</span> (!response.isSuccessful()) {</span></div>
+<div class="code-row "><span class="ln">9</span><span class="mk"></span><span class="src">            <span class="k">throw</span> <span class="k">new</span> <span class="t">RequestException</span>(</span></div>
+<div class="code-row "><span class="ln">10</span><span class="mk"></span><span class="src">                response.code() + <span class="s">": "</span> + response.body()</span></div>
+<div class="code-row "><span class="ln">11</span><span class="mk"></span><span class="src">            );</span></div>
+<div class="code-row "><span class="ln">12</span><span class="mk"></span><span class="src">        }</span></div>
+<div class="code-row "><span class="ln">13</span><span class="mk"></span><span class="src">        <span class="k">return</span> response;</span></div>
+<div class="code-row "><span class="ln">14</span><span class="mk"></span><span class="src">    } <span class="k">catch</span> (<span class="t">IOException</span> e) {</span></div>
+<div class="code-row "><span class="ln">15</span><span class="mk"></span><span class="src">        <span class="k">throw</span> <span class="k">new</span> <span class="t">RequestException</span>(<span class="s">"Request failed"</span>, e);</span></div>
+<div class="code-row "><span class="ln">16</span><span class="mk"></span><span class="src">    }</span></div>
+<div class="code-row "><span class="ln">17</span><span class="mk"></span><span class="src">}</span></div></div></div></section>
+      </div>
+      <section class="result-panel"><div class="result-head"><svg class="ic " aria-hidden="true"><use href="#i-code"></use></svg> 最终结果 <span class="editable">可编辑 · 已采用本地超时与异常处理</span></div><div class="result-code"><div class="code"><div class="code-row "><span class="ln">1</span><span class="mk"></span><span class="src"><span class="k">public</span> <span class="t">Response</span> <span class="fn">execute</span>(<span class="t">Request</span> request) {</span></div>
+<div class="code-row "><span class="ln">2</span><span class="mk"></span><span class="src">    <span class="t">Duration</span> timeout = options.timeout();</span></div>
+<div class="code-row "><span class="ln">3</span><span class="mk"></span><span class="src">    <span class="k">try</span> (<span class="t">Response</span> response = client.send(request)) {</span></div>
+<div class="code-row "><span class="ln">4</span><span class="mk"></span><span class="src">        <span class="k">if</span> (!response.isSuccessful()) {</span></div>
+<div class="code-row add"><span class="ln">5</span><span class="mk">+</span><span class="src">           <span class="k">throw</span> <span class="k">new</span> <span class="t">RequestException</span>(</span></div>
+<div class="code-row add"><span class="ln">6</span><span class="mk">+</span><span class="src">               <span class="s">"HTTP request failed: "</span> + response.code()</span></div>
+<div class="code-row add"><span class="ln">7</span><span class="mk">+</span><span class="src">           );</span></div>
+<div class="code-row "><span class="ln">8</span><span class="mk"></span><span class="src">        }</span></div>
+<div class="code-row "><span class="ln">9</span><span class="mk"></span><span class="src">        <span class="k">return</span> response;</span></div>
+<div class="code-row "><span class="ln">10</span><span class="mk"></span><span class="src">    } <span class="k">catch</span> (<span class="t">IOException</span> e) {</span></div>
+<div class="code-row add"><span class="ln">11</span><span class="mk">+</span><span class="src">       <span class="k">throw</span> <span class="k">new</span> <span class="t">RequestException</span>(e.getMessage(), e);</span></div>
+<div class="code-row "><span class="ln">12</span><span class="mk"></span><span class="src">    }</span></div>
+<div class="code-row "><span class="ln">13</span><span class="mk"></span><span class="src">}<span class="caret"></span></span></div></div></div></section>
+    </div>
+    <footer class="sheet-foot"><div class="left"><span class="pill"><svg class="ic " aria-hidden="true"><use href="#i-info"></use></svg> 保存只会标记已解决，不会自动提交</span></div><div class="right"><button class="btn quiet">取消</button><button class="btn primary">保存并标记已解决 <svg class="ic " aria-hidden="true"><use href="#i-check"></use></svg></button></div></footer>
+  </section>
+</div>
+</body></html>
