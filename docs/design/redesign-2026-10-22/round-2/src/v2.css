@@ -1,0 +1,252 @@
+/* A2: 以 A 的空间关系为准，降低米黄、抬高辅助文字对比、恢复文件名系统/等宽字体。 */
+
+.v-a2 {
+  --bg: #f2f1ed;
+  --bg-top: #f8f7f3;
+  --surface: #fcfbf7;
+  --surface-2: #f7f4ee;
+  --text: #26251f;
+  --text-2: #5e5a51;
+  --text-3: #6f695e;
+  --line: rgba(55, 50, 40, .11);
+  --line-soft: rgba(55, 50, 40, .055);
+  --accent: #3d5b49;
+  --accent-soft: #e3e9dd;
+  --select: #e5e9df;
+  --btn: #24241e;
+  --btn-text: #fdfbf6;
+  --input: #f0ede6;
+  --code-bg: #fdfcf8;
+  --add: #2e7254;
+  --add-bg: #e8f0e6;
+  --del: #a44d3c;
+  --del-bg: #f5e7e1;
+  --ck-text: #fdfbf6;
+  --shadow: 0 1px 2px rgba(55, 48, 34, .03), 0 10px 30px rgba(55, 48, 34, .04);
+  background:
+    radial-gradient(900px 430px at 60% -18%, #faf9f5 0%, rgba(250,249,245,0) 66%),
+    var(--bg);
+}
+.v-a2 .titlebar { padding-left: 20px; }
+.v-a2 .tabs { gap: 28px; }
+.v-a2 .tab { font-size: 13px; }
+.v-a2 .tool { font-size: 11.5px; }
+.v-a2 .sync { font-size: 9.5px; }
+.v-a2 .body { padding: 12px 16px 6px; }
+.v-a2 .grid { grid-template-columns: 300px minmax(0, 1fr) 344px; gap: 16px; }
+.v-a2 .files { padding: 9px 5px 3px 3px; }
+.v-a2 .eyebrow { font-size: 9.5px; letter-spacing: .12em; }
+.v-a2 .files-title h1 { font-size: 29px; }
+.v-a2 .files-sub { color: var(--text-3); font-size: 10.5px; }
+.v-a2 .files-sub .ok { display: inline-flex; }
+.v-a2 .files-sub .ok .ic { width: 12px; height: 12px; }
+.v-a2 .search { height: 32px; font-size: 11.5px; }
+.v-a2 .tree { margin-top: 8px; }
+.v-a2 .tree-row { font-size: 12px; height: 30px; flex-basis: 30px; }
+.v-a2 .fname { font-weight: 450; }
+.v-a2 .files-foot { font-size: 9.5px; }
+
+/* 文件名不再使用衬线体，改用等宽字体，先保证扫读速度。 */
+.v-a2 .file-titles h2 {
+  font-family: var(--mono);
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: -.015em;
+}
+.v-a2 .file-titles h2 .ext { color: var(--text-3); }
+.v-a2 .file-path { font-size: 10px; color: var(--text-3); }
+.v-a2 .diff-head { padding: 18px 22px 10px; }
+.v-a2 .file-chip { width: 30px; height: 33px; border-radius: 7px; }
+.v-a2 .file-chip .ic { width: 17px; height: 17px; }
+.v-a2 .compare { padding: 0 22px 9px; font-size: 9px; color: var(--text-3); }
+.v-a2 .diffstat { font-size: 9px; }
+.v-a2 .code { font-size: 12px; line-height: 20px; }
+.v-a2 .ln { font-size: 9.5px; color: #756f64; }
+.v-a2 .ln.new { padding-right: 8px; }
+.v-a2 .src { padding-left: 4px; }
+
+/* 当前文件导航：只表达位置，不假装已经“审阅完成”。 */
+.file-nav { display: inline-flex; align-items: center; gap: 3px; margin-left: auto; }
+.file-nav .nav-label { font-family: var(--ui); font-size: 9px; color: var(--text-3); margin-right: 4px; white-space: nowrap; }
+.file-nav .navbtn {
+  width: 21px; height: 20px; border: 0; border-radius: 5px; background: var(--input);
+  color: var(--text-3); display: grid; place-items: center; padding: 0;
+}
+.file-nav .navbtn .ic { width: 10px; height: 10px; }
+.file-nav .pos { font-family: var(--mono); font-size: 8.5px; color: var(--text-2); margin: 0 4px; white-space: nowrap; }
+.file-nav .pos b { color: var(--text); font-weight: 600; }
+.source-chip {
+  display: inline-flex; align-items: center; gap: 4px; height: 17px; padding: 0 6px;
+  border-radius: 4px; background: var(--accent-soft); color: var(--accent);
+  font-family: var(--mono); font-size: 8px; letter-spacing: .03em;
+}
+.source-chip .ic { width: 10px; height: 10px; }
+
+/* 提交区：去掉重复的“6 个文件 / 无冲突 / 本地”预检，只留一次摘要。 */
+.v-a2 .commit { padding: 21px 21px 17px; }
+.v-a2 .commit h2 { font-size: 23px; }
+.v-a2 .commit-count { background: transparent; box-shadow: inset 0 0 0 1px var(--line); color: var(--text-2); }
+.v-a2 .message { min-height: 300px; background: #fffefa; }
+.v-a2 .message-foot { color: var(--text-3); }
+.v-a2 .commit-target { margin-top: 17px; }
+.v-a2 .target-note { color: var(--text-3); }
+.v-a2 .target-line { margin-top: 7px; }
+.v-a2 .statline { margin-top: 14px; padding-top: 11px; color: var(--text-3); }
+.v-a2 .commit-summary {
+  margin-top: 14px; padding-top: 11px; box-shadow: inset 0 1px 0 var(--line-soft);
+  display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: 9.5px;
+  color: var(--text-3); white-space: nowrap;
+}
+.v-a2 .commit-summary b { color: var(--text-2); font-weight: 600; }
+.v-a2 .commit-summary .add { color: var(--add); font-weight: 600; }
+.v-a2 .commit-summary .del { color: var(--del); font-weight: 600; }
+.v-a2 .commit-summary .ok { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; color: var(--add); }
+.v-a2 .commit-summary .ok .ic { width: 11px; height: 11px; }
+.v-a2 .commit-spacer { min-height: 18px; }
+.v-a2 .cta { height: 46px; border-radius: 10px; }
+.v-a2 .cta-note { font-size: 9.5px; color: var(--text-3); }
+.v-a2 .statusbar { font-size: 9.5px; }
+
+/* 双目标 */
+.source-tabs {
+  display: flex; gap: 3px; height: 33px; margin-top: 11px; padding: 3px;
+  border-radius: 8px; background: var(--input);
+}
+.source-tab {
+  flex: 1; min-width: 0; border: 0; border-radius: 6px; background: transparent;
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  color: var(--text-3); font-size: 10.5px; padding: 0 7px;
+}
+.source-tab .ic { width: 12px; height: 12px; }
+.source-tab b { font-family: var(--mono); font-size: 9px; font-weight: 600; margin-left: 1px; }
+.source-tab.active { background: var(--surface); color: var(--text); box-shadow: 0 1px 4px rgba(55,48,34,.09); }
+.source-tab.active .ic { color: var(--accent); }
+.source-tab.active b { color: var(--accent); }
+.v-a2-dual .file-tabs { margin-top: 10px; }
+.v-a2-dual .tree-row { height: 29px; flex-basis: 29px; }
+.v-a2-dual .target-list { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.target-option {
+  display: flex; align-items: center; gap: 8px; min-width: 0; padding: 9px 9px;
+  background: var(--surface-2); border-radius: 8px;
+}
+.target-option .ck { flex: 0 0 14px; }
+.target-option .target-icon { width: 22px; height: 22px; flex: 0 0 22px; border-radius: 6px; }
+.target-option .target-icon .ic { width: 12px; height: 12px; }
+.target-option .target-copy { min-width: 0; flex: 1; }
+.target-option .target-top { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.target-option .provider { font-size: 11.5px; font-weight: 600; color: var(--text); }
+.target-option .path {
+  font-family: var(--mono); font-size: 9px; color: var(--text-3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.target-option .target-sub { margin-top: 3px; font-family: var(--mono); font-size: 9px; color: var(--text-3); }
+.target-option .kind {
+  flex: 0 0 auto; font-size: 8.5px; padding: 3px 5px; border-radius: 4px;
+  color: var(--text-2); background: var(--input);
+}
+.target-option.svn .kind { color: #9b6738; background: #f2e8db; }
+.target-option.svn .target-icon { color: #9b6738; background: #f2e8db; }
+.dual-summary {
+  margin-top: 14px; padding-top: 11px; box-shadow: inset 0 1px 0 var(--line-soft);
+  display: flex; align-items: center; gap: 9px; font-family: var(--mono); font-size: 9px;
+  color: var(--text-3);
+}
+.dual-summary .ok { display: inline-flex; align-items: center; gap: 4px; color: var(--add); }
+.dual-summary .ok .ic { width: 10px; height: 10px; }
+.dual-warning {
+  margin-top: 8px; display: flex; gap: 5px; align-items: flex-start;
+  font-size: 9.5px; line-height: 1.5; color: #8b613d;
+}
+.dual-warning .ic { width: 11px; height: 11px; margin-top: 1px; flex: 0 0 11px; }
+.v-a2-dual .cta { height: 46px; }
+.v-a2-dual .commit-spacer { min-height: 10px; }
+
+/* 窄窗：提交区折叠为底部摘要，差异获得完整宽度。 */
+#narrow { width: 1180px; height: 860px; }
+.v-a2-narrow.app { width: 1180px; height: 860px; }
+.v-a2-narrow .titlebar { flex-basis: 56px; height: 56px; padding: 0 14px 0 18px; }
+.v-a2-narrow .traffic { width: 58px; flex-basis: 58px; gap: 7px; }
+.v-a2-narrow .identity { margin-left: 4px; gap: 5px; }
+.v-a2-narrow .app-mark { width: 22px; height: 22px; flex-basis: 22px; }
+.v-a2-narrow .repo-btn { font-size: 12.5px; }
+.v-a2-narrow .branch-btn { font-size: 11.5px; }
+.v-a2-narrow .tabs { gap: 22px; }
+.v-a2-narrow .tab { font-size: 12.5px; }
+.v-a2-narrow .actions { gap: 2px; }
+.v-a2-narrow .tool { font-size: 10.5px; padding: 0 6px; }
+.v-a2-narrow .tool .ic { width: 12px; height: 12px; }
+.v-a2-narrow .sync { height: 23px; padding: 0 7px; font-size: 8.5px; }
+.v-a2-narrow .body { padding: 10px 14px 6px; }
+.v-a2-narrow .grid { grid-template-columns: 264px minmax(0, 1fr); gap: 12px; }
+.v-a2-narrow .commit { display: none; }
+.v-a2-narrow .files { padding: 7px 3px 2px 2px; }
+.v-a2-narrow .files-title h1 { font-size: 25px; }
+.v-a2-narrow .files-sub { font-size: 9.5px; }
+.v-a2-narrow .file-tabs { margin-top: 11px; }
+.v-a2-narrow .ftab { font-size: 11px; }
+.v-a2-narrow .search { height: 29px; font-size: 10.5px; margin-top: 9px; }
+.v-a2-narrow .tree { margin-top: 7px; }
+.v-a2-narrow .tree-row {
+  height: 28px; flex-basis: 28px; font-size: 12px;
+  padding-left: calc(2px + var(--d) * 13px); gap: 4px;
+}
+.v-a2-narrow .badge { font-size: 8.5px; line-height: 16px; height: 16px; padding: 0 4px; }
+.v-a2-narrow .files-foot { font-size: 8.5px; }
+.v-a2-narrow .diff-head { padding: 14px 18px 9px; }
+.v-a2-narrow .file-titles h2 { font-size: 15px; }
+.v-a2-narrow .file-path { font-size: 9px; }
+.v-a2-narrow .diff-actions { gap: 5px; }
+.v-a2-narrow .textbtn { font-size: 9.5px; }
+.v-a2-narrow .mode { height: 27px; }
+.v-a2-narrow .mode span { height: 21px; min-width: 37px; padding: 0 6px; font-size: 9px; }
+.v-a2-narrow .compare { padding: 0 18px 8px; font-size: 8.5px; gap: 8px; }
+.v-a2-narrow .file-nav .nav-label { display: none; }
+.v-a2-narrow .code { font-size: 12px; line-height: 20px; }
+.v-a2-narrow .code-row { height: 20px; }
+.v-a2-narrow .code-fade { height: 54px; }
+.v-a2-narrow .ln { font-size: 9px; }
+.v-a2-narrow .statusbar { flex-basis: 24px; height: 24px; font-size: 8.5px; padding: 0 16px 2px; }
+
+.commit-dock {
+  flex: 0 0 74px; height: 74px; margin-top: 10px; background: var(--surface);
+  border-radius: 14px; box-shadow: var(--shadow); padding: 11px 15px;
+  display: flex; align-items: center; gap: 16px; min-width: 0;
+}
+.dock-copy { min-width: 0; flex: 1; }
+.dock-eyebrow {
+  font-family: var(--mono); font-size: 7.8px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--text-3); display: flex; align-items: center; gap: 5px;
+}
+.dock-eyebrow .dot { width: 4px; height: 4px; border-radius: 50%; background: var(--accent); }
+.dock-message {
+  margin-top: 4px; font-size: 12px; font-weight: 600; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.dock-meta {
+  margin-top: 3px; display: flex; align-items: center; gap: 8px;
+  font-family: var(--mono); font-size: 8px; color: var(--text-3); white-space: nowrap;
+}
+.dock-meta .add { color: var(--add); }
+.dock-meta .del { color: var(--del); }
+.dock-meta .ok { color: var(--add); display: inline-flex; align-items: center; gap: 3px; }
+.dock-meta .ok .ic { width: 9px; height: 9px; }
+.dock-target {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 7px; padding-right: 4px;
+  min-width: 0;
+}
+.dock-target .target-icon { width: 24px; height: 24px; flex-basis: 24px; }
+.dock-target .target-icon .ic { width: 12px; height: 12px; }
+.dock-target .target-name { font-size: 10.5px; font-weight: 600; }
+.dock-target .target-branch { font-family: var(--mono); font-size: 9px; color: var(--text-3); max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dock-actions { display: flex; align-items: center; gap: 7px; flex: 0 0 auto; }
+.dock-expand {
+  height: 36px; padding: 0 10px; border: 0; border-radius: 8px; background: var(--input);
+  color: var(--text-2); display: inline-flex; align-items: center; gap: 5px; font-size: 10px;
+}
+.dock-expand .ic { width: 12px; height: 12px; }
+.dock-cta {
+  height: 38px; padding: 0 15px; border: 0; border-radius: 9px; background: var(--btn);
+  color: var(--btn-text); font-size: 11.5px; font-weight: 600;
+  display: inline-flex; align-items: center; gap: 7px; white-space: nowrap;
+}
+.dock-cta .ic { width: 12px; height: 12px; }
