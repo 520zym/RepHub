@@ -89,7 +89,7 @@
 
   function titlebar(mode) {
     const tabs = `<nav class="tabs" aria-label="主视图">
-      <button class="tab active">工作区</button>
+      <button class="tab active" aria-current="page">工作区</button>
       <button class="tab">提交历史</button>
     </nav>`;
     return `<header class="titlebar">

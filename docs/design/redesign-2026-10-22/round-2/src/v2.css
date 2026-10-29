@@ -28,8 +28,23 @@
     var(--bg);
 }
 .v-a2 .titlebar { padding-left: 20px; }
-.v-a2 .tabs { gap: 28px; }
-.v-a2 .tab { font-size: 13px; }
+/* 顶部主视图切换：用低对比分段底和白色浮层替代底部小横线。 */
+.v-a2 .tabs {
+  gap: 2px; height: 32px; padding: 3px; border-radius: 9px;
+  top: 50%; transform: translate(-50%, -50%);
+  background: rgba(55, 50, 40, .055);
+}
+.v-a2 .tab {
+  height: 26px; padding: 0 12px; border-radius: 7px;
+  font-size: 13px; font-weight: 500; color: var(--text-2);
+}
+.v-a2 .tab.active {
+  background: var(--surface); color: var(--text); font-weight: 600;
+  box-shadow: 0 1px 2px rgba(55, 48, 34, .07);
+}
+.v-a2 .tab.active::after { display: none; }
+.v-a2 .tab:not(.active):hover { color: var(--text); background: rgba(255, 255, 255, .35); }
+.v-a2 .tab:focus-visible { outline: 2px solid rgba(61, 91, 73, .42); outline-offset: 2px; }
 .v-a2 .tool { font-size: 11.5px; }
 .v-a2 .sync { font-size: 9.5px; }
 .v-a2 .body { padding: 12px 16px 6px; }
@@ -170,8 +185,8 @@
 .v-a2-narrow .app-mark { width: 22px; height: 22px; flex-basis: 22px; }
 .v-a2-narrow .repo-btn { font-size: 12.5px; }
 .v-a2-narrow .branch-btn { font-size: 11.5px; }
-.v-a2-narrow .tabs { gap: 22px; }
-.v-a2-narrow .tab { font-size: 12.5px; }
+.v-a2-narrow .tabs { gap: 2px; }
+.v-a2-narrow .tab { font-size: 12.5px; padding: 0 10px; }
 .v-a2-narrow .actions { gap: 2px; }
 .v-a2-narrow .tool { font-size: 10.5px; padding: 0 6px; }
 .v-a2-narrow .tool .ic { width: 12px; height: 12px; }
